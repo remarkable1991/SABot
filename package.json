@@ -1,0 +1,18 @@
+{
+  "name": "discord-elo-bot",
+  "version": "1.0.0",
+  "description": "Discord bot that announces game results with ELO changes and screenshots",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "@supabase/supabase-js": "^2.39.0",
+    "dotenv": "^16.3.1"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
