@@ -52,7 +52,7 @@ function normalizeName(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/^[.s]+|[.s]+$/g, '')
+    .replace(/^[.\s]+|[.\s]+$/g, '')
     .replace(/[^a-z0-9]/g, '');
 }
 
@@ -264,7 +264,7 @@ async function createDiscordImageAttachment(storagePath) {
     const buffer = Buffer.from(arrayBuffer);
 
     let extension = 'png';
-    const extMatch = String(storagePath).match(/.([a-zA-Z0-9]+)$/);
+    const extMatch = String(storagePath).match(/\.([a-zA-Z0-9]+)$/);
     if (extMatch && extMatch[1]) extension = extMatch[1].toLowerCase();
 
     const fileName = 'match-result.' + extension;
@@ -350,8 +350,7 @@ async function buildEmbed(payload, guild) {
       : '**' + row.player_name + '**';
 
     let text = place + ' ' + playerPart + ' - ' + (row.leader_name || 'Unknown Leader') + ' - ' + (row.points ?? '?') + ' pts';
-    text += '
-Overall: ' + formatDelta(row.elo_delta_overall);
+    text += '\nOverall: ' + formatDelta(row.elo_delta_overall);
 
     if (currentOverall !== undefined) {
       text += ' (-> ' + Number(currentOverall).toFixed(1) + ')';
@@ -372,9 +371,7 @@ Overall: ' + formatDelta(row.elo_delta_overall);
 
   const embed = new EmbedBuilder()
     .setTitle('Game Finished - ' + modeLabel)
-    .setDescription(lines.join('
-
-'))
+    .setDescription(lines.join('\n\n'))
     .setColor(0xC9A24B)
     .setTimestamp(new Date());
 
