@@ -1,6 +1,7 @@
 require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
+const WebSocket = require('ws');
 
 // ---------- Config ----------
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -10,6 +11,8 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 60;
 const GAME_ROWS_WAIT_MS = 2000; // small buffer so all players in a game have landed
+const REALTIME_RETRY_DELAY_MS = 5000;
+const REALTIME_MAX_RETRIES = 10;
 
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables. Check DISCORD_BOT_TOKEN, SUPABASE_URL, SUPABASE_SECRET_KEY.');
@@ -17,14 +20,23 @@ if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 }
 
 // ---------- Clients ----------
-const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+  realtime: {
+    params: {
+      eventsPerSecond: 10
+    }
+  },
+  global: {
+    WebSocket: WebSocket
+  }
+});
 
 const discordClient = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
 // ---------- Helpers ----------
-const PLACEMENT_EMOJI = { 1: '\ud83e\udd47', 2: '\ud83e\udd48', 3: '\ud83e\udd49', 4: '4\ufe0f\u20e3' };
+const PLACEMENT_EMOJI = { 1: '🥇', 2: '🥈', 3: '🥉', 4: '4️⃣' };
 
 function capitalize(word) {
   if (!word) return word;
@@ -37,7 +49,6 @@ function formatDelta(value) {
   return `${sign}${num.toFixed(2)}`;
 }
 
-// Fetch all game_results rows for a given game_id, joined conceptually with games and player_ratings
 async function buildGameResultPayload(gameId) {
   const { data: game, error: gameError } = await supabase
     .from('games')
@@ -61,7 +72,6 @@ async function buildGameResultPayload(gameId) {
     return null;
   }
 
-  // Fetch current overall + mode ratings for each player (lowercased player_key)
   const playerKeys = results.map(r => r.player_name.toLowerCase());
   const { data: ratings, error: ratingsError } = await supabase
     .from('player_ratings')
@@ -73,7 +83,7 @@ async function buildGameResultPayload(gameId) {
     console.error('Failed to fetch player_ratings', ratingsError);
   }
 
-  const ratingsMap = {}; // player_key -> { overall: elo, mode: elo }
+  const ratingsMap = {};
   (ratings || []).forEach(r => {
     if (!ratingsMap[r.player_key]) ratingsMap[r.player_key] = {};
     ratingsMap[r.player_key][r.game_version] = r.elo;
@@ -107,15 +117,15 @@ function buildEmbed(payload) {
     const currentMode = ratingsMap[key]?.[game.game_version];
 
     const overallPart = `Overall: ${formatDelta(r.elo_delta_overall)}` +
-      (currentOverall !== undefined ? ` (\u2192 ${Number(currentOverall).toFixed(1)})` : '');
+      (currentOverall !== undefined ? ` (→ ${Number(currentOverall).toFixed(1)})` : '');
     const modePart = `${modeLabel}: ${formatDelta(r.elo_delta)}` +
-      (currentMode !== undefined ? ` (\u2192 ${Number(currentMode).toFixed(1)})` : '');
+      (currentMode !== undefined ? ` (→ ${Number(currentMode).toFixed(1)})` : '');
 
-    return `${emoji} **${r.player_name}** \u2014 ${r.leader_name || 'Unknown Leader'} \u2014 ${r.points} pts\n${overallPart} | ${modePart}`;
+    return `${emoji} **${r.player_name}** — ${r.leader_name || 'Unknown Leader'} — ${r.points} pts\n${overallPart} | ${modePart}`;
   });
 
   const embed = new EmbedBuilder()
-    .setTitle(`Game Finished \ud83c\udfb2 (${modeLabel})`)
+    .setTitle(`Game Finished 🎲 (${modeLabel})`)
     .setDescription(lines.join('\n\n'))
     .setColor(0xC9A24B)
     .setTimestamp(new Date());
@@ -141,13 +151,10 @@ async function announceGame(gameId) {
   console.log(`Announced game ${gameId}`);
 }
 
-// ---------- Realtime listener ----------
-// Buffers game_ids seen in the last GAME_ROWS_WAIT_MS window so all player rows
-// for a single game are grouped into one announcement.
 const pendingGames = new Set();
 
 function scheduleAnnouncement(gameId) {
-  if (pendingGames.has(gameId)) return; // already scheduled
+  if (pendingGames.has(gameId)) return;
   pendingGames.add(gameId);
   setTimeout(async () => {
     pendingGames.delete(gameId);
@@ -159,8 +166,15 @@ function scheduleAnnouncement(gameId) {
   }, GAME_ROWS_WAIT_MS);
 }
 
+let realtimeRetryCount = 0;
+let realtimeChannel = null;
+
 function startRealtimeListener() {
-  supabase
+  if (realtimeChannel) {
+    supabase.removeChannel(realtimeChannel);
+  }
+
+  realtimeChannel = supabase
     .channel('game_results-inserts')
     .on(
       'postgres_changes',
@@ -170,13 +184,32 @@ function startRealtimeListener() {
         if (gameId) scheduleAnnouncement(gameId);
       }
     )
-    .subscribe((status) => {
+    .subscribe((status, err) => {
       console.log('Supabase realtime subscription status:', status);
+
+      if (status === 'SUBSCRIBED') {
+        realtimeRetryCount = 0;
+        return;
+      }
+
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        if (err) console.error('Realtime error:', err);
+
+        if (realtimeRetryCount >= REALTIME_MAX_RETRIES) {
+          console.error(`Realtime failed after ${REALTIME_MAX_RETRIES} retries. Giving up.`);
+          return;
+        }
+
+        realtimeRetryCount += 1;
+        const delay = REALTIME_RETRY_DELAY_MS * realtimeRetryCount;
+        console.log(`Retrying realtime subscription in ${delay}ms (attempt ${realtimeRetryCount}/${REALTIME_MAX_RETRIES})...`);
+        setTimeout(startRealtimeListener, delay);
+      }
     });
 }
 
 // ---------- Discord client lifecycle ----------
-discordClient.once('ready', () => {
+discordClient.once('clientReady', () => {
   console.log(`Logged in as ${discordClient.user.tag}`);
   startRealtimeListener();
 });
