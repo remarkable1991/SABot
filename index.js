@@ -3,7 +3,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
-const statsCommand = require('./commands/stats');
+const statsCommand = require('./stats');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
