@@ -65,7 +65,9 @@ function buildGameTags(game, guild) {
   if (game.has_epic_mode) tags.push(`${getEmoji(guild, 'Epic', ':Epic:')} Epic Mode`);
   if (game.has_immortality) tags.push(`${getEmoji(guild, 'Immo', ':Immo:')} Immortality`);
   if (game.has_rise_of_ix) tags.push(`${getEmoji(guild, 'Ix', ':Ix:')} Rise of IX`);
-  if (game.has_uprising) tags.push(`${getEmoji(guild, 'Uprising', ':Uprising:')} Uprising`);
+  if (String(game.game_version || '').toLowerCase() === 'uprising') {
+    tags.push(`${getEmoji(guild, 'Uprising', ':Uprising:')} Uprising`);
+  }
   if (game.has_base_leaders) tags.push('Base Leaders');
   return tags;
 }
@@ -93,7 +95,7 @@ async function resolveMentionForName(guild, playerName) {
 async function buildGameResultPayload(gameId) {
   const { data: game, error: gameError } = await supabase
     .from('games')
-    .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, has_uprising')
+    .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders')
     .eq('id', gameId)
     .single();
 
