@@ -1,5 +1,5 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder, userMention } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 
@@ -9,7 +9,7 @@ const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '123302953278557391
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const STORAGE_BUCKET = 'match-screenshots';
-const SIGNED_URL_EXPIRY_SECONDS = 60;
+const SIGNED_URL_EXPIRY_SECONDS = 300;
 const GAME_ROWS_WAIT_MS = 2000;
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
@@ -48,7 +48,7 @@ function normalizeName(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .replace(/^[.s]+|[.s]+$/g, '')
     .replace(/[^a-z0-9]/g, '');
 }
 
@@ -98,7 +98,7 @@ function getPlacementEmoji(guild, placement) {
     1: 'Tournament',
     2: '2ndTrophy',
     3: '3rdTrophy',
-    4: '4thtrophy'
+    4: '4thTrophy'
   };
 
   const fallbacks = {
@@ -234,6 +234,40 @@ async function resolveMentionForName(guild, playerName) {
   return null;
 }
 
+async function createDiscordImageAttachment(storagePath) {
+  if (!storagePath) return null;
+
+  const { data: signed, error: signedError } = await supabase
+    .storage
+    .from(STORAGE_BUCKET)
+    .createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
+
+  if (signedError || !signed?.signedUrl) {
+    console.error('Failed to create signed URL', signedError);
+    return null;
+  }
+
+  try {
+    const response = await fetch(signed.signedUrl);
+    if (!response.ok) {
+      console.error('Failed to download screenshot from signed URL', response.status, response.statusText);
+      return null;
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+
+    const extMatch = String(storagePath).match(/.([a-zA-Z0-9]+)$/);
+    const ext = extMatch ? extMatch[1].toLowerCase() : 'png';
+    const fileName = `match-result.${ext}`;
+
+    return new AttachmentBuilder(buffer, { name: fileName });
+  } catch (err) {
+    console.error('Failed to build Discord attachment from screenshot', err);
+    return null;
+  }
+}
+
 async function buildGameResultPayload(gameId) {
   const { data: game, error: gameError } = await supabase
     .from('games')
@@ -274,25 +308,15 @@ async function buildGameResultPayload(gameId) {
     ratingsMap[r.player_key][r.game_version] = r.elo;
   });
 
-  let screenshotUrl = null;
-  if (game.image_url) {
-    const { data: signed, error: signedError } = await supabase
-      .storage
-      .from(STORAGE_BUCKET)
-      .createSignedUrl(game.image_url, SIGNED_URL_EXPIRY_SECONDS);
+  const screenshotAttachment = game.image_url
+    ? await createDiscordImageAttachment(game.image_url)
+    : null;
 
-    if (signedError) {
-      console.error('Failed to create signed URL', signedError);
-    } else {
-      screenshotUrl = signed.signedUrl;
-    }
-  }
-
-  return { game, results, ratingsMap, screenshotUrl };
+  return { game, results, ratingsMap, screenshotAttachment };
 }
 
 async function buildEmbed(payload, guild) {
-  const { game, results, ratingsMap, screenshotUrl } = payload;
+  const { game, results, ratingsMap, screenshotAttachment } = payload;
   const modeLabel = capitalize(game.game_version);
   const tags = buildGameTags(game, guild);
 
@@ -311,7 +335,8 @@ async function buildEmbed(payload, guild) {
     const modePart = `${modeLabel}: ${formatDelta(r.elo_delta)}` +
       (currentMode !== undefined ? ` (→ ${Number(currentMode).toFixed(1)})` : '');
 
-    lines.push(`${emoji} ${namePart} — ${r.leader_name || 'Unknown Leader'} — ${r.points} pts\n${overallPart} | ${modePart}`);
+    lines.push(`${emoji} ${namePart} — ${r.leader_name || 'Unknown Leader'} — ${r.points} pts
+${overallPart} | ${modePart}`);
   }
 
   if (tags.length) {
@@ -320,12 +345,17 @@ async function buildEmbed(payload, guild) {
 
   const embed = new EmbedBuilder()
     .setTitle(`Game Finished 🎲 (${modeLabel})`)
-    .setDescription(lines.join('\n\n'))
+    .setDescription(lines.join('
+
+'))
     .setColor(0xC9A24B)
     .setTimestamp(new Date());
 
-  if (screenshotUrl) embed.setImage(screenshotUrl);
-  return embed;
+  if (screenshotAttachment) {
+    embed.setImage(`attachment://${screenshotAttachment.name}`);
+  }
+
+  return { embed, screenshotAttachment };
 }
 
 async function announceGame(gameId) {
@@ -338,8 +368,14 @@ async function announceGame(gameId) {
     return;
   }
 
-  const embed = await buildEmbed(payload, channel.guild);
-  await channel.send({ embeds: [embed] });
+  const { embed, screenshotAttachment } = await buildEmbed(payload, channel.guild);
+
+  const messagePayload = { embeds: [embed] };
+  if (screenshotAttachment) {
+    messagePayload.files = [screenshotAttachment];
+  }
+
+  await channel.send(messagePayload);
   console.log(`Announced game ${gameId}`);
 }
 
