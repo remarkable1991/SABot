@@ -10,7 +10,7 @@ const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 60;
-const GAME_ROWS_WAIT_MS = 2000; // small buffer so all players in a game have landed
+const GAME_ROWS_WAIT_MS = 2000;
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
 
@@ -22,6 +22,7 @@ if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 // ---------- Clients ----------
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
   realtime: {
+    transport: WebSocket,
     params: {
       eventsPerSecond: 10
     }
@@ -208,7 +209,6 @@ function startRealtimeListener() {
     });
 }
 
-// ---------- Discord client lifecycle ----------
 discordClient.once('clientReady', () => {
   console.log(`Logged in as ${discordClient.user.tag}`);
   startRealtimeListener();
