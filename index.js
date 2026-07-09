@@ -1,13 +1,15 @@
 require('dotenv').config();
+
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
-// ---------- Config ----------
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '1233029532785573918';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 300;
 const GAME_ROWS_WAIT_MS = 2000;
@@ -19,16 +21,14 @@ const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
-  console.error('Missing required environment variables. Check DISCORD_BOT_TOKEN, SUPABASE_URL, SUPABASE_SECRET_KEY.');
+  console.error('Missing required environment variables.');
   process.exit(1);
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
   realtime: {
     transport: WebSocket,
-    params: {
-      eventsPerSecond: 10
-    }
+    params: { eventsPerSecond: 10 }
   },
   global: {
     WebSocket
@@ -39,8 +39,12 @@ const discordClient = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
 
+const pendingGames = new Set();
+let realtimeRetryCount = 0;
+let realtimeChannel = null;
+
 function capitalize(word) {
-  if (!word) return word;
+  if (!word) return '';
   return word.charAt(0).toUpperCase() + word.slice(1);
 }
 
@@ -84,41 +88,36 @@ function similarity(a, b) {
 }
 
 function formatDelta(value) {
-  const num = Number(value);
-  const sign = num > 0 ? '+' : '';
-  return `${sign}${num.toFixed(2)}`;
+  const num = Number(value || 0);
+  return (num > 0 ? '+' : '') + num.toFixed(2);
 }
 
 function getEmoji(guild, name, fallback) {
-  return guild?.emojis?.cache?.find(emoji => emoji.name === name)?.toString() || fallback;
+  if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
+  const emoji = guild.emojis.cache.find((e) => e.name === name);
+  return emoji ? emoji.toString() : fallback;
 }
 
 function getPlacementEmoji(guild, placement) {
-  const placementEmojiNames = {
-    1: 'Tournament',
-    2: '2ndTrophy',
-    3: '3rdTrophy',
-    4: '4thTrophy'
+  const map = {
+    1: { name: 'Tournament', fallback: '1st' },
+    2: { name: '2ndTrophy', fallback: '2nd' },
+    3: { name: '3rdTrophy', fallback: '3rd' },
+    4: { name: '4thTrophy', fallback: '4th' }
   };
 
-  const fallbacks = {
-    1: '🥇',
-    2: '🥈',
-    3: '🥉',
-    4: '🏅'
-  };
-
-  return getEmoji(guild, placementEmojiNames[placement], fallbacks[placement] || `${placement}.`);
+  if (!map[placement]) return String(placement);
+  return getEmoji(guild, map[placement].name, map[placement].fallback);
 }
 
 function buildGameTags(game, guild) {
   const tags = [];
 
-  if (game.has_epic_mode) tags.push(`${getEmoji(guild, 'Epic', ':Epic:')} Epic Mode`);
-  if (game.has_immortality) tags.push(`${getEmoji(guild, 'Immo', ':Immo:')} Immortality`);
-  if (game.has_rise_of_ix) tags.push(`${getEmoji(guild, 'Ix', ':Ix:')} Rise of IX`);
+  if (game.has_epic_mode) tags.push(getEmoji(guild, 'Epic', 'Epic') + ' Epic Mode');
+  if (game.has_immortality) tags.push(getEmoji(guild, 'Immo', 'Immo') + ' Immortality');
+  if (game.has_rise_of_ix) tags.push(getEmoji(guild, 'Ix', 'Ix') + ' Rise of IX');
   if (String(game.game_version || '').toLowerCase() === 'uprising') {
-    tags.push(`${getEmoji(guild, 'Uprising', ':Uprising:')} Uprising`);
+    tags.push(getEmoji(guild, 'Uprising', 'Uprising') + ' Uprising');
   }
   if (game.has_base_leaders) tags.push('Base Leaders');
 
@@ -132,15 +131,20 @@ async function getDatabasePlayerMap(playerName) {
   const { data, error } = await supabase
     .from('player_discord_map')
     .select('player_key, display_name, username, discord_username, discord_user_id')
-    .or(`player_key.eq.${normalized},display_name.ilike.${playerName},discord_username.ilike.${playerName},username.ilike.${playerName}`)
+    .or(
+      'player_key.eq.' + normalized +
+      ',display_name.ilike.' + playerName +
+      ',discord_username.ilike.' + playerName +
+      ',username.ilike.' + playerName
+    )
     .limit(10);
 
   if (error) {
-    console.error('Failed to query player_discord_map', playerName, error);
+    console.error('Failed player_discord_map lookup for', playerName, error);
     return null;
   }
 
-  if (!data || data.length === 0) return null;
+  if (!data || !data.length) return null;
 
   let best = null;
   let bestScore = 0;
@@ -154,8 +158,8 @@ async function getDatabasePlayerMap(playerName) {
     );
 
     if (score > bestScore) {
-      bestScore = score;
       best = row;
+      bestScore = score;
     }
   }
 
@@ -179,14 +183,14 @@ async function searchGuildMemberByNames(guild, names) {
       });
 
       for (const member of members.values()) {
-        const candidates = [
-          member.user?.username,
+        const candidateNames = [
+          member.user && member.user.username,
           member.nickname,
           member.displayName,
-          member.user?.globalName
+          member.user && member.user.globalName
         ].filter(Boolean);
 
-        const score = Math.max(...candidates.map(candidate => similarity(query, candidate)));
+        const score = Math.max(...candidateNames.map((candidate) => similarity(query, candidate)));
         const existing = seen.get(member.id);
 
         if (!existing || score > existing.score) {
@@ -194,7 +198,7 @@ async function searchGuildMemberByNames(guild, names) {
         }
       }
     } catch (err) {
-      console.error('Guild member search failed for', query, err);
+      console.error('Guild search failed for', query, err);
     }
   }
 
@@ -210,25 +214,26 @@ async function searchGuildMemberByNames(guild, names) {
 async function resolveMentionForName(guild, playerName) {
   const dbMatch = await getDatabasePlayerMap(playerName);
 
-  if (dbMatch?.discord_user_id) {
+  if (dbMatch && dbMatch.discord_user_id) {
     return userMention(dbMatch.discord_user_id);
   }
 
   const searchNames = [
     playerName,
-    dbMatch?.display_name,
-    dbMatch?.discord_username,
-    dbMatch?.username,
-    dbMatch?.player_key
+    dbMatch && dbMatch.display_name,
+    dbMatch && dbMatch.discord_username,
+    dbMatch && dbMatch.username,
+    dbMatch && dbMatch.player_key
   ].filter(Boolean);
 
   const member = await searchGuildMemberByNames(guild, searchNames);
-  if (member?.id) {
+
+  if (member && member.id) {
     return userMention(member.id);
   }
 
-  if (dbMatch?.discord_username) {
-    return `(${dbMatch.discord_username})`;
+  if (dbMatch && dbMatch.discord_username) {
+    return '(' + dbMatch.discord_username + ')';
   }
 
   return null;
@@ -237,33 +242,35 @@ async function resolveMentionForName(guild, playerName) {
 async function createDiscordImageAttachment(storagePath) {
   if (!storagePath) return null;
 
-  const { data: signed, error: signedError } = await supabase
+  const { data, error } = await supabase
     .storage
     .from(STORAGE_BUCKET)
     .createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
 
-  if (signedError || !signed?.signedUrl) {
-    console.error('Failed to create signed URL', signedError);
+  if (error || !data || !data.signedUrl) {
+    console.error('Failed to create signed URL for image', storagePath, error);
     return null;
   }
 
   try {
-    const response = await fetch(signed.signedUrl);
+    const response = await fetch(data.signedUrl);
+
     if (!response.ok) {
-      console.error('Failed to download screenshot from signed URL', response.status, response.statusText);
+      console.error('Failed to fetch signed image URL', response.status, response.statusText);
       return null;
     }
 
     const arrayBuffer = await response.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
+    let extension = 'png';
     const extMatch = String(storagePath).match(/.([a-zA-Z0-9]+)$/);
-    const ext = extMatch ? extMatch[1].toLowerCase() : 'png';
-    const fileName = `match-result.${ext}`;
+    if (extMatch && extMatch[1]) extension = extMatch[1].toLowerCase();
 
+    const fileName = 'match-result.' + extension;
     return new AttachmentBuilder(buffer, { name: fileName });
   } catch (err) {
-    console.error('Failed to build Discord attachment from screenshot', err);
+    console.error('Failed to build attachment from screenshot', err);
     return null;
   }
 }
@@ -286,12 +293,13 @@ async function buildGameResultPayload(gameId) {
     .eq('game_id', gameId)
     .order('placement', { ascending: true });
 
-  if (resultsError || !results || results.length === 0) {
-    console.error('Failed to fetch game_results for', gameId, resultsError);
+  if (resultsError || !results || !results.length) {
+    console.error('Failed to fetch results for', gameId, resultsError);
     return null;
   }
 
-  const playerKeys = results.map(r => r.player_name.toLowerCase());
+  const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
+
   const { data: ratings, error: ratingsError } = await supabase
     .from('player_ratings')
     .select('player_key, display_name, game_version, elo')
@@ -299,52 +307,71 @@ async function buildGameResultPayload(gameId) {
     .in('game_version', ['overall', game.game_version]);
 
   if (ratingsError) {
-    console.error('Failed to fetch player_ratings', ratingsError);
+    console.error('Failed to fetch ratings', ratingsError);
   }
 
   const ratingsMap = {};
-  (ratings || []).forEach(r => {
-    if (!ratingsMap[r.player_key]) ratingsMap[r.player_key] = {};
-    ratingsMap[r.player_key][r.game_version] = r.elo;
-  });
+  for (const row of ratings || []) {
+    if (!ratingsMap[row.player_key]) ratingsMap[row.player_key] = {};
+    ratingsMap[row.player_key][row.game_version] = row.elo;
+  }
 
   const screenshotAttachment = game.image_url
     ? await createDiscordImageAttachment(game.image_url)
     : null;
 
-  return { game, results, ratingsMap, screenshotAttachment };
+  return {
+    game,
+    results,
+    ratingsMap,
+    screenshotAttachment
+  };
 }
 
 async function buildEmbed(payload, guild) {
-  const { game, results, ratingsMap, screenshotAttachment } = payload;
-  const modeLabel = capitalize(game.game_version);
-  const tags = buildGameTags(game, guild);
+  const game = payload.game;
+  const results = payload.results;
+  const ratingsMap = payload.ratingsMap;
+  const screenshotAttachment = payload.screenshotAttachment;
 
+  const modeLabel = capitalize(game.game_version || 'unknown');
+  const tags = buildGameTags(game, guild);
   const lines = [];
 
-  for (const r of results) {
-    const emoji = getPlacementEmoji(guild, r.placement);
-    const key = r.player_name.toLowerCase();
-    const currentOverall = ratingsMap[key]?.overall;
-    const currentMode = ratingsMap[key]?.[game.game_version];
-    const mention = await resolveMentionForName(guild, r.player_name);
-    const namePart = mention ? `**${r.player_name}** ${mention}` : `**${r.player_name}**`;
+  for (const row of results) {
+    const place = getPlacementEmoji(guild, row.placement);
+    const playerKey = String(row.player_name || '').toLowerCase();
+    const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined;
+    const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
+    const mention = await resolveMentionForName(guild, row.player_name);
 
-    const overallPart = `Overall: ${formatDelta(r.elo_delta_overall)}` +
-      (currentOverall !== undefined ? ` (→ ${Number(currentOverall).toFixed(1)})` : '');
-    const modePart = `${modeLabel}: ${formatDelta(r.elo_delta)}` +
-      (currentMode !== undefined ? ` (→ ${Number(currentMode).toFixed(1)})` : '');
+    const playerPart = mention
+      ? '**' + row.player_name + '** ' + mention
+      : '**' + row.player_name + '**';
 
-    lines.push(`${emoji} ${namePart} — ${r.leader_name || 'Unknown Leader'} — ${r.points} pts
-${overallPart} | ${modePart}`);
+    let text = place + ' ' + playerPart + ' - ' + (row.leader_name || 'Unknown Leader') + ' - ' + (row.points ?? '?') + ' pts';
+    text += '
+Overall: ' + formatDelta(row.elo_delta_overall);
+
+    if (currentOverall !== undefined) {
+      text += ' (-> ' + Number(currentOverall).toFixed(1) + ')';
+    }
+
+    text += ' | ' + modeLabel + ': ' + formatDelta(row.elo_delta);
+
+    if (currentMode !== undefined) {
+      text += ' (-> ' + Number(currentMode).toFixed(1) + ')';
+    }
+
+    lines.push(text);
   }
 
   if (tags.length) {
-    lines.push(`Game modes played: ${tags.join(' • ')}`);
+    lines.push('Game modes played: ' + tags.join(' | '));
   }
 
   const embed = new EmbedBuilder()
-    .setTitle(`Game Finished 🎲 (${modeLabel})`)
+    .setTitle('Game Finished - ' + modeLabel)
     .setDescription(lines.join('
 
 '))
@@ -352,7 +379,7 @@ ${overallPart} | ${modePart}`);
     .setTimestamp(new Date());
 
   if (screenshotAttachment) {
-    embed.setImage(`attachment://${screenshotAttachment.name}`);
+    embed.setImage('attachment://' + screenshotAttachment.name);
   }
 
   return { embed, screenshotAttachment };
@@ -368,25 +395,27 @@ async function announceGame(gameId) {
     return;
   }
 
-  const { embed, screenshotAttachment } = await buildEmbed(payload, channel.guild);
+  const built = await buildEmbed(payload, channel.guild);
+  const messagePayload = {
+    embeds: [built.embed]
+  };
 
-  const messagePayload = { embeds: [embed] };
-  if (screenshotAttachment) {
-    messagePayload.files = [screenshotAttachment];
+  if (built.screenshotAttachment) {
+    messagePayload.files = [built.screenshotAttachment];
   }
 
   await channel.send(messagePayload);
-  console.log(`Announced game ${gameId}`);
+  console.log('Announced game', gameId);
 }
-
-const pendingGames = new Set();
 
 function scheduleAnnouncement(gameId) {
   if (pendingGames.has(gameId)) return;
+
   pendingGames.add(gameId);
 
   setTimeout(async () => {
     pendingGames.delete(gameId);
+
     try {
       await announceGame(gameId);
     } catch (err) {
@@ -395,18 +424,21 @@ function scheduleAnnouncement(gameId) {
   }, GAME_ROWS_WAIT_MS);
 }
 
-let realtimeRetryCount = 0;
-let realtimeChannel = null;
-
 function startRealtimeListener() {
-  if (realtimeChannel) supabase.removeChannel(realtimeChannel);
+  if (realtimeChannel) {
+    supabase.removeChannel(realtimeChannel);
+  }
 
   realtimeChannel = supabase
-    .channel('game_results-inserts')
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
-      const gameId = payload.new.game_id;
-      if (gameId) scheduleAnnouncement(gameId);
-    })
+    .channel('game_results_inserts')
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'game_results' },
+      (payload) => {
+        const gameId = payload && payload.new ? payload.new.game_id : null;
+        if (gameId) scheduleAnnouncement(gameId);
+      }
+    )
     .subscribe((status, err) => {
       console.log('Supabase realtime subscription status:', status);
 
@@ -416,23 +448,26 @@ function startRealtimeListener() {
       }
 
       if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
-        if (err) console.error('Realtime error:', err);
+        if (err) {
+          console.error('Realtime error:', err);
+        }
 
         if (realtimeRetryCount >= REALTIME_MAX_RETRIES) {
-          console.error(`Realtime failed after ${REALTIME_MAX_RETRIES} retries. Giving up.`);
+          console.error('Realtime failed after max retries');
           return;
         }
 
         realtimeRetryCount += 1;
         const delay = REALTIME_RETRY_DELAY_MS * realtimeRetryCount;
-        console.log(`Retrying realtime subscription in ${delay}ms (attempt ${realtimeRetryCount}/${REALTIME_MAX_RETRIES})...`);
+        console.log('Retrying realtime in', delay, 'ms');
+
         setTimeout(startRealtimeListener, delay);
       }
     });
 }
 
 discordClient.once('clientReady', () => {
-  console.log(`Logged in as ${discordClient.user.tag}`);
+  console.log('Logged in as', discordClient.user.tag);
   startRealtimeListener();
 });
 
