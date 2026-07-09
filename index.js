@@ -19,7 +19,6 @@ if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   process.exit(1);
 }
 
-// ---------- Clients ----------
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
   realtime: {
     transport: WebSocket,
@@ -36,9 +35,6 @@ const discordClient = new Client({
   intents: [GatewayIntentBits.Guilds]
 });
 
-// ---------- Helpers ----------
-const PLACEMENT_EMOJI = { 1: '🥇', 2: '🥈', 3: '🥉', 4: '4️⃣' };
-
 function capitalize(word) {
   if (!word) return word;
   return word.charAt(0).toUpperCase() + word.slice(1);
@@ -48,6 +44,50 @@ function formatDelta(value) {
   const num = Number(value);
   const sign = num > 0 ? '+' : '';
   return `${sign}${num.toFixed(2)}`;
+}
+
+function getEmoji(guild, name, fallback) {
+  return guild?.emojis?.cache?.find(emoji => emoji.name === name)?.toString() || fallback;
+}
+
+function getPlacementEmoji(guild, placement) {
+  const placementEmojiNames = {
+    1: 'Tournament',
+    2: '2ndTrophy',
+    3: '3rdTrophy',
+    4: '4thTrophy'
+  };
+
+  const fallbacks = {
+    1: '🥇',
+    2: '🥈',
+    3: '🥉',
+    4: '4️⃣'
+  };
+
+  return getEmoji(guild, placementEmojiNames[placement], fallbacks[placement] || `${placement}.`);
+}
+
+function buildGameTags(game, guild) {
+  const tags = [];
+
+  if (game.has_epic_mode) {
+    tags.push(getEmoji(guild, 'Epic', ':Epic:'));
+  }
+
+  if (game.has_immortality) {
+    tags.push(getEmoji(guild, 'Immo', ':Immo:'));
+  }
+
+  if (game.has_rise_of_ix) {
+    tags.push(getEmoji(guild, 'Ix', ':Ix:'));
+  }
+
+  if (game.has_base_leaders) {
+    tags.push('Base Leaders');
+  }
+
+  return tags;
 }
 
 async function buildGameResultPayload(gameId) {
@@ -107,12 +147,14 @@ async function buildGameResultPayload(gameId) {
   return { game, results, ratingsMap, screenshotUrl };
 }
 
-function buildEmbed(payload) {
+function buildEmbed(payload, guild) {
   const { game, results, ratingsMap, screenshotUrl } = payload;
   const modeLabel = capitalize(game.game_version);
+  const tags = buildGameTags(game, guild);
+  const tagLine = tags.length ? `\n${tags.join(' ')}` : '';
 
   const lines = results.map(r => {
-    const emoji = PLACEMENT_EMOJI[r.placement] || `${r.placement}.`;
+    const emoji = getPlacementEmoji(guild, r.placement);
     const key = r.player_name.toLowerCase();
     const currentOverall = ratingsMap[key]?.overall;
     const currentMode = ratingsMap[key]?.[game.game_version];
@@ -127,7 +169,7 @@ function buildEmbed(payload) {
 
   const embed = new EmbedBuilder()
     .setTitle(`Game Finished 🎲 (${modeLabel})`)
-    .setDescription(lines.join('\n\n'))
+    .setDescription(`${lines.join('\n\n')}${tagLine}`)
     .setColor(0xC9A24B)
     .setTimestamp(new Date());
 
@@ -142,12 +184,13 @@ async function announceGame(gameId) {
   const payload = await buildGameResultPayload(gameId);
   if (!payload) return;
 
-  const embed = buildEmbed(payload);
   const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID);
   if (!channel) {
     console.error('Could not find target channel', DISCORD_CHANNEL_ID);
     return;
   }
+
+  const embed = buildEmbed(payload, channel.guild);
   await channel.send({ embeds: [embed] });
   console.log(`Announced game ${gameId}`);
 }
