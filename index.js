@@ -3,6 +3,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
+const statsCommand = require('./commands/stats');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
@@ -38,6 +39,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
 const discordClient = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
 });
+
+const slashCommands = new Map([
+  [statsCommand.data.name, statsCommand]
+]);
 
 const pendingGames = new Set();
 let realtimeRetryCount = 0;
@@ -130,7 +135,7 @@ async function getDatabasePlayerMap(playerName) {
 
   const { data, error } = await supabase
     .from('player_discord_map')
-    .select('player_key, display_name, username, discord_username, discord_user_id')
+    .select('player_key, display_name, username, discord_username, claimed_by')
     .or(
       'player_key.eq.' + normalized +
       ',display_name.ilike.' + playerName +
@@ -214,8 +219,8 @@ async function searchGuildMemberByNames(guild, names) {
 async function resolveMentionForName(guild, playerName) {
   const dbMatch = await getDatabasePlayerMap(playerName);
 
-  if (dbMatch && dbMatch.discord_user_id) {
-    return userMention(dbMatch.discord_user_id);
+  if (dbMatch && dbMatch.claimed_by) {
+    return userMention(dbMatch.claimed_by);
   }
 
   const searchNames = [
@@ -462,6 +467,26 @@ function startRealtimeListener() {
       }
     });
 }
+
+discordClient.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const command = slashCommands.get(interaction.commandName);
+  if (!command) return;
+
+  try {
+    await command.execute(interaction, { supabase, discordClient });
+  } catch (error) {
+    console.error(`Error running /${interaction.commandName}:`, error);
+
+    const message = 'Something went wrong while loading stats.';
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content: message }).catch(() => {});
+    } else {
+      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+    }
+  }
+});
 
 discordClient.once('clientReady', () => {
   console.log('Logged in as', discordClient.user.tag);
