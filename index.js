@@ -412,7 +412,7 @@ async function buildEmbed(payload, guild) {
     embed.setImage(screenshotMedia.imageUrl);
   }
 
-  return { embed, screenshotAttachment };
+  return { embed, screenshotMedia };
 }
 
 async function announceGame(gameId) {
