@@ -140,7 +140,7 @@ async function getDatabasePlayerMap(playerName) {
 
   const { data, error } = await supabase
     .from('player_discord_map')
-    .select('player_key, display_name, username, discord_username, claimed_by')
+    .select('id, player_key, display_name, username, discord_username, claimed_by, discord_user_id')
     .or(
       `player_key.eq.${normalized},display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`
     )
@@ -218,11 +218,28 @@ async function searchGuildMemberByNames(guild, names) {
   return ranked[0].member;
 }
 
+async function persistDiscordUserId(dbMatch, discordUserId) {
+  const normalizedId = normalizeDiscordId(discordUserId);
+  if (!dbMatch || !dbMatch.id || !normalizedId) return;
+  if (normalizeDiscordId(dbMatch.discord_user_id) === normalizedId) return;
+
+  const { error } = await supabase
+    .from('player_discord_map')
+    .update({ discord_user_id: normalizedId, updated_at: new Date().toISOString() })
+    .eq('id', dbMatch.id);
+
+  if (error) {
+    console.error('Failed to persist discord_user_id for', dbMatch.player_key || dbMatch.display_name, error);
+  }
+}
+
 async function resolveMentionForName(guild, playerName) {
   const dbMatch = await getDatabasePlayerMap(playerName);
 
-  if (dbMatch && dbMatch.claimed_by) {
-    return userMention(dbMatch.claimed_by);
+  const mappedDiscordId = normalizeDiscordId(dbMatch && dbMatch.discord_user_id);
+
+  if (mappedDiscordId) {
+    return userMention(mappedDiscordId);
   }
 
   const searchNames = [
@@ -236,6 +253,7 @@ async function resolveMentionForName(guild, playerName) {
   const member = await searchGuildMemberByNames(guild, searchNames);
 
   if (member && member.id) {
+    await persistDiscordUserId(dbMatch, member.id);
     return userMention(member.id);
   }
 
