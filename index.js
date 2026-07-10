@@ -1,4 +1,6 @@
-require('dotenv').config();
+if (!process.env.RAILWAY_ENVIRONMENT) {
+  require('dotenv').config();
+}
 
 const {
   Client,
