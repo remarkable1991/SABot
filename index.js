@@ -5,6 +5,7 @@ const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
+const sharp = require('sharp');
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '1233029532785573918';
@@ -133,14 +134,15 @@ async function getDatabasePlayerMap(playerName) {
   const normalized = normalizeName(playerName);
   if (!normalized) return null;
 
+  const rawName = String(playerName || '').trim();
+  const safeName = rawName.replace(/[,%()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const pattern = `*${safeName || rawName}*`;
+
   const { data, error } = await supabase
     .from('player_discord_map')
     .select('player_key, display_name, username, discord_username, claimed_by')
     .or(
-      'player_key.eq.' + normalized +
-      ',display_name.ilike.' + playerName +
-      ',discord_username.ilike.' + playerName +
-      ',username.ilike.' + playerName
+      `player_key.eq.${normalized},display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`
     )
     .limit(10);
 
@@ -244,7 +246,7 @@ async function resolveMentionForName(guild, playerName) {
   return null;
 }
 
-async function createDiscordImageAttachment(storagePath) {
+async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
 
   const { data, error } = await supabase
@@ -259,24 +261,50 @@ async function createDiscordImageAttachment(storagePath) {
 
   try {
     const response = await fetch(data.signedUrl);
-
     if (!response.ok) {
       console.error('Failed to fetch signed image URL', response.status, response.statusText);
       return null;
     }
 
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    const maxBytes = Math.floor(7.5 * 1024 * 1024);
+    if (!contentType.startsWith('image/')) {
+      return { attachment: null, imageUrl: data.signedUrl, tooLarge: false };
+    }
+
     const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
+    let buffer = Buffer.from(arrayBuffer);
+    if (buffer.length <= maxBytes) {
+      return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }), imageUrl: null, tooLarge: false };
+    }
 
-    let extension = 'png';
-    const extMatch = String(storagePath).match(/\.([a-zA-Z0-9]+)$/);
-    if (extMatch && extMatch[1]) extension = extMatch[1].toLowerCase();
+    try {
+      buffer = await sharp(buffer)
+        .rotate()
+        .resize({ width: 1600, withoutEnlargement: true })
+        .jpeg({ quality: 76, mozjpeg: true })
+        .toBuffer();
 
-    const fileName = 'match-result.' + extension;
-    return new AttachmentBuilder(buffer, { name: fileName });
+      if (buffer.length <= maxBytes) {
+        return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+      }
+
+      buffer = await sharp(buffer)
+        .resize({ width: 1280, withoutEnlargement: true })
+        .jpeg({ quality: 62, mozjpeg: true })
+        .toBuffer();
+
+      if (buffer.length <= maxBytes) {
+        return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+      }
+    } catch (compressionError) {
+      console.error('Failed to compress screenshot', compressionError);
+    }
+
+    return { attachment: null, imageUrl: data.signedUrl, tooLarge: true };
   } catch (err) {
     console.error('Failed to build attachment from screenshot', err);
-    return null;
+    return { attachment: null, imageUrl: null, tooLarge: false };
   }
 }
 
@@ -321,15 +349,15 @@ async function buildGameResultPayload(gameId) {
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
 
-  const screenshotAttachment = game.image_url
-    ? await createDiscordImageAttachment(game.image_url)
+  const screenshotMedia = game.image_url
+    ? await createDiscordImagePayload(game.image_url)
     : null;
 
   return {
     game,
     results,
     ratingsMap,
-    screenshotAttachment
+    screenshotMedia
   };
 }
 
@@ -337,7 +365,7 @@ async function buildEmbed(payload, guild) {
   const game = payload.game;
   const results = payload.results;
   const ratingsMap = payload.ratingsMap;
-  const screenshotAttachment = payload.screenshotAttachment;
+  const screenshotMedia = payload.screenshotMedia;
 
   const modeLabel = capitalize(game.game_version || 'unknown');
   const tags = buildGameTags(game, guild);
@@ -380,8 +408,8 @@ async function buildEmbed(payload, guild) {
     .setColor(0xC9A24B)
     .setTimestamp(new Date());
 
-  if (screenshotAttachment) {
-    embed.setImage('attachment://' + screenshotAttachment.name);
+  if (screenshotMedia?.imageUrl) {
+    embed.setImage(screenshotMedia.imageUrl);
   }
 
   return { embed, screenshotAttachment };
@@ -402,8 +430,10 @@ async function announceGame(gameId) {
     embeds: [built.embed]
   };
 
-  if (built.screenshotAttachment) {
-    messagePayload.files = [built.screenshotAttachment];
+  if (built.screenshotMedia?.attachment) {
+    messagePayload.files = [built.screenshotMedia.attachment];
+  } else if (built.screenshotMedia?.tooLarge) {
+    messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.';
   }
 
   await channel.send(messagePayload);
