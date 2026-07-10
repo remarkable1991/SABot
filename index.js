@@ -1,108 +1,124 @@
-if (!process.env.RAILWAY_ENVIRONMENT) {
-  require('dotenv').config();
-}
+require('dotenv').config();
 
-const {
-  Client,
-  GatewayIntentBits,
-  EmbedBuilder,
-  AttachmentBuilder,
-  userMention
-} = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
-const fetch = require('node-fetch');
+const WebSocket = require('ws');
+const statsCommand = require('./stats');
+const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
-const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '1233029532785573918';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
-const STORAGE_BUCKET = process.env.STORAGE_BUCKET || 'screenshots';
-const SIGNED_URL_EXPIRY_SECONDS = 60 * 60;
-const MAX_DISCORD_FILE_BYTES = 8 * 1024 * 1024;
-const IMAGE_COMPRESS_TARGET_BYTES = 7.5 * 1024 * 1024;
-const DB_MATCH_THRESHOLD = 0.72;
-const GUILD_MATCH_THRESHOLD = 0.86;
-const GUILD_MATCH_GAP = 0.03;
-const MEMBER_SEARCH_LIMIT = 10;
 
-if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
-  throw new Error('Missing required environment variables.');
+const STORAGE_BUCKET = 'match-screenshots';
+const SIGNED_URL_EXPIRY_SECONDS = 300;
+const GAME_ROWS_WAIT_MS = 2000;
+const REALTIME_RETRY_DELAY_MS = 5000;
+const REALTIME_MAX_RETRIES = 10;
+const MEMBER_SEARCH_LIMIT = 10;
+const DB_MATCH_THRESHOLD = 0.72;
+const GUILD_MATCH_THRESHOLD = 0.72;
+const GUILD_MATCH_GAP = 0.08;
+
+if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
+  console.error('Missing required environment variables.');
+  process.exit(1);
 }
 
-const discordClient = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers
-  ]
+const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+  realtime: {
+    transport: WebSocket,
+    params: { eventsPerSecond: 10 }
+  },
+  global: {
+    WebSocket
+  }
 });
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
+const discordClient = new Client({
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+});
+
+const slashCommands = new Map([
+  [statsCommand.data.name, statsCommand]
+]);
+
+const pendingGames = new Set();
+let realtimeRetryCount = 0;
+let realtimeChannel = null;
+
+function capitalize(word) {
+  if (!word) return '';
+  return word.charAt(0).toUpperCase() + word.slice(1);
+}
 
 function normalizeName(value) {
   return String(value || '')
     .trim()
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '');
+    .replace(/^[.\s]+|[.\s]+$/g, '')
+    .replace(/[^a-z0-9]/g, '');
 }
 
 function similarity(a, b) {
-  const left = normalizeName(a);
-  const right = normalizeName(b);
-  if (!left || !right) return 0;
-  if (left === right) return 1;
-  if (left.includes(right) || right.includes(left)) return 0.92;
+  const x = normalizeName(a);
+  const y = normalizeName(b);
 
-  const leftBigrams = new Map();
-  for (let i = 0; i < left.length - 1; i += 1) {
-    const pair = left.slice(i, i + 2);
-    leftBigrams.set(pair, (leftBigrams.get(pair) || 0) + 1);
+  if (!x || !y) return 0;
+  if (x === y) return 1;
+
+  if (x.includes(y) || y.includes(x)) {
+    return Math.min(x.length, y.length) / Math.max(x.length, y.length);
   }
 
-  let intersection = 0;
-  let total = Math.max(left.length - 1, 0) + Math.max(right.length - 1, 0);
+  const dp = Array.from({ length: x.length + 1 }, () => Array(y.length + 1).fill(0));
 
-  for (let i = 0; i < right.length - 1; i += 1) {
-    const pair = right.slice(i, i + 2);
-    const count = leftBigrams.get(pair) || 0;
-    if (count > 0) {
-      leftBigrams.set(pair, count - 1);
-      intersection += 2;
+  for (let i = 0; i <= x.length; i++) dp[i][0] = i;
+  for (let j = 0; j <= y.length; j++) dp[0][j] = j;
+
+  for (let i = 1; i <= x.length; i++) {
+    for (let j = 1; j <= y.length; j++) {
+      const cost = x[i - 1] === y[j - 1] ? 0 : 1;
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
     }
   }
 
-  return total > 0 ? intersection / total : 0;
-}
-
-function capitalize(value) {
-  const text = String(value || '');
-  return text ? text.charAt(0).toUpperCase() + text.slice(1) : text;
+  const distance = dp[x.length][y.length];
+  return 1 - distance / Math.max(x.length, y.length);
 }
 
 function formatDelta(value) {
   const num = Number(value || 0);
-  return `${num >= 0 ? '+' : ''}${num.toFixed(2)}`;
+  return (num > 0 ? '+' : '') + num.toFixed(2);
 }
 
-function getEmoji(guild, emojiName, fallback) {
-  const emoji = guild?.emojis?.cache?.find((e) => e.name === emojiName);
-  return emoji ? `${emoji}` : fallback;
+function getEmoji(guild, name, fallback) {
+  if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
+  const emoji = guild.emojis.cache.find((e) => e.name === name);
+  return emoji ? emoji.toString() : fallback;
 }
 
 function getPlacementEmoji(guild, placement) {
   const map = {
-    1: ['Tournament', '🥇'],
-    2: ['2ndTrophy', '🥈'],
-    3: ['3rdTrophy', '🥉'],
-    4: ['4thTrophy', '4th']
+    1: { name: 'Tournament', fallback: '1st' },
+    2: { name: '2ndTrophy', fallback: '2nd' },
+    3: { name: '3rdTrophy', fallback: '3rd' },
+    4: { name: '4thTrophy', fallback: '4th' }
   };
 
-  const [name, fallback] = map[Number(placement)] || [null, `${placement}.`];
-  return name ? getEmoji(guild, name, fallback) : fallback;
+  if (!map[placement]) return String(placement);
+  return getEmoji(guild, map[placement].name, map[placement].fallback);
 }
 
 function buildGameTags(game, guild) {
   const tags = [];
+
   if (game.has_epic_mode) tags.push(getEmoji(guild, 'Epic', 'Epic') + ' Epic Mode');
   if (game.has_immortality) tags.push(getEmoji(guild, 'Immo', 'Immo') + ' Immortality');
   if (game.has_rise_of_ix) tags.push(getEmoji(guild, 'Ix', 'Ix') + ' Rise of IX');
@@ -110,7 +126,13 @@ function buildGameTags(game, guild) {
     tags.push(getEmoji(guild, 'Uprising', 'Uprising') + ' Uprising');
   }
   if (game.has_base_leaders) tags.push('Base Leaders');
+
   return tags;
+}
+
+function normalizeDiscordId(value) {
+  const id = String(value || '').trim();
+  return /^\d{17,20}$/.test(id) ? id : null;
 }
 
 async function getDatabasePlayerMap(playerName) {
@@ -124,7 +146,9 @@ async function getDatabasePlayerMap(playerName) {
   const { data, error } = await supabase
     .from('player_discord_map')
     .select('id, player_key, display_name, username, discord_username, claimed_by, discord_user_id')
-    .or(`player_key.eq.${normalized},display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`)
+    .or(
+      `player_key.eq.${normalized},display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`
+    )
     .limit(10);
 
   if (error) {
@@ -191,15 +215,12 @@ async function searchGuildMemberByNames(guild, names) {
   }
 
   const ranked = Array.from(seen.values()).sort((a, b) => b.score - a.score);
+
   if (!ranked.length) return null;
   if (ranked[0].score < GUILD_MATCH_THRESHOLD) return null;
   if (ranked[1] && ranked[0].score - ranked[1].score < GUILD_MATCH_GAP) return null;
-  return ranked[0].member;
-}
 
-function normalizeDiscordId(value) {
-  const id = String(value || '').trim();
-  return /^\d{17,20}$/.test(id) ? id : null;
+  return ranked[0].member;
 }
 
 async function persistDiscordUserId(dbMatch, discordUserId) {
@@ -250,55 +271,69 @@ async function resolveMentionForName(guild, playerName) {
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
 
-  const { data, error } = await supabase.storage
+  const { data, error } = await supabase
+    .storage
     .from(STORAGE_BUCKET)
     .createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
 
-  if (error || !data?.signedUrl) {
-    console.error('Failed to create signed URL for screenshot', storagePath, error);
+  if (error || !data || !data.signedUrl) {
+    console.error('Failed to create signed URL for image', storagePath, error);
     return null;
   }
 
-  const signedUrl = data.signedUrl;
-
   try {
-    const response = await fetch(signedUrl);
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const response = await fetch(data.signedUrl);
+    if (!response.ok) {
+      console.error('Failed to fetch signed image URL', response.status, response.statusText);
+      return null;
+    }
+
+    const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+    const maxBytes = Math.floor(7.5 * 1024 * 1024);
+    if (!contentType.startsWith('image/')) {
+      return { attachment: null, imageUrl: data.signedUrl, tooLarge: false };
+    }
 
     const arrayBuffer = await response.arrayBuffer();
     let buffer = Buffer.from(arrayBuffer);
-
-    if (buffer.byteLength <= MAX_DISCORD_FILE_BYTES) {
-      return {
-        attachment: new AttachmentBuilder(buffer, { name: 'results.png' }),
-        imageUrl: 'attachment://results.png'
-      };
+    if (buffer.length <= maxBytes) {
+      return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }), imageUrl: null, tooLarge: false };
     }
 
-    buffer = await sharp(buffer)
-      .rotate()
-      .png({ quality: 80, compressionLevel: 9, adaptiveFiltering: true })
-      .resize({ width: 1800, withoutEnlargement: true })
-      .toBuffer();
+    try {
+      buffer = await sharp(buffer)
+        .rotate()
+        .resize({ width: 1600, withoutEnlargement: true })
+        .jpeg({ quality: 76, mozjpeg: true })
+        .toBuffer();
 
-    if (buffer.byteLength <= IMAGE_COMPRESS_TARGET_BYTES) {
-      return {
-        attachment: new AttachmentBuilder(buffer, { name: 'results.png' }),
-        imageUrl: 'attachment://results.png'
-      };
+      if (buffer.length <= maxBytes) {
+        return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+      }
+
+      buffer = await sharp(buffer)
+        .resize({ width: 1280, withoutEnlargement: true })
+        .jpeg({ quality: 62, mozjpeg: true })
+        .toBuffer();
+
+      if (buffer.length <= maxBytes) {
+        return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+      }
+    } catch (compressionError) {
+      console.error('Failed to compress screenshot', compressionError);
     }
 
-    return { tooLarge: true, signedUrl };
+    return { attachment: null, imageUrl: data.signedUrl, tooLarge: true };
   } catch (err) {
-    console.error('Failed preparing screenshot payload', storagePath, err);
-    return { tooLarge: true, signedUrl };
+    console.error('Failed to build attachment from screenshot', err);
+    return { attachment: null, imageUrl: null, tooLarge: false };
   }
 }
 
 async function buildGameResultPayload(gameId) {
   const { data: game, error: gameError } = await supabase
     .from('games')
-    .select('*')
+    .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders')
     .eq('id', gameId)
     .single();
 
@@ -309,11 +344,11 @@ async function buildGameResultPayload(gameId) {
 
   const { data: results, error: resultsError } = await supabase
     .from('game_results')
-    .select('*')
+    .select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall')
     .eq('game_id', gameId)
     .order('placement', { ascending: true });
 
-  if (resultsError || !results?.length) {
+  if (resultsError || !results || !results.length) {
     console.error('Failed to fetch results for', gameId, resultsError);
     return null;
   }
@@ -336,9 +371,16 @@ async function buildGameResultPayload(gameId) {
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
 
-  const screenshotMedia = game.image_url ? await createDiscordImagePayload(game.image_url) : null;
+  const screenshotMedia = game.image_url
+    ? await createDiscordImagePayload(game.image_url)
+    : null;
 
-  return { game, results, ratingsMap, screenshotMedia };
+  return {
+    game,
+    results,
+    ratingsMap,
+    screenshotMedia
+  };
 }
 
 async function buildEmbed(payload, guild) {
@@ -346,6 +388,7 @@ async function buildEmbed(payload, guild) {
   const results = payload.results;
   const ratingsMap = payload.ratingsMap;
   const screenshotMedia = payload.screenshotMedia;
+
   const modeLabel = capitalize(game.game_version || 'unknown');
   const tags = buildGameTags(game, guild);
   const lines = [];
@@ -405,7 +448,9 @@ async function announceGame(gameId) {
   }
 
   const built = await buildEmbed(payload, channel.guild);
-  const messagePayload = { embeds: [built.embed] };
+  const messagePayload = {
+    embeds: [built.embed]
+  };
 
   if (built.screenshotMedia?.attachment) {
     messagePayload.files = [built.screenshotMedia.attachment];
@@ -414,16 +459,90 @@ async function announceGame(gameId) {
   }
 
   await channel.send(messagePayload);
+  console.log('Announced game', gameId);
 }
+
+function scheduleAnnouncement(gameId) {
+  if (pendingGames.has(gameId)) return;
+
+  pendingGames.add(gameId);
+
+  setTimeout(async () => {
+    pendingGames.delete(gameId);
+
+    try {
+      await announceGame(gameId);
+    } catch (err) {
+      console.error('Error announcing game', gameId, err);
+    }
+  }, GAME_ROWS_WAIT_MS);
+}
+
+function startRealtimeListener() {
+  if (realtimeChannel) {
+    supabase.removeChannel(realtimeChannel);
+  }
+
+  realtimeChannel = supabase
+    .channel('game_results_inserts')
+    .on(
+      'postgres_changes',
+      { event: 'INSERT', schema: 'public', table: 'game_results' },
+      (payload) => {
+        const gameId = payload && payload.new ? payload.new.game_id : null;
+        if (gameId) scheduleAnnouncement(gameId);
+      }
+    )
+    .subscribe((status, err) => {
+      console.log('Supabase realtime subscription status:', status);
+
+      if (status === 'SUBSCRIBED') {
+        realtimeRetryCount = 0;
+        return;
+      }
+
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        if (err) {
+          console.error('Realtime error:', err);
+        }
+
+        if (realtimeRetryCount >= REALTIME_MAX_RETRIES) {
+          console.error('Realtime failed after max retries');
+          return;
+        }
+
+        realtimeRetryCount += 1;
+        const delay = REALTIME_RETRY_DELAY_MS * realtimeRetryCount;
+        console.log('Retrying realtime in', delay, 'ms');
+
+        setTimeout(startRealtimeListener, delay);
+      }
+    });
+}
+
+discordClient.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  const command = slashCommands.get(interaction.commandName);
+  if (!command) return;
+
+  try {
+    await command.execute(interaction, { supabase, discordClient });
+  } catch (error) {
+    console.error(`Error running /${interaction.commandName}:`, error);
+
+    const message = 'Something went wrong while loading stats.';
+    if (interaction.deferred || interaction.replied) {
+      await interaction.editReply({ content: message }).catch(() => {});
+    } else {
+      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
+    }
+  }
+});
 
 discordClient.once('clientReady', () => {
   console.log('Logged in as', discordClient.user.tag);
+  startRealtimeListener();
 });
 
 discordClient.login(DISCORD_BOT_TOKEN);
-
-module.exports = {
-  announceGame,
-  resolveMentionForName,
-  getDatabasePlayerMap
-};
