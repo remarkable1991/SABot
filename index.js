@@ -16,7 +16,7 @@ const sharp = require('sharp');
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const STORAGE_BUCKET = process.env.STORAGE_BUCKET || 'screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 60 * 60;
 const MAX_DISCORD_FILE_BYTES = 8 * 1024 * 1024;
@@ -26,7 +26,7 @@ const GUILD_MATCH_THRESHOLD = 0.86;
 const GUILD_MATCH_GAP = 0.03;
 const MEMBER_SEARCH_LIMIT = 10;
 
-if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
+if (!DISCORD_BOT_TOKEN || !DISCORD_CHANNEL_ID || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   throw new Error('Missing required environment variables.');
 }
 
@@ -37,7 +37,7 @@ const discordClient = new Client({
   ]
 });
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY);
 
 function normalizeName(value) {
   return String(value || '')
