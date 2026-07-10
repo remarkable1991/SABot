@@ -76,22 +76,26 @@ async function resolvePlayerByDiscordUser(supabase, discordUser) {
     discordUser.tag
   ].filter(Boolean);
 
+  // CHANGED: Replaced claimed_by (UUID) with discord_user_id (text) to prevent 22P02 Postgres errors
+  const orFilters = [
+    `discord_user_id.eq.${discordUser.id}`,
+    ...candidates.map((value) => `discord_username.ilike.${value}`),
+    ...candidates.map((value) => `username.ilike.${value}`),
+    ...candidates.map((value) => `display_name.ilike.${value}`)
+  ];
+
   const { data, error } = await supabase
     .from('player_discord_map')
-    .select('player_key, display_name, claimed_by, username, discord_username, source')
-    .or([
-      `claimed_by.eq.${discordUser.id}`,
-      ...candidates.map((value) => `discord_username.ilike.${value}`),
-      ...candidates.map((value) => `username.ilike.${value}`),
-      ...candidates.map((value) => `display_name.ilike.${value}`)
-    ].join(','))
+    .select('player_key, display_name, claimed_by, username, discord_username, source, discord_user_id')
+    .or(orFilters.join(','))
     .limit(25);
 
   if (error) throw error;
   if (!data || !data.length) return null;
 
-  const direct = data.find((row) => row.claimed_by === discordUser.id);
-  if (direct) return direct;
+  // CHANGED: Prioritize the direct text snowflake ID match if it exists
+  const directId = data.find((row) => row.discord_user_id === discordUser.id);
+  if (directId) return directId;
 
   let best = null;
   let bestScore = 0;
