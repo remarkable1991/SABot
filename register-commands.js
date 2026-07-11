@@ -2,6 +2,7 @@ require('dotenv').config();
 
 const { REST, Routes } = require('discord.js');
 const statsCommand = require('./stats');
+const asyncCommand = require('./async'); // Imported new script
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -18,10 +19,10 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
   try {
     await rest.put(
       Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-      { body: [statsCommand.data.toJSON()] }
+      { body: [statsCommand.data.toJSON(), asyncCommand.data.toJSON()] }
     );
 
-    console.log('Registered /stats command.');
+    console.log('Registered /stats and /async commands.');
   } catch (error) {
     console.error('Failed to register commands:', error);
     process.exit(1);
