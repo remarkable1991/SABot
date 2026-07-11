@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const http = require('http');
-// 1. Instantly spin up health check to satisfy Railway web service requirements
+// 1. Immediately start health check to satisfy Railway web service expectations
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -219,7 +219,7 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('game_id', gameId).single();
+  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
@@ -305,40 +305,56 @@ discordClient.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // 2. REFACTORED INTERACTION ENGINE: Fix silent button routing blockages
   if (interaction.isButton() && interaction.customId.startsWith('async_')) {
     try {
       await interaction.deferUpdate();
       const { customId, user, message } = interaction;
+
+      console.log(`[Interaction Execution] Click Event Fired: ${customId} by ${user.username}`);
+
       const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
-      if (fetchErr || !lobby || lobby.status !== 'searching') return;
+      if (fetchErr || !lobby) {
+        console.error(`[Interaction Blocked] Lobby metadata fetch failed for message reference ${message.id}:`, fetchErr);
+        return;
+      }
+
+      if (lobby.status !== 'searching') return;
 
       let players = [...(lobby.player_ids || [])];
       let notifications = [...(lobby.notify_user_ids || [])];
       let shouldUpdate = false;
 
-      if (customId === 'async_join' && players.length < 4 && !players.includes(user.id)) {
-        players.push(user.id); shouldUpdate = true;
-        if (notifications.length > 0) {
-          await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+      if (customId === 'async_join') {
+        if (players.length < 4 && !players.includes(user.id)) {
+          players.push(user.id);
+          shouldUpdate = true;
+          if (notifications.length > 0) {
+            await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+          }
         }
       }
       if (customId === 'async_leave' && user.id !== lobby.host_id && players.includes(user.id)) {
-        players = players.filter(id => id !== user.id); notifications = notifications.filter(id => id !== user.id); shouldUpdate = true;
+        players = players.filter(id => id !== user.id);
+        notifications = notifications.filter(id => id !== user.id);
+        shouldUpdate = true;
       }
       if (customId === 'async_toggle_bell') {
-        notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id]; shouldUpdate = true;
+        notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id];
+        shouldUpdate = true;
       }
       if (customId === 'async_cancel' && user.id === lobby.host_id) {
         await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
         return message.delete().catch(() => null);
       }
-      if (customId === 'async_start' && players.includes(user.id)) {
+      if (customId === 'async_start' && user.id === lobby.host_id && players.length >= 2) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         return interaction.editReply({ content: '🏁 **Game started! Good luck, commanders!**', embeds: [], components: [] }).catch(() => {});
       }
 
       if (shouldUpdate) {
         await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+        
         const embed = EmbedBuilder.from(message.embeds[0]);
         embed.setFields(
           { name: '👤 Host', value: `<@${lobby.host_id}>`, inline: true },
@@ -348,57 +364,10 @@ discordClient.on('interactionCreate', async (interaction) => {
           { name: `👥 Players (${players.length}/4)`, value: players.map(id => `• <@${id}>`).join('\n'), inline: false },
           { name: '🔔 Notifications Active For', value: notifications.length > 0 ? notifications.map(id => `<@${id}>`).join(', ') : '—', inline: false }
         );
-        const actionRowData = message.components[0].toJSON();
-        const utilityRowData = message.components[1].toJSON();
-        const row = ActionRowBuilder.from(actionRowData);
-        row.components[2].setDisabled(players.length < 2);
-        await interaction.editReply({ embeds: [embed], components: [row, ActionRowBuilder.from(utilityRowData)] }).catch(() => {});
-      }
-    } catch (err) { console.error('Error handling async button trigger:', err); }
-  }
-});
 
-discordClient.once('clientReady', async () => {
-  console.log('Logged in as', discordClient.user.tag);
-  startRealtimeListener();
-
-  if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
-    try {
-      const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
-      await rest.put(
-        Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-        { body: [statsCommand.data.toJSON(), asyncCommand.data.toJSON()] }
-      );
-      console.log('Background Sync: Commands registered.');
-    } catch (err) {
-      console.error('Background Sync: Registration failed:', err);
-    }
-  }
-
-  setInterval(async () => {
-    try {
-      const now = new Date(); const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000); const fifteenHoursAgo = new Date(now.getTime() - 15 * 60 * 60 * 1000);
-      const { data: prompts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').is('last_prompted_at', null).lt('created_at', twelveHoursAgo.toISOString());
-      if (prompts && prompts.length > 0) {
-        for (const lobby of prompts) {
-          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-          if (channel) { await channel.send({ content: `⏳ ${lobby.player_ids.map(id => `<@${id}>`).join(' ')} **Lobby Check-in:** This match has been looking for players for 12 hours! Has it already started, or would you like to rehost?` }); }
-          await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-        }
-      }
-      const { data: timeouts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lt('created_at', fifteenHoursAgo.toISOString());
-      if (timeouts && timeouts.length > 0) {
-        for (const lobby of timeouts) {
-          await supabase.from('active_async_matches').update({ status: 'timed_out' }).eq('id', lobby.id);
-          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-          if (channel) {
-            const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
-            if (msg) await msg.edit({ content: '❌ **Match request timed out (15 hours exceeded without start confirmation).**', embeds: [], components: [] }).catch(() => null);
-          }
-        }
-      }
-    } catch (err) { console.error('Error running matchmaking timeout worker:', err); }
-  }, 5 * 60 * 1000);
-});
-
-discordClient.login(DISCORD_BOT_TOKEN);
+        // Dynamically rebuild the layout rules based on who is checking the embed context panel
+        const actionRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('async_join').setLabel('Join Match').setStyle(ButtonStyle.Primary).setDisabled(players.length >= 4),
+          new ButtonBuilder().setCustomId('async_leave').setLabel('Leave').setStyle(ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(players.length < 2),
+          new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(B
