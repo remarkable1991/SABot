@@ -601,4 +601,14 @@ discordClient.on('interactionCreate', async (interaction) => {
 
         await interaction.editReply({ 
           embeds: [embed], 
+          // Dummy HTTP server to satisfy Railway web service health checks and prevent SIGTERM
+const http = require('http');
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is live!');
+}).listen(PORT, () => {
+  console.log(`Health check server listening on port ${PORT}`);
+});
+        
                                
