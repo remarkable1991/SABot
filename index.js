@@ -3,6 +3,7 @@ require('dotenv').config();
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
+const http = require('http'); // Cleanly imported at the top
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
@@ -591,18 +592,64 @@ discordClient.on('interactionCreate', async (interaction) => {
           { name: '🔔 Notifications Active For', value: notifications.length > 0 ? notifications.map(id => `<@${id}>`).join(', ') : '—', inline: false }
         );
 
-        // Safely extract old component JSON data blocks to avoid discord.js v14 validation issues
         const actionRowData = message.components[0].toJSON();
         const utilityRowData = message.components[1].toJSON();
 
         const row = ActionRowBuilder.from(actionRowData);
-        // Find and toggle the start button state dynamically based on player requirements
         row.components[2].setDisabled(players.length < 2);
 
         await interaction.editReply({ 
           embeds: [embed], 
-          // Dummy HTTP server to satisfy Railway web service health checks and prevent SIGTERM
-const http = require('http');
+          components: [row, ActionRowBuilder.from(utilityRowData)] 
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.error('Error handling async button trigger:', err);
+    }
+  }
+});
+
+discordClient.once('clientReady', () => {
+  console.log('Logged in as', discordClient.user.tag);
+  startRealtimeListener();
+
+  setInterval(async () => {
+    try {
+      const now = new Date();
+      const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+      const fifteenHoursAgo = new Date(now.getTime() - 15 * 60 * 60 * 1000);
+
+      const { data: prompts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').is('last_prompted_at', null).lt('created_at', twelveHoursAgo.toISOString());
+      if (prompts && prompts.length > 0) {
+        for (const lobby of prompts) {
+          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+          if (channel) {
+            await channel.send({ content: `⏳ ${lobby.player_ids.map(id => `<@${id}>`).join(' ')} **Lobby Check-in:** This match has been looking for players for 12 hours! Has it already started, or would you like to rehost?` });
+          }
+          await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+        }
+      }
+
+      const { data: timeouts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lt('created_at', fifteenHoursAgo.toISOString());
+      if (timeouts && timeouts.length > 0) {
+        for (const lobby of timeouts) {
+          await supabase.from('active_async_matches').update({ status: 'timed_out' }).eq('id', lobby.id);
+          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+          if (channel) {
+            const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
+            if (msg) await msg.edit({ content: '❌ **Match request timed out (15 hours exceeded without start confirmation).**', embeds: [], components: [] }).catch(() => null);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error running matchmaking timeout worker:', err);
+    }
+  }, 5 * 60 * 1000);
+});
+
+discordClient.login(DISCORD_BOT_TOKEN);
+
+// Dummy HTTP server to satisfy Railway web service health checks and prevent SIGTERM
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -610,5 +657,3 @@ http.createServer((req, res) => {
 }).listen(PORT, () => {
   console.log(`Health check server listening on port ${PORT}`);
 });
-        
-                               
