@@ -1,6 +1,6 @@
 require('dotenv').config();
 
-const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
@@ -543,7 +543,7 @@ discordClient.on('interactionCreate', async (interaction) => {
 
   if (interaction.isButton() && interaction.customId.startsWith('async_')) {
     try {
-      // FIX: Secure the immutable message ID from the interaction object before deferring state updates
+      // THE ONLY CHANGE: Use interaction.message.id directly to secure context routing
       const targetMessageId = interaction.message.id;
       await interaction.deferUpdate();
       const { customId, user, message } = interaction;
@@ -601,4 +601,5 @@ discordClient.on('interactionCreate', async (interaction) => {
 
         await interaction.editReply({ 
           embeds: [embed], 
-          components: [row
+          components: [row, ActionRowBuilder.from(utilityRowData)] 
+       
