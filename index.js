@@ -546,8 +546,8 @@ discordClient.on('interactionCreate', async (interaction) => {
       await interaction.deferUpdate();
       const { customId, user, message } = interaction;
 
-      const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
-      if (!lobby || lobby.status !== 'searching') return;
+      const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+      if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
       let players = [...(lobby.player_ids || [])];
       let notifications = [...(lobby.notify_user_ids || [])];
@@ -557,7 +557,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         players.push(user.id);
         shouldUpdate = true;
         if (notifications.length > 0) {
-          await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` });
+          await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
         }
       }
       if (customId === 'async_leave' && user.id !== lobby.host_id && players.includes(user.id)) {
@@ -575,66 +575,30 @@ discordClient.on('interactionCreate', async (interaction) => {
       }
       if (customId === 'async_start' && players.includes(user.id)) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
-        return interaction.editReply({ content: '🏁 **Game started! Good luck, commanders!**', embeds: [], components: [] });
+        return interaction.editReply({ content: '🏁 **Game started! Good luck, commanders!**', embeds: [], components: [] }).catch(() => {});
       }
 
       if (shouldUpdate) {
         await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+        
         const embed = EmbedBuilder.from(message.embeds[0]);
         embed.setFields(
           { name: '👤 Host', value: `<@${lobby.host_id}>`, inline: true },
-          { name: '🗺️ Board', value: lobby.board_type, inline: true },
-          { name: '🔌 Expansion', value: lobby.expansions.join(', ') || 'None', inline: true },
+          { name: '🗺️ Board', value: lobby.board_type || 'Not Specified', inline: true },
+          { name: '🔌 Expansion', value: (lobby.expansions && lobby.expansions.length > 0) ? lobby.expansions.join(', ') : 'None', inline: true },
           { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : '🔓 Public', inline: false },
           { name: `👥 Players (${players.length}/4)`, value: players.map(id => `• <@${id}>`).join('\n'), inline: false },
           { name: '🔔 Notifications Active For', value: notifications.length > 0 ? notifications.map(id => `<@${id}>`).join(', ') : '—', inline: false }
         );
-        const row = ActionRowBuilder.from(message.components[0]);
+
+        // Safely extract old component JSON data blocks to avoid discord.js v14 validation issues
+        const actionRowData = message.components[0].toJSON();
+        const utilityRowData = message.components[1].toJSON();
+
+        const row = ActionRowBuilder.from(actionRowData);
+        // Find and toggle the start button state dynamically based on player requirements
         row.components[2].setDisabled(players.length < 2);
-        await interaction.editReply({ embeds: [embed], components: [row, ActionRowBuilder.from(message.components[1])] });
-      }
-    } catch (err) {
-      console.error('Error handling async button trigger:', err);
-    }
-  }
-});
 
-discordClient.once('clientReady', () => {
-  console.log('Logged in as', discordClient.user.tag);
-  startRealtimeListener();
-
-  setInterval(async () => {
-    try {
-      const now = new Date();
-      const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
-      const fifteenHoursAgo = new Date(now.getTime() - 15 * 60 * 60 * 1000);
-
-      const { data: prompts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').is('last_prompted_at', null).lt('created_at', twelveHoursAgo.toISOString());
-      if (prompts && prompts.length > 0) {
-        for (const lobby of prompts) {
-          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-          if (channel) {
-            await channel.send({ content: `⏳ ${lobby.player_ids.map(id => `<@${id}>`).join(' ')} **Lobby Check-in:** This match has been looking for players for 12 hours! Has it already started, or would you like to rehost?` });
-          }
-          await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-        }
-      }
-
-      const { data: timeouts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lt('created_at', fifteenHoursAgo.toISOString());
-      if (timeouts && timeouts.length > 0) {
-        for (const lobby of timeouts) {
-          await supabase.from('active_async_matches').update({ status: 'timed_out' }).eq('id', lobby.id);
-          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-          if (channel) {
-            const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
-            if (msg) await msg.edit({ content: '❌ **Match request timed out (15 hours exceeded without start confirmation).**', embeds: [], components: [] }).catch(() => null);
-          }
-        }
-      }
-    } catch (err) {
-      console.error('Error running matchmaking timeout worker:', err);
-    }
-  }, 5 * 60 * 1000);
-});
-
-discordClient.login(DISCORD_BOT_TOKEN);
+        await interaction.editReply({ 
+          embeds: [embed], 
+                               
