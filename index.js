@@ -4,7 +4,7 @@ const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention,
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
-const asyncCommand = require('./async'); // Added async reference
+const asyncCommand = require('./async'); 
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -44,7 +44,7 @@ const discordClient = new Client({
 
 const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
-  [asyncCommand.data.name, asyncCommand] // Registered new async slash map
+  [asyncCommand.data.name, asyncCommand]
 ]);
 
 const pendingGames = new Set();
@@ -522,7 +522,6 @@ function startRealtimeListener() {
     });
 }
 
-// Intercepts and parses Button components along with basic slash executions
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName);
@@ -542,7 +541,6 @@ discordClient.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // Intercept button click updates for the /async lobbies
   if (interaction.isButton() && interaction.customId.startsWith('async_')) {
     try {
       await interaction.deferUpdate();
@@ -602,224 +600,41 @@ discordClient.on('interactionCreate', async (interaction) => {
 });
 
 discordClient.once('clientReady', () => {
-  console.log('Logged in as', discordClient.user.eenshot', err);
-    return { attachment: null, imageUrl: null, tooLarge: false };
-  }
-}
-
-async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase
-    .from('games')
-    .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders')
-    .eq('id', gameId)
-    .single();
-
-  if (gameError || !game) {
-    console.error('Failed to fetch game', gameId, gameError);
-    return null;
-  }
-
-  const { data: results, error: resultsError } = await supabase
-    .from('game_results')
-    .select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall')
-    .eq('game_id', gameId)
-    .order('placement', { ascending: true });
-
-  if (resultsError || !results || !results.length) {
-    console.error('Failed to fetch results for', gameId, resultsError);
-    return null;
-  }
-
-  const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
-
-  const { data: ratings, error: ratingsError } = await supabase
-    .from('player_ratings')
-    .select('player_key, display_name, game_version, elo')
-    .in('player_key', playerKeys)
-    .in('game_version', ['overall', game.game_version]);
-
-  if (ratingsError) {
-    console.error('Failed to fetch ratings', ratingsError);
-  }
-
-  const ratingsMap = {};
-  for (const row of ratings || []) {
-    if (!ratingsMap[row.player_key]) ratingsMap[row.player_key] = {};
-    ratingsMap[row.player_key][row.game_version] = row.elo;
-  }
-
-  const screenshotMedia = game.image_url
-    ? await createDiscordImagePayload(game.image_url)
-    : null;
-
-  return {
-    game,
-    results,
-    ratingsMap,
-    screenshotMedia
-  };
-}
-
-async function buildEmbed(payload, guild) {
-  const game = payload.game;
-  const results = payload.results;
-  const ratingsMap = payload.ratingsMap;
-  const screenshotMedia = payload.screenshotMedia;
-
-  const modeLabel = capitalize(game.game_version || 'unknown');
-  const tags = buildGameTags(game, guild);
-  const lines = [];
-
-  for (const row of results) {
-    const place = getPlacementEmoji(guild, row.placement);
-    const playerKey = String(row.player_name || '').toLowerCase();
-    const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined;
-    const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
-    const mention = await resolveMentionForName(guild, row.player_name);
-
-    const playerPart = mention
-      ? '**' + row.player_name + '** ' + mention
-      : '**' + row.player_name + '**';
-
-    let text = place + ' ' + playerPart + ' - ' + (row.leader_name || 'Unknown Leader') + ' - ' + (row.points ?? '?') + ' pts';
-    text += '\nOverall: ' + formatDelta(row.elo_delta_overall);
-
-    if (currentOverall !== undefined) {
-      text += ' (-> ' + Number(currentOverall).toFixed(1) + ')';
-    }
-
-    text += ' | ' + modeLabel + ': ' + formatDelta(row.elo_delta);
-
-    if (currentMode !== undefined) {
-      text += ' (-> ' + Number(currentMode).toFixed(1) + ')';
-    }
-
-    lines.push(text);
-  }
-
-  if (tags.length) {
-    lines.push('Game modes played: ' + tags.join(' | '));
-  }
-
-  const embed = new EmbedBuilder()
-    .setTitle('Game Finished - ' + modeLabel)
-    .setDescription(lines.join('\n\n'))
-    .setColor(0xC9A24B)
-    .setTimestamp(new Date());
-
-  if (screenshotMedia?.imageUrl) {
-    embed.setImage(screenshotMedia.imageUrl);
-  }
-
-  return { embed, screenshotMedia };
-}
-
-async function announceGame(gameId) {
-  const payload = await buildGameResultPayload(gameId);
-  if (!payload) return;
-
-  const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID);
-  if (!channel) {
-    console.error('Could not find target channel', DISCORD_CHANNEL_ID);
-    return;
-  }
-
-  const built = await buildEmbed(payload, channel.guild);
-  const messagePayload = {
-    embeds: [built.embed]
-  };
-
-  if (built.screenshotMedia?.attachment) {
-    messagePayload.files = [built.screenshotMedia.attachment];
-  } else if (built.screenshotMedia?.tooLarge) {
-    messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.';
-  }
-
-  await channel.send(messagePayload);
-  console.log('Announced game', gameId);
-}
-
-function scheduleAnnouncement(gameId) {
-  if (pendingGames.has(gameId)) return;
-
-  pendingGames.add(gameId);
-
-  setTimeout(async () => {
-    pendingGames.delete(gameId);
-
-    try {
-      await announceGame(gameId);
-    } catch (err) {
-      console.error('Error announcing game', gameId, err);
-    }
-  }, GAME_ROWS_WAIT_MS);
-}
-
-function startRealtimeListener() {
-  if (realtimeChannel) {
-    supabase.removeChannel(realtimeChannel);
-  }
-
-  realtimeChannel = supabase
-    .channel('game_results_inserts')
-    .on(
-      'postgres_changes',
-      { event: 'INSERT', schema: 'public', table: 'game_results' },
-      (payload) => {
-        const gameId = payload && payload.new ? payload.new.game_id : null;
-        if (gameId) scheduleAnnouncement(gameId);
-      }
-    )
-    .subscribe((status, err) => {
-      console.log('Supabase realtime subscription status:', status);
-
-      if (status === 'SUBSCRIBED') {
-        realtimeRetryCount = 0;
-        return;
-      }
-
-      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
-        if (err) {
-          console.error('Realtime error:', err);
-        }
-
-        if (realtimeRetryCount >= REALTIME_MAX_RETRIES) {
-          console.error('Realtime failed after max retries');
-          return;
-        }
-
-        realtimeRetryCount += 1;
-        const delay = REALTIME_RETRY_DELAY_MS * realtimeRetryCount;
-        console.log('Retrying realtime in', delay, 'ms');
-
-        setTimeout(startRealtimeListener, delay);
-      }
-    });
-}
-
-discordClient.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  const command = slashCommands.get(interaction.commandName);
-  if (!command) return;
-
-  try {
-    await command.execute(interaction, { supabase, discordClient });
-  } catch (error) {
-    console.error(`Error running /${interaction.commandName}:`, error);
-
-    const message = 'Something went wrong while loading stats.';
-    if (interaction.deferred || interaction.replied) {
-      await interaction.editReply({ content: message }).catch(() => {});
-    } else {
-      await interaction.reply({ content: message, ephemeral: true }).catch(() => {});
-    }
-  }
-});
-
-discordClient.once('clientReady', () => {
   console.log('Logged in as', discordClient.user.tag);
   startRealtimeListener();
+
+  setInterval(async () => {
+    try {
+      const now = new Date();
+      const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+      const fifteenHoursAgo = new Date(now.getTime() - 15 * 60 * 60 * 1000);
+
+      const { data: prompts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').is('last_prompted_at', null).lt('created_at', twelveHoursAgo.toISOString());
+      if (prompts && prompts.length > 0) {
+        for (const lobby of prompts) {
+          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+          if (channel) {
+            await channel.send({ content: `⏳ ${lobby.player_ids.map(id => `<@${id}>`).join(' ')} **Lobby Check-in:** This match has been looking for players for 12 hours! Has it already started, or would you like to rehost?` });
+          }
+          await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+        }
+      }
+
+      const { data: timeouts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lt('created_at', fifteenHoursAgo.toISOString());
+      if (timeouts && timeouts.length > 0) {
+        for (const lobby of timeouts) {
+          await supabase.from('active_async_matches').update({ status: 'timed_out' }).eq('id', lobby.id);
+          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+          if (channel) {
+            const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
+            if (msg) await msg.edit({ content: '❌ **Match request timed out (15 hours exceeded without start confirmation).**', embeds: [], components: [] }).catch(() => null);
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Error running matchmaking timeout worker:', err);
+    }
+  }, 5 * 60 * 1000);
 });
 
 discordClient.login(DISCORD_BOT_TOKEN);
