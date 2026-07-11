@@ -219,7 +219,7 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
+  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('game_id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
@@ -305,33 +305,25 @@ discordClient.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // 2. REFACTORED INTERACTION ENGINE: Fix silent button routing blockages
   if (interaction.isButton() && interaction.customId.startsWith('async_')) {
     try {
+      // Instantly capture the immutable target ID before any microtask yields
+      const targetMessageId = interaction.message.id;
       await interaction.deferUpdate();
       const { customId, user, message } = interaction;
 
-      console.log(`[Interaction Execution] Click Event Fired: ${customId} by ${user.username}`);
-
-      const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
-      if (fetchErr || !lobby) {
-        console.error(`[Interaction Blocked] Lobby metadata fetch failed for message reference ${message.id}:`, fetchErr);
-        return;
-      }
-
-      if (lobby.status !== 'searching') return;
+      const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', targetMessageId).single();
+      if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
       let players = [...(lobby.player_ids || [])];
       let notifications = [...(lobby.notify_user_ids || [])];
       let shouldUpdate = false;
 
-      if (customId === 'async_join') {
-        if (players.length < 4 && !players.includes(user.id)) {
-          players.push(user.id);
-          shouldUpdate = true;
-          if (notifications.length > 0) {
-            await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
-          }
+      if (customId === 'async_join' && players.length < 4 && !players.includes(user.id)) {
+        players.push(user.id);
+        shouldUpdate = true;
+        if (notifications.length > 0) {
+          await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
         }
       }
       if (customId === 'async_leave' && user.id !== lobby.host_id && players.includes(user.id)) {
@@ -347,7 +339,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
         return message.delete().catch(() => null);
       }
-      if (customId === 'async_start' && user.id === lobby.host_id && players.length >= 2) {
+      if (customId === 'async_start' && players.includes(user.id)) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         return interaction.editReply({ content: '🏁 **Game started! Good luck, commanders!**', embeds: [], components: [] }).catch(() => {});
       }
@@ -365,9 +357,28 @@ discordClient.on('interactionCreate', async (interaction) => {
           { name: '🔔 Notifications Active For', value: notifications.length > 0 ? notifications.map(id => `<@${id}>`).join(', ') : '—', inline: false }
         );
 
-        // Dynamically rebuild the layout rules based on who is checking the embed context panel
-        const actionRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('async_join').setLabel('Join Match').setStyle(ButtonStyle.Primary).setDisabled(players.length >= 4),
-          new ButtonBuilder().setCustomId('async_leave').setLabel('Leave').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(players.length < 2),
-          new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(B
+        const actionRowData = message.components[0].toJSON();
+        const utilityRowData = message.components[1].toJSON();
+
+        const row = ActionRowBuilder.from(actionRowData);
+        row.components[2].setDisabled(players.length < 2);
+
+        await interaction.editReply({ 
+          embeds: [embed], 
+          components: [row, ActionRowBuilder.from(utilityRowData)] 
+        }).catch(() => {});
+      }
+    } catch (err) { console.error('Error handling async button trigger:', err); }
+  }
+});
+
+discordClient.once('clientReady', async () => {
+  console.log('Logged in as', discordClient.user.tag);
+  startRealtimeListener();
+
+  if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
+    try {
+      const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
+      await rest.put(
+        Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
+        { body: [stat
