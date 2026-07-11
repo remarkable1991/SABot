@@ -3,8 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-  "start": "node register-commands.js && node index.js"
-}
+    "start": "node register-commands.js && node index.js",
     "register-commands": "node register-commands.js"
   },
   "dependencies": {
@@ -15,4 +14,4 @@
     "sharp": "^0.33.5",
     "ws": "^8.18.3"
   }
-
+}
