@@ -309,7 +309,8 @@ discordClient.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferUpdate();
       const { customId, user, message } = interaction;
-      const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+      // THE FIX: message.id replaced cleanly with interaction.message.id to secure context reference mapping
+      const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', interaction.message.id).single();
       if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
       let players = [...(lobby.player_ids || [])];
