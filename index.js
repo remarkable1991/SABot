@@ -372,4 +372,33 @@ discordClient.once('clientReady', async () => {
       console.log('Background Sync: Commands registered.');
     } catch (err) {
       console.error('Background Sync: Registration failed:', err);
-    
+    }
+  }
+
+  setInterval(async () => {
+    try {
+      const now = new Date(); const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000); const fifteenHoursAgo = new Date(now.getTime() - 15 * 60 * 60 * 1000);
+      const { data: prompts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').is('last_prompted_at', null).lt('created_at', twelveHoursAgo.toISOString());
+      if (prompts && prompts.length > 0) {
+        for (const lobby of prompts) {
+          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+          if (channel) { await channel.send({ content: `⏳ ${lobby.player_ids.map(id => `<@${id}>`).join(' ')} **Lobby Check-in:** This match has been looking for players for 12 hours! Has it already started, or would you like to rehost?` }); }
+          await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+        }
+      }
+      const { data: timeouts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lt('created_at', fifteenHoursAgo.toISOString());
+      if (timeouts && timeouts.length > 0) {
+        for (const lobby of timeouts) {
+          await supabase.from('active_async_matches').update({ status: 'timed_out' }).eq('id', lobby.id);
+          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+          if (channel) {
+            const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
+            if (msg) await msg.edit({ content: '❌ **Match request timed out (15 hours exceeded without start confirmation).**', embeds: [], components: [] }).catch(() => null);
+          }
+        }
+      }
+    } catch (err) { console.error('Error running matchmaking timeout worker:', err); }
+  }, 5 * 60 * 1000);
+});
+
+discordClient.login(DISCORD_BOT_TOKEN);
