@@ -42,7 +42,6 @@ module.exports = {
     const password = interaction.options.getString('password') || 'None';
     const host = interaction.user;
 
-    // Helper to extract server emojis dynamically using index.js structure patterns
     const guild = interaction.guild;
     const getCustomEmoji = (name, fallback) => {
       if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
@@ -50,7 +49,6 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    // Pick visual tags matching your system layout
     let expansionDisplay = expansion;
     if (expansion === 'Ix') expansionDisplay = `${getCustomEmoji('Ix', 'Ix')} Rise of IX`;
     if (expansion === 'Immortality') expansionDisplay = `${getCustomEmoji('Immo', 'Immo')} Immortality`;
@@ -85,16 +83,18 @@ module.exports = {
       new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
     );
 
-    const reply = await interaction.reply({
+    // Modern discord.js v14 compliant implementation: withResponse instead of fetchReply
+    const response = await interaction.reply({
       embeds: [embed],
       components: [actionRow, utilityRow],
-      fetchReply: true
+      withResponse: true
     });
 
+    // Extracting resource tracking parameters safely from message context
     await supabase
       .from('active_async_matches')
       .insert({
-        message_id: reply.id,
+        message_id: response.resource.message.id,
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
