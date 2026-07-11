@@ -83,18 +83,17 @@ module.exports = {
       new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
     );
 
-    // Modern discord.js v14 compliant implementation: withResponse instead of fetchReply
+    // Fixed implementation using fetchReply for discord.js v14 compatibility
     const response = await interaction.reply({
       embeds: [embed],
       components: [actionRow, utilityRow],
-      withResponse: true
+      fetchReply: true
     });
 
-    // Extracting resource tracking parameters safely from message context
     await supabase
       .from('active_async_matches')
       .insert({
-        message_id: response.resource.message.id,
+        message_id: response.id,
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
