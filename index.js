@@ -1,7 +1,7 @@
 require('dotenv').config();
 
 const http = require('http');
-// 1. IMMEDIATELY start the health check server to pass Railway's checks within milliseconds
+// 1. Instantly spin up health check to satisfy Railway web service requirements
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -219,7 +219,7 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
+  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('game_id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
@@ -362,7 +362,6 @@ discordClient.once('clientReady', async () => {
   console.log('Logged in as', discordClient.user.tag);
   startRealtimeListener();
 
-  // 2. Register slash commands safely inside the background execution pool
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
@@ -370,4 +369,7 @@ discordClient.once('clientReady', async () => {
         Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
         { body: [statsCommand.data.toJSON(), asyncCommand.data.toJSON()] }
       );
-      console.log('Background Sync: Successfully registered /stats a
+      console.log('Background Sync: Commands registered.');
+    } catch (err) {
+      console.error('Background Sync: Registration failed:', err);
+    
