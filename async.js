@@ -50,13 +50,11 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    // Core Custom Emoji Lookups
     const ixEmoji = getCustomEmoji('Ix', '');
     const immoEmoji = getCustomEmoji('Immo', '');
     const epicEmoji = getCustomEmoji('Epic', '');
     const uprisingEmoji = getCustomEmoji('Uprising', '');
 
-    // 1. Database Storage String Mapping
     let expansionDisplay = expansion || 'None';
     if (expansion === 'Ix') expansionDisplay = `${ixEmoji} Rise of IX`.trim();
     if (expansion === 'Immortality') expansionDisplay = `${immoEmoji} Immortality`.trim();
@@ -68,7 +66,6 @@ module.exports = {
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // 2. Interface Sentence String Construction
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -96,20 +93,22 @@ module.exports = {
     statusSentence += '.';
 
     const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
-
-    // Generate accurate Unix timestamp for 15 hours in the future
     const timeoutTimestamp = Math.floor((Date.now() + 15 * 60 * 60 * 1000) / 1000);
+
+    // Look for the targeted role name inside the server to map the tag id string
+    const targetRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+    const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
 
     const embed = new EmbedBuilder()
       .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
-      .setDescription(`"${notes}"`)
+      // Tags the role and attaches the notes immediately inside the main block body
+      .setDescription(`${roleMention}\n\n"${notes}"`)
       .setColor(0x3498db)
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
         { name: '👥 Players (1/4)', value: `• ${host}`, inline: false }
       )
-      // Removed formatting block safely from the text footer property
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
 
