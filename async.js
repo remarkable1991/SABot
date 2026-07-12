@@ -4,7 +4,6 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
     .setDescription('Look for opponents for an asynchronous game')
-    // Reverted back to optional as requested
     .addStringOption(option =>
       option.setName('text')
         .setDescription('Any extra details or notes for this match')
@@ -106,12 +105,12 @@ module.exports = {
       .setDescription(`"${notes}"`)
       .setColor(0x3498db)
       .addFields(
-        { name: '📝 Match Details', value: statusSentence, inline: false },
+        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
         { name: '👥 Players (1/4)', value: `• ${host}`, inline: false }
       )
-      // Displays the specific deadline dynamic timestamp string inside the text structure
-      .setFooter({ text: `Lobbies time out automatically if unstarted after 15 hours (Expires <t:${timeoutTimestamp}:R>)` })
+      // Removed formatting block safely from the text footer property
+      .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
 
     const actionRow = new ActionRowBuilder().addComponents(
