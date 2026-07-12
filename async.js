@@ -4,11 +4,11 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
     .setDescription('Look for opponents for an asynchronous game')
-    // Changed option name to 'text' so it populates immediately as the primary free-flow field
+    // Set to true so the text box automatically forces open as the first thing they type
     .addStringOption(option =>
       option.setName('text')
         .setDescription('Any extra details or notes for this match')
-        .setRequired(false)
+        .setRequired(true)
     )
     .addStringOption(option =>
       option.setName('board')
@@ -37,7 +37,7 @@ module.exports = {
     ),
 
   async execute(interaction, { supabase }) {
-    const notes = interaction.options.getString('text') || 'Looking for an async match!';
+    const notes = interaction.options.getString('text');
     const board = interaction.options.getString('board');
     const expansion = interaction.options.getString('expansion');
     const password = interaction.options.getString('password') || 'None';
@@ -50,7 +50,7 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    // Keep original backend/database string formatting intact
+    // Keep backend structure matching database requirements
     let expansionDisplay = expansion || 'None';
     if (expansion === 'Ix') expansionDisplay = `${getCustomEmoji('Ix', 'Ix')} Rise of IX`;
     if (expansion === 'Immortality') expansionDisplay = `${getCustomEmoji('Immo', 'Immo')} Immortality`;
@@ -61,21 +61,21 @@ module.exports = {
     if (board === 'Uprising') boardDisplay = `${getCustomEmoji('Uprising', 'Uprising')} Uprising`;
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // Parse specific emojis directly into the visual sentence builder
-    const ixEmoji = getCustomEmoji('Ix', 'Rise of IX');
-    const immoEmoji = getCustomEmoji('Immo', 'Immortality');
-    const epicEmoji = getCustomEmoji('Epic', 'Epic Mode');
-    const uprisingEmoji = getCustomEmoji('Uprising', 'Uprising');
+    // Sentence Formatting: Combines the Emoji + Name text perfectly
+    const ixText = `${getCustomEmoji('Ix', '')} Rise of IX`.trim();
+    const immoText = `${getCustomEmoji('Immo', '')} Immortality`.trim();
+    const epicText = `${getCustomEmoji('Epic', '')} Epic Mode`.trim();
+    const uprisingText = `${getCustomEmoji('Uprising', '')} Uprising`.trim();
 
     let expansionText = 'Expansions';
-    if (expansion === 'Ix') expansionText = ixEmoji;
-    if (expansion === 'Immortality') expansionText = immoEmoji;
-    if (expansion === 'Epic') expansionText = epicEmoji;
-    if (expansion === 'Both') expansionText = `${ixEmoji} + ${immoEmoji}`;
+    if (expansion === 'Ix') expansionText = ixText;
+    if (expansion === 'Immortality') expansionText = immoText;
+    if (expansion === 'Epic') expansionText = epicText;
+    if (expansion === 'Both') expansionText = `${ixText} + ${immoText}`;
 
-    let boardText = board === 'Uprising' ? uprisingEmoji : 'Base Game';
+    let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
 
-    // Build the dynamic status text using the host mention instead of plain username string
+    // Render sentence using proper mentions and custom components
     let statusSentence = `${host} is looking for players`;
     if (board && board !== 'Base' && expansion && expansion !== 'None') {
       statusSentence += ` for ${boardText} with ${expansionText}`;
