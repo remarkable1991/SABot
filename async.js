@@ -4,9 +4,10 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
     .setDescription('Look for opponents for an asynchronous game')
+    // Changed option name to 'text' so it populates immediately as the primary free-flow field
     .addStringOption(option =>
-      option.setName('notes')
-        .setDescription('Any extra details or text right after the command')
+      option.setName('text')
+        .setDescription('Any extra details or notes for this match')
         .setRequired(false)
     )
     .addStringOption(option =>
@@ -36,7 +37,7 @@ module.exports = {
     ),
 
   async execute(interaction, { supabase }) {
-    const notes = interaction.options.getString('notes') || 'Looking for an async match!';
+    const notes = interaction.options.getString('text') || 'Looking for an async match!';
     const board = interaction.options.getString('board');
     const expansion = interaction.options.getString('expansion');
     const password = interaction.options.getString('password') || 'None';
@@ -49,7 +50,7 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    // Parse options for the database structure
+    // Keep original backend/database string formatting intact
     let expansionDisplay = expansion || 'None';
     if (expansion === 'Ix') expansionDisplay = `${getCustomEmoji('Ix', 'Ix')} Rise of IX`;
     if (expansion === 'Immortality') expansionDisplay = `${getCustomEmoji('Immo', 'Immo')} Immortality`;
@@ -60,14 +61,28 @@ module.exports = {
     if (board === 'Uprising') boardDisplay = `${getCustomEmoji('Uprising', 'Uprising')} Uprising`;
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // Build the dynamic summary sentence
-    let statusSentence = `**${host.username}** is looking for players`;
+    // Parse specific emojis directly into the visual sentence builder
+    const ixEmoji = getCustomEmoji('Ix', 'Rise of IX');
+    const immoEmoji = getCustomEmoji('Immo', 'Immortality');
+    const epicEmoji = getCustomEmoji('Epic', 'Epic Mode');
+    const uprisingEmoji = getCustomEmoji('Uprising', 'Uprising');
+
+    let expansionText = 'Expansions';
+    if (expansion === 'Ix') expansionText = ixEmoji;
+    if (expansion === 'Immortality') expansionText = immoEmoji;
+    if (expansion === 'Epic') expansionText = epicEmoji;
+    if (expansion === 'Both') expansionText = `${ixEmoji} + ${immoEmoji}`;
+
+    let boardText = board === 'Uprising' ? uprisingEmoji : 'Base Game';
+
+    // Build the dynamic status text using the host mention instead of plain username string
+    let statusSentence = `${host} is looking for players`;
     if (board && board !== 'Base' && expansion && expansion !== 'None') {
-      statusSentence += ` for ${board === 'Uprising' ? 'Uprising' : 'Base Game'} with ${expansion === 'Ix' ? 'Rise of IX' : expansion === 'Immortality' ? 'Immortality' : expansion === 'Epic' ? 'Epic Mode' : 'Expansions'}`;
+      statusSentence += ` for ${boardText} with ${expansionText}`;
     } else if (board && board !== 'Base') {
-      statusSentence += ` for ${board === 'Uprising' ? 'Uprising' : 'Base Game'}`;
+      statusSentence += ` for ${boardText}`;
     } else if (expansion && expansion !== 'None') {
-      statusSentence += ` with ${expansion === 'Ix' ? 'Rise of IX' : expansion === 'Immortality' ? 'Immortality' : expansion === 'Epic' ? 'Epic Mode' : 'Expansions'}`;
+      statusSentence += ` with ${expansionText}`;
     }
     statusSentence += '.';
 
