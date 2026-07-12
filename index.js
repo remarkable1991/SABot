@@ -15,6 +15,7 @@ const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
+const tournamentCommand = require('./tournament');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -51,9 +52,9 @@ const discordClient = new Client({
 
 const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
-  [asyncCommand.data.name, asyncCommand]
+  [asyncCommand.data.name, asyncCommand],
+  [tournamentCommand.data.name, tournamentCommand]
 ]);
-
 
 const pendingGames = new Set();
 let realtimeRetryCount = 0;
@@ -94,7 +95,6 @@ function formatDelta(value) {
   return (num > 0 ? '+' : '') + num.toFixed(2);
 }
 
-// Fixed to reuse existing lookup mapping cleanly across the application structure
 function getEmoji(guild, name, fallback) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
@@ -221,7 +221,6 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  // Swapped to point directly to UUID 'id' column mapping to safely match games schema configuration parameters
   const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
@@ -345,13 +344,11 @@ discordClient.on('interactionCreate', async (interaction) => {
         
         const embed = EmbedBuilder.from(message.embeds[0]);
 
-        // Rebuilt layout: Maps bells right next to active players in the list
         const playerList = players.map(id => {
           const hasBell = notifications.includes(id) ? ' 🔔' : '';
           return `• <@${id}>${hasBell}`;
         }).join('\n');
 
-        // Main field updater syncing back the clean, structured custom layouts seamlessly
         embed.setFields(
           { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
           { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
@@ -375,40 +372,16 @@ discordClient.once('clientReady', async () => {
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
+      const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
       await rest.put(
         Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-        { body: [statsCommand.data.toJSON(), asyncCommand.data.toJSON()] }
+        { body: commands }
       );
-      console.log('Background Sync: Commands registered.');
-    } catch (err) {
-      console.error('Background Sync: Registration failed:', err);
+      console.log('Successfully registered all commands internally.');
+    } catch (error) {
+      console.error('Failed to register commands internally:', error);
     }
   }
-
-  setInterval(async () => {
-    try {
-      const now = new Date(); const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000); const fifteenHoursAgo = new Date(now.getTime() - 15 * 60 * 60 * 1000);
-      const { data: prompts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').is('last_prompted_at', null).lt('created_at', twelveHoursAgo.toISOString());
-      if (prompts && prompts.length > 0) {
-        for (const lobby of prompts) {
-          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-          if (channel) { await channel.send({ content: `⏳ ${lobby.player_ids.map(id => `<@${id}>`).join(' ')} **Lobby Check-in:** This match has been looking for players for 12 hours! Has it already started, or would you like to rehost?` }); }
-          await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-        }
-      }
-      const { data: timeouts } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lt('created_at', fifteenHoursAgo.toISOString());
-      if (timeouts && timeouts.length > 0) {
-        for (const lobby of timeouts) {
-          await supabase.from('active_async_matches').update({ status: 'timed_out' }).eq('id', lobby.id);
-          const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-          if (channel) {
-            const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
-            if (msg) await msg.edit({ content: '❌ **Match request timed out (15 hours exceeded without start confirmation).**', embeds: [], components: [] }).catch(() => null);
-          }
-        }
-      }
-    } catch (err) { console.error('Error running matchmaking timeout worker:', err); }
-  }, 5 * 60 * 1000);
 });
 
-discordClient.login(DISCORD_BOT_TOKEN);
+discordC
