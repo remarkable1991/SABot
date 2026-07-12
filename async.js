@@ -4,10 +4,9 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
     .setDescription('Look for opponents for an asynchronous game')
-    // Set to true so the text box automatically forces open as the first thing they type
     .addStringOption(option =>
       option.setName('text')
-        .setDescription('Any extra details or notes for this match')
+        .setDescription('Match notes (Hit Enter to leave blank/default)')
         .setRequired(true)
     )
     .addStringOption(option =>
@@ -26,8 +25,11 @@ module.exports = {
         .addChoices(
           { name: 'Rise of Ix', value: 'Ix' },
           { name: 'Immortality', value: 'Immortality' },
-          { name: 'Ix + Immortality', value: 'Both' },
-          { name: 'Epic Mode', value: 'Epic' }
+          { name: 'Epic Mode', value: 'Epic' },
+          { name: 'Ix + Immortality', value: 'Ix_Immo' },
+          { name: 'Ix + Epic', value: 'Ix_Epic' },
+          { name: 'Immortality + Epic', value: 'Immo_Epic' },
+          { name: 'All Expansions (Ix + Immo + Epic)', value: 'All' }
         )
     )
     .addStringOption(option =>
@@ -37,7 +39,12 @@ module.exports = {
     ),
 
   async execute(interaction, { supabase }) {
-    const notes = interaction.options.getString('text');
+    let inputNotes = interaction.options.getString('text');
+    // If they just hit space or left the default text, treat it as blank
+    if (!inputNotes || inputNotes.trim() === '') {
+      inputNotes = 'Looking for an async match!';
+    }
+
     const board = interaction.options.getString('board');
     const expansion = interaction.options.getString('expansion');
     const password = interaction.options.getString('password') || 'None';
@@ -50,37 +57,51 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    // Keep backend structure matching database requirements
+    // Grab core emojis safely
+    const ixEmoji = getCustomEmoji('Ix', '');
+    const immoEmoji = getCustomEmoji('Immo', '');
+    const epicEmoji = getCustomEmoji('Epic', '');
+    const uprisingEmoji = getCustomEmoji('Uprising', '');
+
+    // 1. Database Display Mapping (Keeps database arrays consistent)
     let expansionDisplay = expansion || 'None';
-    if (expansion === 'Ix') expansionDisplay = `${getCustomEmoji('Ix', 'Ix')} Rise of IX`;
-    if (expansion === 'Immortality') expansionDisplay = `${getCustomEmoji('Immo', 'Immo')} Immortality`;
-    if (expansion === 'Epic') expansionDisplay = `${getCustomEmoji('Epic', 'Epic')} Epic Mode`;
-    if (expansion === 'Both') expansionDisplay = `Rise of IX + Immortality`;
+    if (expansion === 'Ix') expansionDisplay = `${ixEmoji} Rise of IX`.trim();
+    if (expansion === 'Immortality') expansionDisplay = `${immoEmoji} Immortality`.trim();
+    if (expansion === 'Epic') expansionDisplay = `${epicEmoji} Epic Mode`.trim();
+    if (expansion === 'Ix_Immo') expansionDisplay = 'Rise of IX + Immortality';
+    if (expansion === 'Ix_Epic') expansionDisplay = 'Rise of IX + Epic Mode';
+    if (expansion === 'Immo_Epic') expansionDisplay = 'Immortality + Epic Mode';
+    if (expansion === 'All') expansionDisplay = 'Rise of IX + Immortality + Epic Mode';
 
     let boardDisplay = board || 'Not Specified';
-    if (board === 'Uprising') boardDisplay = `${getCustomEmoji('Uprising', 'Uprising')} Uprising`;
+    if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // Sentence Formatting: Combines the Emoji + Name text perfectly
-    const ixText = `${getCustomEmoji('Ix', '')} Rise of IX`.trim();
-    const immoText = `${getCustomEmoji('Immo', '')} Immortality`.trim();
-    const epicText = `${getCustomEmoji('Epic', '')} Epic Mode`.trim();
-    const uprisingText = `${getCustomEmoji('Uprising', '')} Uprising`.trim();
+    // 2. Sentence Text Construction (Emoji + Text Name combinations)
+    const ixText = `${ixEmoji} Rise of IX`.trim();
+    const immoText = `${immoEmoji} Immortality`.trim();
+    const epicText = `${epicEmoji} Epic Mode`.trim();
+    const uprisingText = `${uprisingEmoji} Uprising`.trim();
 
-    let expansionText = 'Expansions';
+    let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
     if (expansion === 'Epic') expansionText = epicText;
-    if (expansion === 'Both') expansionText = `${ixText} + ${immoText}`;
+    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
+    if (expansion === 'Ix_Epic') expansionText = `${ixText} and ${epicText}`;
+    if (expansion === 'Immo_Epic') expansionText = `${immoText} and ${epicText}`;
+    if (expansion === 'All') expansionText = `${ixText}, ${immoText}, and ${epicText}`;
 
+    // Base Game shows no emoji prefix
     let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
 
-    // Render sentence using proper mentions and custom components
     let statusSentence = `${host} is looking for players`;
     if (board && board !== 'Base' && expansion && expansion !== 'None') {
       statusSentence += ` for ${boardText} with ${expansionText}`;
     } else if (board && board !== 'Base') {
       statusSentence += ` for ${boardText}`;
+    } else if (board === 'Base' && expansion && expansion !== 'None') {
+      statusSentence += ` for Base Game with ${expansionText}`;
     } else if (expansion && expansion !== 'None') {
       statusSentence += ` with ${expansionText}`;
     }
@@ -90,7 +111,7 @@ module.exports = {
 
     const embed = new EmbedBuilder()
       .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
-      .setDescription(`"${notes}"`)
+      .setDescription(`"${inputNotes}"`)
       .setColor(0x3498db)
       .addFields(
         { name: '📝 Match Details', value: statusSentence, inline: false },
@@ -126,7 +147,7 @@ module.exports = {
         host_id: host.id,
         player_ids: [host.id],
         notify_user_ids: [],
-        message_text: notes,
+        message_text: inputNotes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
         expansions: expansion && expansion !== 'None' ? [expansionDisplay] : [],
