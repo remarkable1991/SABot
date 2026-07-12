@@ -93,6 +93,7 @@ function formatDelta(value) {
   return (num > 0 ? '+' : '') + num.toFixed(2);
 }
 
+// Fixed to reuse existing lookup mapping cleanly across the application structure
 function getEmoji(guild, name, fallback) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
@@ -219,7 +220,7 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  // Swapped .eq('game_id', gameId) to .eq('id', gameId)
+  // Swapped to point directly to UUID 'id' column mapping to safely match games schema configuration parameters
   const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
@@ -310,7 +311,6 @@ discordClient.on('interactionCreate', async (interaction) => {
     try {
       await interaction.deferUpdate();
       const { customId, user, message } = interaction;
-      // THE FIX: message.id replaced cleanly with interaction.message.id to secure context reference mapping
       const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', interaction.message.id).single();
       if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
@@ -341,15 +341,22 @@ discordClient.on('interactionCreate', async (interaction) => {
 
       if (shouldUpdate) {
         await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+        
         const embed = EmbedBuilder.from(message.embeds[0]);
+
+        // Rebuilt layout: Maps bells right next to active players in the list
+        const playerList = players.map(id => {
+          const hasBell = notifications.includes(id) ? ' 🔔' : '';
+          return `• <@${id}>${hasBell}`;
+        }).join('\n');
+
+        // Main field updater syncing back the clean, structured custom layouts seamlessly
         embed.setFields(
-          { name: '👤 Host', value: `<@${lobby.host_id}>`, inline: true },
-          { name: '🗺️ Board', value: lobby.board_type || 'Not Specified', inline: true },
-          { name: '🔌 Expansion', value: (lobby.expansions && lobby.expansions.length > 0) ? lobby.expansions.join(', ') : 'None', inline: true },
-          { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : '🔓 Public', inline: false },
-          { name: `👥 Players (${players.length}/4)`, value: players.map(id => `• <@${id}>`).join('\n'), inline: false },
-          { name: '🔔 Notifications Active For', value: notifications.length > 0 ? notifications.map(id => `<@${id}>`).join(', ') : '—', inline: false }
+          { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+          { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+          { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
         );
+
         const actionRowData = message.components[0].toJSON();
         const utilityRowData = message.components[1].toJSON();
         const row = ActionRowBuilder.from(actionRowData);
