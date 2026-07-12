@@ -54,6 +54,7 @@ const slashCommands = new Map([
   [asyncCommand.data.name, asyncCommand]
 ]);
 
+
 const pendingGames = new Set();
 let realtimeRetryCount = 0;
 let realtimeChannel = null;
