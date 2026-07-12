@@ -37,8 +37,8 @@ module.exports = {
 
   async execute(interaction, { supabase }) {
     const notes = interaction.options.getString('notes') || 'Looking for an async match!';
-    const board = interaction.options.getString('board') || 'Not Specified';
-    const expansion = interaction.options.getString('expansion') || 'None';
+    const board = interaction.options.getString('board');
+    const expansion = interaction.options.getString('expansion');
     const password = interaction.options.getString('password') || 'None';
     const host = interaction.user;
 
@@ -49,25 +49,38 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    let expansionDisplay = expansion;
+    // Parse options for the database structure
+    let expansionDisplay = expansion || 'None';
     if (expansion === 'Ix') expansionDisplay = `${getCustomEmoji('Ix', 'Ix')} Rise of IX`;
     if (expansion === 'Immortality') expansionDisplay = `${getCustomEmoji('Immo', 'Immo')} Immortality`;
     if (expansion === 'Epic') expansionDisplay = `${getCustomEmoji('Epic', 'Epic')} Epic Mode`;
+    if (expansion === 'Both') expansionDisplay = `Rise of IX + Immortality`;
 
-    let boardDisplay = board;
+    let boardDisplay = board || 'Not Specified';
     if (board === 'Uprising') boardDisplay = `${getCustomEmoji('Uprising', 'Uprising')} Uprising`;
+    if (board === 'Base') boardDisplay = 'Base Game';
+
+    // Build the dynamic summary sentence
+    let statusSentence = `**${host.username}** is looking for players`;
+    if (board && board !== 'Base' && expansion && expansion !== 'None') {
+      statusSentence += ` for ${board === 'Uprising' ? 'Uprising' : 'Base Game'} with ${expansion === 'Ix' ? 'Rise of IX' : expansion === 'Immortality' ? 'Immortality' : expansion === 'Epic' ? 'Epic Mode' : 'Expansions'}`;
+    } else if (board && board !== 'Base') {
+      statusSentence += ` for ${board === 'Uprising' ? 'Uprising' : 'Base Game'}`;
+    } else if (expansion && expansion !== 'None') {
+      statusSentence += ` with ${expansion === 'Ix' ? 'Rise of IX' : expansion === 'Immortality' ? 'Immortality' : expansion === 'Epic' ? 'Epic Mode' : 'Expansions'}`;
+    }
+    statusSentence += '.';
+
+    const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
 
     const embed = new EmbedBuilder()
-      .setTitle(`🎲 New Async Match Open!`)
+      .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
       .setDescription(`"${notes}"`)
       .setColor(0x3498db)
       .addFields(
-        { name: '👤 Host', value: `${host}`, inline: true },
-        { name: '🗺️ Board', value: boardDisplay, inline: true },
-        { name: '🔌 Expansion', value: expansionDisplay, inline: true },
-        { name: '🔑 Password', value: password === 'None' ? '🔓 Public' : `\`${password}\``, inline: false },
-        { name: '👥 Players (1/4)', value: `• ${host}`, inline: false },
-        { name: '🔔 Notifications Active For', value: '—', inline: false }
+        { name: '📝 Match Details', value: statusSentence, inline: false },
+        { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
+        { name: '👥 Players (1/4)', value: `• ${host}`, inline: false }
       )
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
@@ -83,7 +96,6 @@ module.exports = {
       new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
     );
 
-    // Fixed implementation using fetchReply for discord.js v14 compatibility
     const response = await interaction.reply({
       embeds: [embed],
       components: [actionRow, utilityRow],
@@ -102,7 +114,7 @@ module.exports = {
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
-        expansions: expansion !== 'None' ? [expansionDisplay] : [],
+        expansions: expansion && expansion !== 'None' ? [expansionDisplay] : [],
         status: 'searching'
       });
   }
