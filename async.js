@@ -4,10 +4,11 @@ module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
     .setDescription('Look for opponents for an asynchronous game')
+    // Reverted back to optional as requested
     .addStringOption(option =>
       option.setName('text')
-        .setDescription('Match notes (Hit Enter to leave blank/default)')
-        .setRequired(true)
+        .setDescription('Any extra details or notes for this match')
+        .setRequired(false)
     )
     .addStringOption(option =>
       option.setName('board')
@@ -25,10 +26,8 @@ module.exports = {
         .addChoices(
           { name: 'Rise of Ix', value: 'Ix' },
           { name: 'Immortality', value: 'Immortality' },
-          { name: 'Epic Mode', value: 'Epic' },
           { name: 'Ix + Immortality', value: 'Ix_Immo' },
-          { name: 'Ix + Epic', value: 'Ix_Epic' },
-          { name: 'Immortality + Epic', value: 'Immo_Epic' },
+          { name: 'Ix + Epic Mode', value: 'Ix_Epic' },
           { name: 'All Expansions (Ix + Immo + Epic)', value: 'All' }
         )
     )
@@ -39,12 +38,7 @@ module.exports = {
     ),
 
   async execute(interaction, { supabase }) {
-    let inputNotes = interaction.options.getString('text');
-    // If they just hit space or left the default text, treat it as blank
-    if (!inputNotes || inputNotes.trim() === '') {
-      inputNotes = 'Looking for an async match!';
-    }
-
+    const notes = interaction.options.getString('text') || 'Looking for an async match!';
     const board = interaction.options.getString('board');
     const expansion = interaction.options.getString('expansion');
     const password = interaction.options.getString('password') || 'None';
@@ -57,27 +51,25 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
-    // Grab core emojis safely
+    // Core Custom Emoji Lookups
     const ixEmoji = getCustomEmoji('Ix', '');
     const immoEmoji = getCustomEmoji('Immo', '');
     const epicEmoji = getCustomEmoji('Epic', '');
     const uprisingEmoji = getCustomEmoji('Uprising', '');
 
-    // 1. Database Display Mapping (Keeps database arrays consistent)
+    // 1. Database Storage String Mapping
     let expansionDisplay = expansion || 'None';
     if (expansion === 'Ix') expansionDisplay = `${ixEmoji} Rise of IX`.trim();
     if (expansion === 'Immortality') expansionDisplay = `${immoEmoji} Immortality`.trim();
-    if (expansion === 'Epic') expansionDisplay = `${epicEmoji} Epic Mode`.trim();
     if (expansion === 'Ix_Immo') expansionDisplay = 'Rise of IX + Immortality';
     if (expansion === 'Ix_Epic') expansionDisplay = 'Rise of IX + Epic Mode';
-    if (expansion === 'Immo_Epic') expansionDisplay = 'Immortality + Epic Mode';
     if (expansion === 'All') expansionDisplay = 'Rise of IX + Immortality + Epic Mode';
 
     let boardDisplay = board || 'Not Specified';
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // 2. Sentence Text Construction (Emoji + Text Name combinations)
+    // 2. Interface Sentence String Construction
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -86,13 +78,10 @@ module.exports = {
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Epic') expansionText = epicText;
     if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
     if (expansion === 'Ix_Epic') expansionText = `${ixText} and ${epicText}`;
-    if (expansion === 'Immo_Epic') expansionText = `${immoText} and ${epicText}`;
     if (expansion === 'All') expansionText = `${ixText}, ${immoText}, and ${epicText}`;
 
-    // Base Game shows no emoji prefix
     let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
 
     let statusSentence = `${host} is looking for players`;
@@ -109,16 +98,20 @@ module.exports = {
 
     const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
 
+    // Generate accurate Unix timestamp for 15 hours in the future
+    const timeoutTimestamp = Math.floor((Date.now() + 15 * 60 * 60 * 1000) / 1000);
+
     const embed = new EmbedBuilder()
       .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
-      .setDescription(`"${inputNotes}"`)
+      .setDescription(`"${notes}"`)
       .setColor(0x3498db)
       .addFields(
         { name: '📝 Match Details', value: statusSentence, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
         { name: '👥 Players (1/4)', value: `• ${host}`, inline: false }
       )
-      .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
+      // Displays the specific deadline dynamic timestamp string inside the text structure
+      .setFooter({ text: `Lobbies time out automatically if unstarted after 15 hours (Expires <t:${timeoutTimestamp}:R>)` })
       .setTimestamp();
 
     const actionRow = new ActionRowBuilder().addComponents(
@@ -147,7 +140,7 @@ module.exports = {
         host_id: host.id,
         player_ids: [host.id],
         notify_user_ids: [],
-        message_text: inputNotes,
+        message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
         expansions: expansion && expansion !== 'None' ? [expansionDisplay] : [],
