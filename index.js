@@ -384,24 +384,4 @@ discordClient.once('clientReady', async () => {
   }
 });
 
-discordClient.once('clientReady', async () => {
-  console.log('Logged in as', discordClient.user.tag);
-  startRealtimeListener();
-
-  if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
-    try {
-      const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
-      const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
-      await rest.put(
-        Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-        { body: commands }
-      );
-      console.log('Successfully registered all commands internally.');
-    } catch (error) {
-      console.error('Failed to register commands internally:', error);
-    }
-  }
-});
-
-// MAKE SURE THIS LINE IS AT THE VERY BOTTOM OF YOUR FILE:
 discordClient.login(DISCORD_BOT_TOKEN);
