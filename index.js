@@ -219,7 +219,8 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('game_id', gameId).single();
+  // Swapped .eq('game_id', gameId) to .eq('id', gameId)
+  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
