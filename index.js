@@ -36,6 +36,10 @@ const DB_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 
+// Your designated target tournament role ID
+const TOURNAMENT_ROLE_ID = '1525805277662679121';
+const TARGET_TOURNAMENT_NUM = 14;
+
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -293,6 +297,85 @@ function startRealtimeListener() {
   });
 }
 
+// --- AUTOMATED REAL-TIME DISPATCHER ---
+function startGlobalDatabaseListener() {
+  supabase
+    .channel('global_db_sync')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public' },
+      async (payload) => {
+        const { table, eventType, new: newRecord } = payload;
+        if (!newRecord) return;
+
+        console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
+
+        // HANDLER A: Tournament Registrations
+        if (table === 'tournament_registrations') {
+          if (newRecord.active_on_discord === true && Number(newRecord.tournament_num) === TARGET_TOURNAMENT_NUM) {
+            await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, true);
+          } else if (newRecord.active_on_discord === false || Number(newRecord.tournament_num) !== TARGET_TOURNAMENT_NUM) {
+            await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, false);
+          }
+        }
+
+        // --- HANDLER B: Hook in your non-tournament table maps right below here ---
+      }
+    )
+    .subscribe();
+}
+
+// --- GLOBAL ROLE ASSIGNER HELPER ---
+async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
+  if (!discordUsername) return;
+  try {
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    const role = guild.roles.cache.get(roleId);
+    if (!guild || !role) return;
+
+    const member = await searchGuildMemberByNames(guild, [discordUsername]);
+    if (!member) return;
+
+    const hasRole = member.roles.cache.has(roleId);
+
+    if (shouldHaveRole && !hasRole) {
+      await member.roles.add(role);
+      console.log(`✅ Automated Sync: Added ${role.name} to ${member.user.tag}`);
+    } else if (!shouldHaveRole && hasRole) {
+      await member.roles.remove(role);
+      console.log(`❌ Automated Sync: Removed ${role.name} from ${member.user.tag}`);
+    }
+  } catch (err) {
+    console.error(`Error executing automated sync for ${discordUsername}:`, err);
+  }
+}
+
+// --- BOOT SCAN FOR PAST USERS ---
+async function runInitialDatabaseSync() {
+  console.log('🔄 Running initial boot-time synchronization scan...');
+  try {
+    const { data: activeRegs, error } = await supabase
+      .from('tournament_registrations')
+      .select('discord_username')
+      .eq('tournament_num', TARGET_TOURNAMENT_NUM)
+      .eq('active_on_discord', true);
+
+    if (error) throw error;
+    if (!activeRegs || !activeRegs.length) {
+      console.log('No existing active registrations found to sync.');
+      return;
+    }
+
+    console.log(`Found ${activeRegs.length} existing active registrations. Processing profiles...`);
+    for (const reg of activeRegs) {
+      await syncSingleUserRole(reg.discord_username, TOURNAMENT_ROLE_ID, true);
+    }
+    console.log('🏁 Boot-time verification sweep complete.');
+  } catch (err) {
+    console.error('Failed executing initial boot-time scan:', err);
+  }
+}
+
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
@@ -367,7 +450,13 @@ discordClient.on('interactionCreate', async (interaction) => {
 
 discordClient.once('clientReady', async () => {
   console.log('Logged in as', discordClient.user.tag);
+  
+  // Launch all real-time event frameworks
   startRealtimeListener();
+  startGlobalDatabaseListener();
+
+  // Execute past history catch-up routine
+  await runInitialDatabaseSync();
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
