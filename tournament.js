@@ -97,13 +97,11 @@ module.exports = {
       const registration = await checkTournamentRegistration(supabase, interaction.user);
 
       if (registration) {
-        // Evaluate the member's server roles directly out of the interaction context
         const hasCheckInRole = interaction.member.roles.cache.has(CHECK_IN_ROLE_ID);
         
         const checkInStatusText = hasCheckInRole 
           ? '✅ **Successfully checked in**' 
-          : '❌ **Not checked in.** Please go to <#1233029532785573918> to complete the check-in process.'; 
-          // Note: Adjust the channel ID placeholder above if your true #check-in channel snowflake changes
+          : '❌ **Not checked in.** Please go to <#1224323203011186728> to complete the check-in process.';
 
         const embed = new EmbedBuilder()
           .setTitle('🏆 Tournament Status Profile')
