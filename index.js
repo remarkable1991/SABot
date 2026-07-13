@@ -40,6 +40,16 @@ const GUILD_MATCH_GAP = 0.08;
 const TOURNAMENT_ROLE_ID = '1525805277662679121';
 const TARGET_TOURNAMENT_NUM = 14;
 
+// Automated SP Progression Tier Structure Array Configuration
+const SP_ROLES_CONFIG = [
+  { name: 'Kwisatz Haderach', min: 10000, id: '152621467311616082' },
+  { name: 'Swordmaster',      min: 5000,  id: '1526218389004226640' },
+  { name: 'Mentat',           min: 2500,  id: '1526218251858612274' },
+  { name: 'Fedaykin',         min: 1000,  id: '1526218112054198332' },
+  { name: 'Trooper',          min: 250,   id: '1526217478017908786' },
+  { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
+];
+
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -307,11 +317,29 @@ function startGlobalDatabaseListener() {
         const { table, eventType, new: newRecord } = payload;
         if (!newRecord) return;
         console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
+        
+        // HANDLER A: Tournament Registrations
         if (table === 'tournament_registrations') {
           if (newRecord.active_on_discord === true && Number(newRecord.tournament_num) === TARGET_TOURNAMENT_NUM) {
             await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, true);
           } else if (newRecord.active_on_discord === false || Number(newRecord.tournament_num) !== TARGET_TOURNAMENT_NUM) {
             await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, false);
+          }
+        }
+
+        // HANDLER B: Live SP Tier Progression Hierarchy Updates
+        if (table === 'player_sp' && eventType === 'UPDATE') {
+          if (newRecord.is_claimed === true) {
+            const { data: mapRecord } = await supabase
+              .from('player_discord_map')
+              .select('discord_user_id')
+              .eq('player_key', newRecord.player_key)
+              .single();
+
+            const targetDiscordId = mapRecord?.discord_user_id;
+            if (targetDiscordId) {
+              await syncPlayerSpRole(targetDiscordId, Number(newRecord.lifetime_sp));
+            }
           }
         }
       }
@@ -340,23 +368,95 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
   }
 }
 
+// Global Core SP Tier Sync Engine Function Handler
+async function syncPlayerSpRole(discordUserId, lifetimeSp) {
+  if (!discordUserId) return;
+  try {
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    const member = await guild.members.fetch(discordUserId).catch(() => null);
+    if (!member) return;
+
+    const targetRoleConfig = SP_ROLES_CONFIG.find(role => lifetimeSp >= role.min);
+    if (!targetRoleConfig) return;
+
+    const allRoleIds = SP_ROLES_CONFIG.map(r => r.id);
+    const rolesToRemove = allRoleIds.filter(id => id !== targetRoleConfig.id && member.roles.cache.has(id));
+    const shouldAddTarget = !member.roles.cache.has(targetRoleConfig.id);
+
+    if (rolesToRemove.length > 0) {
+      for (const roleId of rolesToRemove) {
+        await member.roles.remove(roleId).catch(() => null);
+      }
+    }
+
+    if (shouldAddTarget) {
+      const targetRole = guild.roles.cache.get(targetRoleConfig.id);
+      if (targetRole) {
+        await member.roles.add(targetRole).catch(() => null);
+        console.log(`🎖️ SP Promotion: Assigned ${targetRole.name} to ${member.user.tag} (${lifetimeSp} SP)`);
+      }
+    }
+  } catch (err) {
+    console.error(`Failed executing unified SP tier validation loops for user ID ${discordUserId}:`, err);
+  }
+}
+
+// Comprehensive Global Audit Sweep Execution Logic Hook
+async function executeGlobalSpAuditSweep() {
+  console.log('🧼 Starting comprehensive background SP role synchronization sweep...');
+  try {
+    const { data: claimedSpRecords, error: spError } = await supabase
+      .from('player_sp')
+      .select('player_key, lifetime_sp')
+      .eq('is_claimed', true);
+
+    if (spError || !claimedSpRecords || !claimedSpRecords.length) return;
+
+    const playerKeys = claimedSpRecords.map(r => r.player_key);
+    const { data: mapRecords, error: mapError } = await supabase
+      .from('player_discord_map')
+      .select('player_key, discord_user_id')
+      .in('player_key', playerKeys);
+
+    if (mapError || !mapRecords) return;
+
+    const mapDict = {};
+    for (const row of mapRecords) {
+      if (row.discord_user_id) mapDict[row.player_key] = row.discord_user_id;
+    }
+
+    for (const record of claimedSpRecords) {
+      const discordId = mapDict[record.player_key];
+      if (discordId) {
+        await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
+      }
+    }
+    console.log('🏁 Global background validation check complete.');
+  } catch (err) {
+    console.error('Critical failure running background validation sweeps:', err);
+  }
+}
+
 async function runInitialDatabaseSync() {
   console.log('🔄 Running initial boot-time synchronization scan...');
   try {
+    // Phase 1: Sync Tournament Configurations
     const { data: activeRegs, error } = await supabase
       .from('tournament_registrations')
       .select('discord_username')
       .eq('tournament_num', TARGET_TOURNAMENT_NUM)
       .eq('active_on_discord', true);
     if (error) throw error;
-    if (!activeRegs || !activeRegs.length) {
-      console.log('No existing active registrations found to sync.');
-      return;
+    if (activeRegs && activeRegs.length) {
+      console.log(`Found ${activeRegs.length} existing active registrations. Processing profiles...`);
+      for (const reg of activeRegs) {
+        await syncSingleUserRole(reg.discord_username, TOURNAMENT_ROLE_ID, true);
+      }
     }
-    console.log(`Found ${activeRegs.length} existing active registrations. Processing profiles...`);
-    for (const reg of activeRegs) {
-      await syncSingleUserRole(reg.discord_username, TOURNAMENT_ROLE_ID, true);
-    }
+
+    // Phase 2: Run Boot Sweep for SP Tier Profiles
+    await executeGlobalSpAuditSweep();
+
     console.log('🏁 Boot-time verification sweep complete.');
   } catch (err) {
     console.error('Failed executing initial boot-time scan:', err);
@@ -389,7 +489,6 @@ discordClient.on('interactionCreate', async (interaction) => {
       let notifications = [...(lobby.notify_user_ids || [])];
       let shouldUpdate = false;
 
-      // Handle the manual ping request button
       if (customId === 'async_ping_role') {
         const now = new Date();
         const lastPrompted = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
@@ -404,7 +503,6 @@ discordClient.on('interactionCreate', async (interaction) => {
         const targetRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
         const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
         
-        // FIXED: Kept as "is looking" to maintain proper active context phrasing
         const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
         const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${cleanDetailsLine}`;
         
@@ -451,7 +549,6 @@ discordClient.on('interactionCreate', async (interaction) => {
         return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
       }
 
-      // Automatically triggers if a button interaction occurs to forcefully sync old initialization states
       if (shouldUpdate || message.components.length > 0) {
         if (shouldUpdate) {
           await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
@@ -496,6 +593,12 @@ discordClient.once('clientReady', async () => {
   startRealtimeListener();
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
+
+  // Initializes automated background audit sweep iterations strictly executing once every 24 hours
+  setInterval(async () => {
+    await executeGlobalSpAuditSweep();
+  }, 24 * 60 * 60 * 1000);
+
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
