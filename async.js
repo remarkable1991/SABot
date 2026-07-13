@@ -77,7 +77,7 @@ module.exports = {
       activeMode = null; 
     }
 
-    // Combine parameters safely into expansionsStored array for index.js compatibility
+    // Combine parameters safely into expansionsStored array for database compatibility
     const expansionsStored = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
     if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
@@ -134,6 +134,19 @@ module.exports = {
     const targetRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
     const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
 
+    // Formats the exact custom content layout phrase requested for the push notification ping
+    let customPingSentence = `**${interaction.user.username}** is looking for players ${roleMention}`;
+    if (board && board !== 'Base' && expansionText) {
+      customPingSentence += ` for ${boardText} with ${expansionText}`;
+    } else if (board && board !== 'Base') {
+      customPingSentence += ` for ${boardText}`;
+    } else if (board === 'Base' && expansionText) {
+      customPingSentence += ` for Base Game with ${expansionText}`;
+    } else if (expansionText) {
+      customPingSentence += ` playing with ${expansionText}`;
+    }
+    customPingSentence += '.';
+
     const embed = new EmbedBuilder()
       .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
       .setDescription(`"${notes}"`)
@@ -157,9 +170,8 @@ module.exports = {
       new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
     );
 
-    // Mentions the role outside the embed so that the notification broadcast fires correctly
+    // 1. Send embed dashboard layout back immediately to satisfy the slash command interaction
     const response = await interaction.reply({
-      content: roleMention,
       embeds: [embed],
       components: [actionRow, utilityRow],
       withResponse: true
@@ -167,6 +179,18 @@ module.exports = {
 
     const messageId = response.resource?.message?.id || response.id;
 
+    // 2. Dispatch the formatted plain text role mention follow-up to hit phones and lock screens
+    const pingMessage = await interaction.followUp({
+      content: customPingSentence,
+      allowedMentions: { roles: [targetRole?.id].filter(Boolean) }
+    });
+
+    // 3. Clear text clutter from channel view after a 1.5-second buffer window
+    setTimeout(() => {
+      pingMessage.delete().catch(() => {});
+    }, 1500);
+
+    // 4. Record details safely down to Supabase columns
     await supabase
       .from('active_async_matches')
       .insert({
