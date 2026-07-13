@@ -1,7 +1,8 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 
 const LOOKUP_THRESHOLD = 0.72;
 const CURRENT_TOURNAMENT_NUM = 14;
+const CHECK_IN_ROLE_ID = '1526157402435620964';
 
 function normalizeName(value) {
   return String(value || '')
@@ -52,7 +53,6 @@ async function checkTournamentRegistration(supabase, discordUser) {
     discordUser.tag
   ].filter(Boolean);
 
-  // 1. Build fuzzy match criteria to pull potential registration rows
   const orFilters = [
     ...candidates.map((value) => `discord_username.ilike.%${value}%`)
   ];
@@ -67,7 +67,6 @@ async function checkTournamentRegistration(supabase, discordUser) {
   if (error) throw error;
   if (!data || !data.length) return null;
 
-  // 2. Perform fuzzy scoring on the returned tournament matches
   let best = null;
   let bestScore = 0;
 
@@ -89,23 +88,33 @@ async function checkTournamentRegistration(supabase, discordUser) {
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('tournament')
-    .setDescription('Verify if your Discord name is successfully registered for the active tournament'),
+    .setDescription('Verify your registration status and check-in configuration parameters'),
     
   async execute(interaction, { supabase }) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
     try {
       const registration = await checkTournamentRegistration(supabase, interaction.user);
 
       if (registration) {
+        // Evaluate the member's server roles directly out of the interaction context
+        const hasCheckInRole = interaction.member.roles.cache.has(CHECK_IN_ROLE_ID);
+        
+        const checkInStatusText = hasCheckInRole 
+          ? '✅ **Successfully checked in**' 
+          : '❌ **Not checked in.** Please go to <#1233029532785573918> to complete the check-in process.'; 
+          // Note: Adjust the channel ID placeholder above if your true #check-in channel snowflake changes
+
         const embed = new EmbedBuilder()
-          .setTitle('🏆 Tournament Registration Verified')
-          .setDescription(`✅ **Success!** You are registered for **Tournament #${CURRENT_TOURNAMENT_NUM}**.`)
+          .setTitle('🏆 Tournament Status Profile')
+          .setDescription(`Your verification records for **Tournament #${CURRENT_TOURNAMENT_NUM}**:`)
           .addFields(
+            { name: 'Registration Status', value: '✅ **Registered & Active**', inline: false },
+            { name: 'Check-In Status', value: checkInStatusText, inline: false },
             { name: 'Discord Username', value: `\`${registration.discord_username}\``, inline: true },
             { name: 'Direwolf Handle', value: `\`${registration.direwolf_name || '—'}\``, inline: true }
           )
-          .setColor(0x2ECC71)
+          .setColor(hasCheckInRole ? 0x2ECC71 : 0xF1C40F)
           .setTimestamp();
 
         await interaction.editReply({ embeds: [embed] });
