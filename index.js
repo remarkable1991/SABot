@@ -432,6 +432,7 @@ discordClient.on('interactionCreate', async (interaction) => {
           return `• <@${id}>${hasBell}`;
         }).join('\n');
 
+        // FIXED: Preserves the dynamic description/sentence from fields[0] cleanly without wiping out your custom styles
         embed.setFields(
           { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
           { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
