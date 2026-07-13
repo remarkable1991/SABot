@@ -230,7 +230,7 @@ async function buildGameResultPayload(gameId) {
   const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
-  const { data: ratings, error: ratingsError } = await supabase.from('player_ratings').select('player_key, display_name, game_version, elo').in('player_key', playerKeys).in('game_version', ['overall', game.game_version]);
+  const { data: ratings, error: ratingsError = null } = await supabase.from('player_ratings').select('player_key, display_name, game_version, elo').in('player_key', playerKeys).in('game_version', ['overall', game.game_version]);
   if (ratingsError) { console.error('Failed to fetch ratings', ratingsError); }
   const ratingsMap = {};
   for (const row of ratings || []) {
@@ -297,7 +297,6 @@ function startRealtimeListener() {
   });
 }
 
-// --- AUTOMATED REAL-TIME DISPATCHER ---
 function startGlobalDatabaseListener() {
   supabase
     .channel('global_db_sync')
@@ -323,7 +322,6 @@ function startGlobalDatabaseListener() {
     .subscribe();
 }
 
-// --- GLOBAL ROLE ASSIGNER HELPER ---
 async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
   if (!discordUsername) return;
   try {
@@ -348,7 +346,6 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
   }
 }
 
-// --- BOOT SCAN FOR PAST USERS ---
 async function runInitialDatabaseSync() {
   console.log('🔄 Running initial boot-time synchronization scan...');
   try {
@@ -400,7 +397,6 @@ discordClient.on('interactionCreate', async (interaction) => {
       let notifications = [...(lobby.notify_user_ids || [])];
       let shouldUpdate = false;
 
-      // New '📢 Request Players' Manual Button handling infrastructure with a strict 1-hour interval restriction rule mapping
       if (customId === 'async_ping_role') {
         const now = new Date();
         const lastPrompted = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
@@ -415,10 +411,14 @@ discordClient.on('interactionCreate', async (interaction) => {
         const targetRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
         const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
         
-        const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${message.embeds[0].fields[0].value}`;
-        const pingMsg = await interaction.channel.send({ content: broadcastText, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
+        // Cleaned string formatting: swaps "is looking" with "was looking" contextually
+        const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
         
-        setTimeout(() => { pingMsg.delete().catch(() => {}); }, 3000);
+        const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${cleanDetailsLine}`;
+        
+        // Dispatches standard persistent follow-up notification sequence (deletion block completely stripped out)
+        await interaction.channel.send({ content: broadcastText, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
+        
         await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
         return;
       }
@@ -445,12 +445,21 @@ discordClient.on('interactionCreate', async (interaction) => {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         const embed = EmbedBuilder.from(message.embeds[0]);
         const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
-        embed.setTitle('🏁 Async Match Started!').setColor(0x2ecc71).setFields(
-          { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
-          { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-          { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
-        );
-        return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
+        
+        // Extraction formatting mapping layers: completely isolates and cleans the setup sentence parameters
+        const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
+        const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
+
+        embed.setTitle('🏁 Async Match Started!')
+             .setColor(0x2ecc71)
+             .setFooter(null) // Clears the automatic timeout reminder message footer text entry
+             .setFields(
+               { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, // Strips dynamic expiration lines entirely
+               { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+               { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
+             );
+
+        return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
       }
 
       if (shouldUpdate) {
@@ -491,26 +500,16 @@ discordClient.on('interactionCreate', async (interaction) => {
 
 discordClient.once('clientReady', async () => {
   console.log('Logged in as', discordClient.user.tag);
-  
-  // Launch all real-time event frameworks
   startRealtimeListener();
   startGlobalDatabaseListener();
-
-  // Execute past history catch-up routine
   await runInitialDatabaseSync();
-
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
       const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
-      await rest.put(
-        Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID),
-        { body: commands }
-      );
+      await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), { body: commands });
       console.log('Successfully registered all commands internally.');
-    } catch (error) {
-      console.error('Failed to register commands internally:', error);
-    }
+    } catch (error) { console.error('Failed to register commands internally:', error); }
   }
 });
 
