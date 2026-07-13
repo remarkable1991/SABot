@@ -318,8 +318,6 @@ function startGlobalDatabaseListener() {
             await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, false);
           }
         }
-
-        // --- HANDLER B: Hook in your non-tournament table maps right below here ---
       }
     )
     .subscribe();
@@ -392,14 +390,40 @@ discordClient.on('interactionCreate', async (interaction) => {
 
   if (interaction.isButton() && interaction.customId.startsWith('async_')) {
     try {
-      await interaction.deferUpdate();
       const { customId, user, message } = interaction;
       const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', interaction.message.id).single();
-      if (fetchErr || !lobby || lobby.status !== 'searching') return;
+      if (fetchErr || !lobby || lobby.status !== 'searching') {
+        return interaction.deferUpdate().catch(() => {});
+      }
 
       let players = [...(lobby.player_ids || [])];
       let notifications = [...(lobby.notify_user_ids || [])];
       let shouldUpdate = false;
+
+      // New '📢 Request Players' Manual Button handling infrastructure with a strict 1-hour interval restriction rule mapping
+      if (customId === 'async_ping_role') {
+        const now = new Date();
+        const lastPrompted = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
+        const oneHourMs = 60 * 60 * 1000;
+
+        if (lastPrompted && (now.getTime() - lastPrompted.getTime() < oneHourMs)) {
+          const remainingMinutes = Math.ceil((oneHourMs - (now.getTime() - lastPrompted.getTime())) / 60000);
+          return interaction.reply({ content: `⏳ Cooldown active! You can ping the role again in **${remainingMinutes} minutes**.`, ephemeral: true });
+        }
+
+        await interaction.deferUpdate();
+        const targetRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+        const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+        
+        const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${message.embeds[0].fields[0].value}`;
+        const pingMsg = await interaction.channel.send({ content: broadcastText, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
+        
+        setTimeout(() => { pingMsg.delete().catch(() => {}); }, 3000);
+        await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+        return;
+      }
+
+      await interaction.deferUpdate();
 
       if (customId === 'async_join' && players.length < 4 && !players.includes(user.id)) {
         players.push(user.id); shouldUpdate = true;
@@ -407,7 +431,7 @@ discordClient.on('interactionCreate', async (interaction) => {
           await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
         }
       }
-      if (customId === 'async_leave' && user.id !== lobby.host_id && players.includes(user.id)) {
+      if (customId === 'async_leave' && players.includes(user.id)) {
         players = players.filter(id => id !== user.id); notifications = notifications.filter(id => id !== user.id); shouldUpdate = true;
       }
       if (customId === 'async_toggle_bell') {
@@ -419,31 +443,47 @@ discordClient.on('interactionCreate', async (interaction) => {
       }
       if (customId === 'async_start' && players.includes(user.id)) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
-        return interaction.editReply({ content: '🏁 **Game started! Good luck, commanders!**', embeds: [], components: [] }).catch(() => {});
+        const embed = EmbedBuilder.from(message.embeds[0]);
+        const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
+        embed.setTitle('🏁 Async Match Started!').setColor(0x2ecc71).setFields(
+          { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+          { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+          { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
+        );
+        return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
       }
 
       if (shouldUpdate) {
         await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
-        
         const embed = EmbedBuilder.from(message.embeds[0]);
-
-        const playerList = players.map(id => {
-          const hasBell = notifications.includes(id) ? ' 🔔' : '';
-          return `• <@${id}>${hasBell}`;
-        }).join('\n');
-
-        // FIXED: Preserves the dynamic description/sentence from fields[0] cleanly without wiping out your custom styles
+        const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
         embed.setFields(
           { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
           { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
           { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
         );
 
-        const actionRowData = message.components[0].toJSON();
-        const utilityRowData = message.components[1].toJSON();
-        const row = ActionRowBuilder.from(actionRowData);
-        row.components[2].setDisabled(players.length < 2);
-        await interaction.editReply({ embeds: [embed], components: [row, ActionRowBuilder.from(utilityRowData)] }).catch(() => {});
+        const isUserHost = user.id === lobby.host_id;
+        const userInLobby = players.includes(user.id);
+        const alertActive = notifications.includes(user.id);
+
+        const primaryRow = new ActionRowBuilder();
+        if (userInLobby) {
+          primaryRow.addComponents(new ButtonBuilder().setCustomId('async_leave').setLabel('Leave Match').setStyle(ButtonStyle.Danger));
+        } else {
+          primaryRow.addComponents(new ButtonBuilder().setCustomId('async_join').setLabel('Join Match').setStyle(ButtonStyle.Primary).setDisabled(players.length >= 4));
+        }
+        primaryRow.addComponents(new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(players.length < 2));
+        if (isUserHost) {
+          primaryRow.addComponents(new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger));
+        }
+
+        const secondaryRow = new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId('async_toggle_bell').setLabel(alertActive ? 'Alerts: ON' : 'Alerts: OFF').setEmoji('🔔').setStyle(alertActive ? ButtonStyle.Success : ButtonStyle.Secondary),
+          new ButtonBuilder().setCustomId('async_ping_role').setLabel('📢 Request Players').setStyle(ButtonStyle.Secondary)
+        );
+
+        await interaction.editReply({ embeds: [embed], components: [primaryRow, secondaryRow] }).catch(() => {});
       }
     } catch (err) { console.error('Error handling async button trigger:', err); }
   }
