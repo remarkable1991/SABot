@@ -68,6 +68,7 @@ module.exports = {
     const isUprising = board === 'Uprising';
     const hasIxMode = selectedMode === 'Epic';
 
+    // Strict Rule Validation Layer
     let activeMode = selectedMode;
     if (hasIxMode && expansion !== 'Ix' && expansion !== 'Ix_Immo') {
       expansion = expansion === 'Immortality' ? 'Ix_Immo' : 'Ix';
@@ -76,19 +77,19 @@ module.exports = {
       activeMode = null; 
     }
 
+    // Combine parameters safely into expansionsStored array for index.js compatibility
     const expansionsStored = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
     if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
-    
-    const modulesStored = [];
-    if (activeMode === 'Epic') modulesStored.push(`${epicEmoji} Epic Mode`.trim());
-    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') modulesStored.push('Base Leaders');
-    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') modulesStored.push('CHOAM Module');
+    if (activeMode === 'Epic') expansionsStored.push(`${epicEmoji} Epic Mode`.trim());
+    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') expansionsStored.push('Base Leaders');
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') expansionsStored.push('CHOAM Module');
 
     let boardDisplay = board || 'Not Specified';
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
+    // UI Sentence String Generation
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -135,7 +136,7 @@ module.exports = {
 
     const embed = new EmbedBuilder()
       .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
-      .setDescription(`${roleMention}\n\n"${notes}"`)
+      .setDescription(`"${notes}"`)
       .setColor(0x3498db)
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
@@ -156,7 +157,9 @@ module.exports = {
       new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
     );
 
+    // Mentions the role outside the embed so that the notification broadcast fires correctly
     const response = await interaction.reply({
+      content: roleMention,
       embeds: [embed],
       components: [actionRow, utilityRow],
       withResponse: true
@@ -177,7 +180,6 @@ module.exports = {
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
         expansions: expansionsStored,
-        modules: modulesStored,
         status: 'searching'
       });
   }
