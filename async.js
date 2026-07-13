@@ -76,7 +76,6 @@ module.exports = {
       activeMode = null; 
     }
 
-    // Database safe string array generation
     const expansionsStored = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
     if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
@@ -90,7 +89,6 @@ module.exports = {
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // UI Sentence Layout Parsing
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -164,15 +162,17 @@ module.exports = {
       withResponse: true
     });
 
+    const messageId = response.resource?.message?.id || response.id;
+
     await supabase
       .from('active_async_matches')
       .insert({
-        message_id: response.id,
+        message_id: messageId,
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
         player_ids: [host.id],
-        notify_user_ids: [], // Reverted to empty so the bell doesn't show up pre-activated!
+        notify_user_ids: [],
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
