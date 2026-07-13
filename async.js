@@ -34,7 +34,6 @@ module.exports = {
         .setRequired(false)
         .addChoices(
           { name: 'Epic Mode', value: 'Epic' },
-          { name: 'Ix + Immortality + Epic Mode', value: 'Ix_Immo_Epic' },
           { name: 'Base Leaders', value: 'BaseLeaders' },
           { name: 'CHOAM Module', value: 'CHOAM' },
           { name: 'Base Leaders + CHOAM', value: 'Leaders_CHOAM' }
@@ -67,28 +66,23 @@ module.exports = {
     const uprisingEmoji = getCustomEmoji('Uprising', '');
 
     const isUprising = board === 'Uprising';
-    const hasIxMode = selectedMode === 'Epic' || selectedMode === 'Ix_Immo_Epic';
+    const hasIxMode = selectedMode === 'Epic';
 
-    // Strict Rule Validation Layer
     let activeMode = selectedMode;
-    
-    // Rule 1: Epic mode requires Ix to be active
     if (hasIxMode && expansion !== 'Ix' && expansion !== 'Ix_Immo') {
       expansion = expansion === 'Immortality' ? 'Ix_Immo' : 'Ix';
     }
-    
-    // Rule 2: Base Leaders and CHOAM only show up if Uprising is selected
     if ((selectedMode === 'BaseLeaders' || selectedMode === 'CHOAM' || selectedMode === 'Leaders_CHOAM') && !isUprising) {
       activeMode = null; 
     }
 
-    // 1. Build separate backend tracking data for active_async_matches storage columns
+    // Database safe string array generation
     const expansionsStored = [];
-    if (expansion === 'Ix' || expansion === 'Ix_Immo' || activeMode === 'Ix_Immo_Epic') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
-    if (expansion === 'Immortality' || expansion === 'Ix_Immo' || activeMode === 'Ix_Immo_Epic') expansionsStored.push(`${immoEmoji} Immortality`.trim());
+    if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
+    if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
     
     const modulesStored = [];
-    if (activeMode === 'Epic' || activeMode === 'Ix_Immo_Epic') modulesStored.push(`${epicEmoji} Epic Mode`.trim());
+    if (activeMode === 'Epic') modulesStored.push(`${epicEmoji} Epic Mode`.trim());
     if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') modulesStored.push('Base Leaders');
     if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') modulesStored.push('CHOAM Module');
 
@@ -96,7 +90,7 @@ module.exports = {
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // 2. Build Interface Layout Strings
+    // UI Sentence Layout Parsing
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -105,10 +99,10 @@ module.exports = {
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo' || activeMode === 'Ix_Immo_Epic') expansionText = `${ixText} and ${immoText}`;
+    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
 
     let modeText = '';
-    if (activeMode === 'Epic' || activeMode === 'Ix_Immo_Epic') modeText = epicText;
+    if (activeMode === 'Epic') modeText = epicText;
     if (activeMode === 'BaseLeaders') modeText = 'Base Leaders';
     if (activeMode === 'CHOAM') modeText = 'CHOAM Module';
     if (activeMode === 'Leaders_CHOAM') modeText = 'Base Leaders + CHOAM';
@@ -148,7 +142,7 @@ module.exports = {
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
-        { name: '👥 Players (1/4)', value: `• ${host} 🔔`, inline: false }
+        { name: '👥 Players (1/4)', value: `• ${host}`, inline: false }
       )
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
@@ -178,12 +172,12 @@ module.exports = {
         guild_id: interaction.guildId,
         host_id: host.id,
         player_ids: [host.id],
-        notify_user_ids: [host.id],
+        notify_user_ids: [], // Reverted to empty so the bell doesn't show up pre-activated!
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
         expansions: expansionsStored,
-        modules: modulesStored, // Exclusively mapped to active lobbies tracking schema
+        modules: modulesStored,
         status: 'searching'
       });
   }
