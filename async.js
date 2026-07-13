@@ -64,6 +64,7 @@ module.exports = {
     const immoEmoji = getCustomEmoji('Immo', '');
     const epicEmoji = getCustomEmoji('Epic', '');
     const uprisingEmoji = getCustomEmoji('Uprising', '');
+    const choamEmoji = getCustomEmoji('CHOAM', ''); // Fetches custom CHOAM emoji map string
 
     const isUprising = board === 'Uprising';
     const hasIxMode = selectedMode === 'Epic';
@@ -77,13 +78,13 @@ module.exports = {
       activeMode = null; 
     }
 
-    // Combine parameters safely into expansionsStored array for database compatibility
+    // Combine parameters safely into expansionsStored array for index.js compatibility
     const expansionsStored = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
     if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
     if (activeMode === 'Epic') expansionsStored.push(`${epicEmoji} Epic Mode`.trim());
     if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') expansionsStored.push('Base Leaders');
-    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') expansionsStored.push('CHOAM Module');
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') expansionsStored.push(`${choamEmoji} CHOAM Module`.trim());
 
     let boardDisplay = board || 'Not Specified';
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
@@ -94,6 +95,7 @@ module.exports = {
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
     const uprisingText = `${uprisingEmoji} Uprising`.trim();
+    const choamText = `${choamEmoji} CHOAM Module`.trim();
 
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
@@ -103,8 +105,8 @@ module.exports = {
     let modeText = '';
     if (activeMode === 'Epic') modeText = epicText;
     if (activeMode === 'BaseLeaders') modeText = 'Base Leaders';
-    if (activeMode === 'CHOAM') modeText = 'CHOAM Module';
-    if (activeMode === 'Leaders_CHOAM') modeText = 'Base Leaders + CHOAM';
+    if (activeMode === 'CHOAM') modeText = choamText;
+    if (activeMode === 'Leaders_CHOAM') modeText = `Base Leaders + ${choamText}`;
 
     if (modeText) {
       if (expansionText) {
@@ -134,7 +136,7 @@ module.exports = {
     const targetRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
     const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
 
-    // Formats the exact custom content layout phrase requested for the push notification ping
+    // Custom formatting phrase layout generation for mobile notifications
     let customPingSentence = `**${interaction.user.username}** is looking for players ${roleMention}`;
     if (board && board !== 'Base' && expansionText) {
       customPingSentence += ` for ${boardText} with ${expansionText}`;
@@ -170,7 +172,6 @@ module.exports = {
       new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
     );
 
-    // 1. Send embed dashboard layout back immediately to satisfy the slash command interaction
     const response = await interaction.reply({
       embeds: [embed],
       components: [actionRow, utilityRow],
@@ -179,18 +180,16 @@ module.exports = {
 
     const messageId = response.resource?.message?.id || response.id;
 
-    // 2. Dispatch the formatted plain text role mention follow-up to hit phones and lock screens
+    // Dispatch raw text follow-up to circumvent native slash command notification suppressions
     const pingMessage = await interaction.followUp({
       content: customPingSentence,
       allowedMentions: { roles: [targetRole?.id].filter(Boolean) }
     });
 
-    // 3. Clear text clutter from channel view after a 1.5-second buffer window
     setTimeout(() => {
       pingMessage.delete().catch(() => {});
     }, 1500);
 
-    // 4. Record details safely down to Supabase columns
     await supabase
       .from('active_async_matches')
       .insert({
