@@ -306,10 +306,7 @@ function startGlobalDatabaseListener() {
       async (payload) => {
         const { table, eventType, new: newRecord } = payload;
         if (!newRecord) return;
-
         console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
-
-        // HANDLER A: Tournament Registrations
         if (table === 'tournament_registrations') {
           if (newRecord.active_on_discord === true && Number(newRecord.tournament_num) === TARGET_TOURNAMENT_NUM) {
             await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, true);
@@ -328,12 +325,9 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
     const role = guild.roles.cache.get(roleId);
     if (!guild || !role) return;
-
     const member = await searchGuildMemberByNames(guild, [discordUsername]);
     if (!member) return;
-
     const hasRole = member.roles.cache.has(roleId);
-
     if (shouldHaveRole && !hasRole) {
       await member.roles.add(role);
       console.log(`✅ Automated Sync: Added ${role.name} to ${member.user.tag}`);
@@ -354,13 +348,11 @@ async function runInitialDatabaseSync() {
       .select('discord_username')
       .eq('tournament_num', TARGET_TOURNAMENT_NUM)
       .eq('active_on_discord', true);
-
     if (error) throw error;
     if (!activeRegs || !activeRegs.length) {
       console.log('No existing active registrations found to sync.');
       return;
     }
-
     console.log(`Found ${activeRegs.length} existing active registrations. Processing profiles...`);
     for (const reg of activeRegs) {
       await syncSingleUserRole(reg.discord_username, TOURNAMENT_ROLE_ID, true);
@@ -397,6 +389,7 @@ discordClient.on('interactionCreate', async (interaction) => {
       let notifications = [...(lobby.notify_user_ids || [])];
       let shouldUpdate = false;
 
+      // Handle the manual ping request button
       if (customId === 'async_ping_role') {
         const now = new Date();
         const lastPrompted = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
@@ -411,14 +404,11 @@ discordClient.on('interactionCreate', async (interaction) => {
         const targetRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
         const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
         
-        // Cleaned string formatting: swaps "is looking" with "was looking" contextually
-        const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
-        
+        // FIXED: Kept as "is looking" to maintain proper active context phrasing
+        const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
         const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${cleanDetailsLine}`;
         
-        // Dispatches standard persistent follow-up notification sequence (deletion block completely stripped out)
         await interaction.channel.send({ content: broadcastText, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
-        
         await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
         return;
       }
@@ -446,24 +436,27 @@ discordClient.on('interactionCreate', async (interaction) => {
         const embed = EmbedBuilder.from(message.embeds[0]);
         const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
         
-        // Extraction formatting mapping layers: completely isolates and cleans the setup sentence parameters
         const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
         const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
 
         embed.setTitle('🏁 Async Match Started!')
              .setColor(0x2ecc71)
-             .setFooter(null) // Clears the automatic timeout reminder message footer text entry
+             .setFooter(null) 
              .setFields(
-               { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, // Strips dynamic expiration lines entirely
+               { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
                { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
                { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
              );
 
-        return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
+        return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
       }
 
-      if (shouldUpdate) {
-        await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+      // Automatically triggers if a button interaction occurs to forcefully sync old initialization states
+      if (shouldUpdate || message.components.length > 0) {
+        if (shouldUpdate) {
+          await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+        }
+        
         const embed = EmbedBuilder.from(message.embeds[0]);
         const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
         embed.setFields(
