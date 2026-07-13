@@ -28,17 +28,16 @@ module.exports = {
           { name: 'Ix + Immortality', value: 'Ix_Immo' }
         )
     )
-    // Replaced boolean toggle with an explicitly rule-bound mode selection dropdown
     .addStringOption(option =>
       option.setName('mode')
         .setDescription('Select additional game variants/modes')
         .setRequired(false)
         .addChoices(
-          { name: 'Epic Mode (Requires Ix)', value: 'Epic' },
+          { name: 'Epic Mode', value: 'Epic' },
           { name: 'Ix + Immortality + Epic Mode', value: 'Ix_Immo_Epic' },
-          { name: 'Base Leaders (Uprising Only)', value: 'BaseLeaders' },
-          { name: 'CHOAM Module (Uprising Only)', value: 'CHOAM' },
-          { name: 'Base Leaders + CHOAM (Uprising Only)', value: 'Leaders_CHOAM' }
+          { name: 'Base Leaders', value: 'BaseLeaders' },
+          { name: 'CHOAM Module', value: 'CHOAM' },
+          { name: 'Base Leaders + CHOAM', value: 'Leaders_CHOAM' }
         )
     )
     .addStringOption(option =>
@@ -67,30 +66,31 @@ module.exports = {
     const epicEmoji = getCustomEmoji('Epic', '');
     const uprisingEmoji = getCustomEmoji('Uprising', '');
 
-    // Rule Enforcement Verification: Check context constraints before building layout
     const isUprising = board === 'Uprising';
     const hasIxMode = selectedMode === 'Epic' || selectedMode === 'Ix_Immo_Epic';
 
-    // Auto-correct configurations if user picked incompatible combinations
+    // Strict Rule Validation Layer
     let activeMode = selectedMode;
+    
+    // Rule 1: Epic mode requires Ix to be active
     if (hasIxMode && expansion !== 'Ix' && expansion !== 'Ix_Immo') {
-      // Force Ix to true if an Epic variant was selected without it
       expansion = expansion === 'Immortality' ? 'Ix_Immo' : 'Ix';
     }
+    
+    // Rule 2: Base Leaders and CHOAM only show up if Uprising is selected
     if ((selectedMode === 'BaseLeaders' || selectedMode === 'CHOAM' || selectedMode === 'Leaders_CHOAM') && !isUprising) {
-      // Clear Uprising-exclusive modules if Base Game was chosen
-      activeMode = null;
+      activeMode = null; 
     }
 
-    // 1. Build expansions array for database storage syncing
+    // 1. Build separate backend tracking data for active_async_matches storage columns
     const expansionsStored = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo' || activeMode === 'Ix_Immo_Epic') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
     if (expansion === 'Immortality' || expansion === 'Ix_Immo' || activeMode === 'Ix_Immo_Epic') expansionsStored.push(`${immoEmoji} Immortality`.trim());
     
-    // Add extra variant tags to the storage array tracking parameters
-    if (activeMode === 'Epic' || activeMode === 'Ix_Immo_Epic') expansionsStored.push(`${epicEmoji} Epic Mode`.trim());
-    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') expansionsStored.push('Base Leaders');
-    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') expansionsStored.push('CHOAM Module');
+    const modulesStored = [];
+    if (activeMode === 'Epic' || activeMode === 'Ix_Immo_Epic') modulesStored.push(`${epicEmoji} Epic Mode`.trim());
+    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') modulesStored.push('Base Leaders');
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') modulesStored.push('CHOAM Module');
 
     let boardDisplay = board || 'Not Specified';
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
@@ -107,7 +107,6 @@ module.exports = {
     if (expansion === 'Immortality') expansionText = immoText;
     if (expansion === 'Ix_Immo' || activeMode === 'Ix_Immo_Epic') expansionText = `${ixText} and ${immoText}`;
 
-    // Append extra text formatting for modules seamlessly into the main setup sentence
     let modeText = '';
     if (activeMode === 'Epic' || activeMode === 'Ix_Immo_Epic') modeText = epicText;
     if (activeMode === 'BaseLeaders') modeText = 'Base Leaders';
@@ -179,11 +178,12 @@ module.exports = {
         guild_id: interaction.guildId,
         host_id: host.id,
         player_ids: [host.id],
-        notify_user_ids: [],
+        notify_user_ids: [host.id],
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
         expansions: expansionsStored,
+        modules: modulesStored, // Exclusively mapped to active lobbies tracking schema
         status: 'searching'
       });
   }
