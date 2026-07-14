@@ -1,6 +1,6 @@
 const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags } = require('discord.js');
 
-// Swapped to your true Dune Tournament Host / Admin role ID!
+// True Dune Tournament Host / Admin role ID
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421'; 
 
 module.exports = {
@@ -108,7 +108,7 @@ module.exports = {
             },
             {
               name: '💤 Player Non-Responsiveness',
-              value: `Tag your opponents if they do not respond. If a player fails to respond or make a move for **over 24 hours**—*especially during initial setup before the game starts, or during active play*—tag a <@&${TOURNAMENT_HOST_ROLE_ID}>.`,
+              value: 'Tag your opponents if they do not respond. If a player fails to respond or make a move for **over 24 hours**—*especially during initial setup before the game starts, or during active play*—tag our tournament support team listed in the pin above.',
               inline: false
             },
             {
@@ -125,9 +125,9 @@ module.exports = {
           .setColor(0xC9A24B)
           .setTimestamp();
 
-        // 3. Send the startup ping and the instructions inside the thread
+        // 3. Send the startup ping (notifying players AND hosts) and instructions inside the thread
         await thread.send({
-          content: `👥 **Participants:** ${resolvedPings.join(' | ')}`,
+          content: `👥 **Participants:** ${resolvedPings.join(' | ')}\n🛡️ **Support:** <@&${TOURNAMENT_HOST_ROLE_ID}>`,
           embeds: [rulesEmbed]
         });
 
