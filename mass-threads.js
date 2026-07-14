@@ -1,7 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags } = require('discord.js');
 
-// REPLACE THIS tomorrow with your actual Dune Tournament Host role ID!
-const TOURNAMENT_HOST_ROLE_ID = '1525805277662679121'; 
+// Swapped to your true Dune Tournament Host / Admin role ID!
+const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421'; 
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -19,7 +19,7 @@ module.exports = {
 
     const member = interaction.member;
 
-    // Security Check: User must have the Tournament Host role OR have Administrator rights
+    // Security Check: User must have the Tournament Host/Admin role OR have Administrator rights
     const isHost = member.roles.cache.has(TOURNAMENT_HOST_ROLE_ID);
     const isAdmin = member.permissions.has('Administrator');
 
