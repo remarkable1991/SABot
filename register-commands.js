@@ -3,7 +3,8 @@ require('dotenv').config();
 const { REST, Routes } = require('discord.js');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
-const tournamentCommand = require('./tournament'); // 1. Import the new command module
+const tournamentCommand = require('./tournament');
+const massThreadsCommand = require('./mass-threads'); // 1. Imported the new command
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -24,12 +25,13 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
         body: [
           statsCommand.data.toJSON(), 
           asyncCommand.data.toJSON(),
-          tournamentCommand.data.toJSON() // 2. Add the JSON body data here
+          tournamentCommand.data.toJSON(),
+          massThreadsCommand.data.toJSON() // 2. Added JSON body data here
         ] 
       }
     );
 
-    console.log('Registered /stats, /async, and /tournament commands.');
+    console.log('Registered /stats, /async, /tournament, and /mass-threads commands.');
   } catch (error) {
     console.error('Failed to register commands:', error);
     process.exit(1);
