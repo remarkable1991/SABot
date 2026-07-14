@@ -1,10 +1,22 @@
+require('dotenv').config();
+
+const http = require('http');
+// 1. Instantly spin up health check to satisfy Railway web service requirements
+const PORT = process.env.PORT || 3000;
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('Bot is live!');
+}).listen(PORT, () => {
+  console.log(`Health check server instantly listening on port ${PORT}`);
+});
+
 const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, userMention, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
 const tournamentCommand = require('./tournament');
-const massThreadsCommand = require('./mass-threads'); // 1. Imported the new command
+const massThreadsCommand = require('./mass-threads'); // Added this import
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -57,7 +69,7 @@ const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
   [tournamentCommand.data.name, tournamentCommand],
-  [massThreadsCommand.data.name, massThreadsCommand] // 2. Added the new command mapping
+  [massThreadsCommand.data.name, massThreadsCommand] // Added this mapping
 ]);
 
 const pendingGames = new Set();
