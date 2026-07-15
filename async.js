@@ -161,9 +161,8 @@ module.exports = {
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
 
+    // Only create utility buttons initially - Join/Leave buttons will be rendered dynamically in index.js
     const actionRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('async_join').setLabel('Join Match').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('async_leave').setLabel('Leave').setStyle(ButtonStyle.Secondary),
       new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(true),
       new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger)
     );
