@@ -128,7 +128,7 @@ module.exports = {
     statusSentence += '.';
 
     const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
-    const timeoutTimestamp = Math.floor((Date.now() + 15 * 60 * 60 * 1000) / 1000);
+    const timeoutTimestamp = Math.floor((Date.now() + 15 * 60 * 1000) / 1000);
 
     const targetRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
     const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
@@ -154,13 +154,13 @@ module.exports = {
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
         { name: '👥 Players (1/4)', value: `• ${host}`, inline: false },
         { 
-          name: 'ℹ️ Reaction Legend', 
+          name: 'Reaction Legend', 
           value: [
             `${asyncDuneEmoji} • **Join / Leave** the lobby`,
             `🎮 • **Start Game** (Requires 2+ players)`,
             `❌ • **Cancel Lobby** (Host only)`,
-            `🔔 • **Toggle Ping Alerts** on player updates`,
-            `📢 • **Ping Lobby Role** (Host only, 45m cooldown)`
+            `🔔 • **Toggle Ping Alerts** to get notified when someone joins`,
+            `📢 • **Ping Lobby Role** (45m cooldown)`
           ].join('\n'), 
           inline: false 
         }
