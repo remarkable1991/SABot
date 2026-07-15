@@ -563,7 +563,8 @@ discordClient.on('interactionCreate', async (interaction) => {
           return interaction.reply({ content: `⏳ Cooldown active! You can ping the role again in **${remainingMinutes} minutes**.`, ephemeral: true });
         }
 
-        await interaction.deferUpdate();
+        await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+        
         const targetRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
         const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
         
@@ -571,7 +572,11 @@ discordClient.on('interactionCreate', async (interaction) => {
         const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${cleanDetailsLine}`;
         
         await interaction.channel.send({ content: broadcastText, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
-        await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+        
+        // After ping role, always update buttons for THIS user
+        await interaction.deferUpdate();
+        const [primaryRow, secondaryRow] = buildButtonsForLobby(lobby, user.id);
+        await interaction.editReply({ components: [primaryRow, secondaryRow] }).catch(() => {});
         return;
       }
 
@@ -626,24 +631,23 @@ discordClient.on('interactionCreate', async (interaction) => {
         return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
       }
 
-      if (shouldUpdate || message.components.length > 0) {
-        if (shouldUpdate) {
-          await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
-        }
-        
-        const embed = EmbedBuilder.from(message.embeds[0]);
-        const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
-        embed.setFields(
-          { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
-          { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-          { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
-        );
-
-        // Build buttons for THIS user based on current lobby state
-        const [primaryRow, secondaryRow] = buildButtonsForLobby(lobby, user.id);
-        
-        await interaction.editReply({ embeds: [embed], components: [primaryRow, secondaryRow] }).catch(() => {});
+      // Always update message and buttons after any state-changing action
+      if (shouldUpdate) {
+        await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
       }
+      
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
+      embed.setFields(
+        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
+      );
+
+      // Build buttons for THIS user based on current lobby state
+      const [primaryRow, secondaryRow] = buildButtonsForLobby(lobby, user.id);
+      
+      await interaction.editReply({ embeds: [embed], components: [primaryRow, secondaryRow] }).catch(() => {});
     } catch (err) { console.error('Error handling async button trigger:', err); }
   }
 });
