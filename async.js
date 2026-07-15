@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -157,24 +157,29 @@ module.exports = {
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
 
-    const actionRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('async_join').setLabel('Join Lobby').setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(true),
-      new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger)
-    );
-
-    const utilityRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('async_ping_lobby').setLabel('Ping Role').setEmoji('📢').setStyle(ButtonStyle.Secondary)
-    );
-
     const response = await interaction.reply({
       embeds: [embed],
-      components: [actionRow, utilityRow],
       withResponse: true
     });
 
     const messageId = response.resource?.message?.id || response.id;
+    const message = response.resource?.message || await interaction.channel.messages.fetch(messageId);
+
+    // Bulletproof reaction pipeline with fallbacks
+    try {
+      const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'AsyncDune');
+      if (customJoinEmoji) {
+        await message.react(customJoinEmoji).catch(() => {});
+      } else {
+        await message.react('🎲').catch(() => {});
+      }
+      await message.react('🎮').catch(() => {});
+      await message.react('❌').catch(() => {});
+      await message.react('🔔').catch(() => {});
+      await message.react('📢').catch(() => {});
+    } catch (reactErr) {
+      console.error('Failed to apply initial lobby emoji reactions:', reactErr);
+    }
 
     const pingMessage = await interaction.followUp({
       content: customPingSentence,
