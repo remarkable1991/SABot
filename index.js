@@ -36,6 +36,7 @@ const MEMBER_SEARCH_LIMIT = 10;
 const DB_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
+const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 
 // Your designated target tournament role ID
 const TOURNAMENT_ROLE_ID = '1525805277662679121';
@@ -51,6 +52,15 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
+// Reaction emojis for async lobbies
+const ASYNC_EMOJIS = {
+  join: 'AsyncDune', // Custom emoji name
+  start: '🎮',
+  cancel: '❌',
+  alerts: '🔔',
+  tag: '📢'
+};
+
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -62,7 +72,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
 });
 
 const discordClient = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers]
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages]
 });
 
 const slashCommands = new Map([
@@ -465,66 +475,11 @@ async function runInitialDatabaseSync() {
   }
 }
 
-// Build buttons based on current lobby state - shown to ALL users
-function buildButtonsForLobby(lobby, userId) {
-  const primaryRow = new ActionRowBuilder();
-  const players = lobby.player_ids || [];
-  const userInLobby = players.includes(userId);
-  const userIsHost = userId === lobby.host_id;
-  const notifications = lobby.notify_user_ids || [];
-
-  // Always show Join/Leave - based on current lobby state, not user
-  if (userInLobby) {
-    primaryRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId('async_leave')
-        .setLabel('Leave Match')
-        .setStyle(ButtonStyle.Danger)
-    );
-  } else {
-    primaryRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId('async_join')
-        .setLabel('Join Match')
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(players.length >= 4)
-    );
-  }
-
-  // Start button: visible to everyone, enabled only if 2+ players AND user is in lobby
-  primaryRow.addComponents(
-    new ButtonBuilder()
-      .setCustomId('async_start')
-      .setLabel('Start Game')
-      .setStyle(ButtonStyle.Success)
-      .setDisabled(players.length < 2 || !userInLobby)
-  );
-
-  // Cancel button: ONLY visible to host
-  if (userIsHost) {
-    primaryRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId('async_cancel')
-        .setLabel('Cancel Lobby')
-        .setStyle(ButtonStyle.Danger)
-    );
-  }
-
-  const alertActive = notifications.includes(userId);
-  const secondaryRow = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setCustomId('async_toggle_bell')
-      .setLabel(alertActive ? 'Alerts: ON' : 'Alerts: OFF')
-      .setEmoji('🔔')
-      .setStyle(alertActive ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('async_ping_role')
-      .setLabel('📢 Request Players')
-      .setStyle(ButtonStyle.Secondary)
-      .setDisabled(!userIsHost)
-  );
-
-  return [primaryRow, secondaryRow];
+// Get custom emoji string for the join reaction
+function getAsyncDuneEmoji(guild) {
+  if (!guild || !guild.emojis || !guild.emojis.cache) return ':AsyncDune:';
+  const emoji = guild.emojis.cache.find((e) => e.name === 'AsyncDune');
+  return emoji ? emoji.toString() : ':AsyncDune:';
 }
 
 discordClient.on('interactionCreate', async (interaction) => {
@@ -540,78 +495,42 @@ discordClient.on('interactionCreate', async (interaction) => {
     }
     return;
   }
+});
 
-  if (interaction.isButton() && interaction.customId.startsWith('async_')) {
-    try {
-      const { customId, user, message } = interaction;
-      const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', interaction.message.id).single();
-      if (fetchErr || !lobby || lobby.status !== 'searching') {
-        return interaction.deferUpdate().catch(() => {});
-      }
+discordClient.on('messageReactionAdd', async (reaction, user) => {
+  try {
+    // Ignore bot reactions
+    if (user.bot) return;
 
-      let players = [...(lobby.player_ids || [])];
-      let notifications = [...(lobby.notify_user_ids || [])];
-      let shouldUpdate = false;
+    const message = reaction.message;
+    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
-      if (customId === 'async_ping_role') {
-        const now = new Date();
-        const lastPrompted = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
-        const oneHourMs = 60 * 60 * 1000;
+    const emoji = reaction.emoji.name || reaction.emoji;
+    const asyncDuneStr = getAsyncDuneEmoji(message.guild);
+    const isAsyncDune = emoji === 'AsyncDune' || reaction.emoji.toString().includes('AsyncDune');
 
-        if (lastPrompted && (now.getTime() - lastPrompted.getTime() < oneHourMs)) {
-          const remainingMinutes = Math.ceil((oneHourMs - (now.getTime() - lastPrompted.getTime())) / 60000);
-          return interaction.reply({ content: `⏳ Cooldown active! You can ping the role again in **${remainingMinutes} minutes**.`, ephemeral: true });
-        }
+    let players = [...(lobby.player_ids || [])];
+    let notifications = [...(lobby.notify_user_ids || [])];
+    let shouldUpdate = false;
 
-        await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-        
-        const targetRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-        const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
-        
-        const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
-        const broadcastText = `🎲 **Match looking for players (${players.length}/4)** ${roleMention}!\nDetails: ${cleanDetailsLine}`;
-        
-        await interaction.channel.send({ content: broadcastText, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
-        
-        // After ping role, always update buttons for THIS user
-        await interaction.deferUpdate();
-        const [primaryRow, secondaryRow] = buildButtonsForLobby(lobby, user.id);
-        await interaction.editReply({ components: [primaryRow, secondaryRow] }).catch(() => {});
-        return;
-      }
-
-      await interaction.deferUpdate();
-
-      if (customId === 'async_join' && players.length < 4 && !players.includes(user.id)) {
-        players.push(user.id); shouldUpdate = true;
+    // :AsyncDune: Join/Leave toggle
+    if (isAsyncDune) {
+      if (players.includes(user.id)) {
+        players = players.filter(id => id !== user.id);
+        notifications = notifications.filter(id => id !== user.id);
+      } else if (players.length < 4) {
+        players.push(user.id);
         if (notifications.length > 0) {
-          await interaction.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+          await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
         }
       }
-      if (customId === 'async_leave' && players.includes(user.id)) {
-        players = players.filter(id => id !== user.id); notifications = notifications.filter(id => id !== user.id); shouldUpdate = true;
-      }
-      if (customId === 'async_toggle_bell') {
-        notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id]; shouldUpdate = true;
-      }
-      if (customId === 'async_cancel' && user.id === lobby.host_id) {
-        // Update database with cancelled status
-        await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
-        
-        // Update the message to show it was cancelled
-        const embed = EmbedBuilder.from(message.embeds[0]);
-        embed.setTitle('❌ Lobby Cancelled')
-             .setColor(0xff0000)
-             .setDescription(`This lobby was cancelled by ${user.username}`);
-        
-        await interaction.editReply({ 
-          content: `🚫 **Lobby cancelled by ${user.username}**`,
-          embeds: [embed], 
-          components: [] 
-        }).catch(() => {});
-        return;
-      }
-      if (customId === 'async_start' && players.includes(user.id)) {
+      shouldUpdate = true;
+    }
+
+    // 🎮 Start Game - anyone in game can start if 2+ players
+    if (emoji === '🎮') {
+      if (players.includes(user.id) && players.length >= 2) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         const embed = EmbedBuilder.from(message.embeds[0]);
         const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
@@ -628,13 +547,57 @@ discordClient.on('interactionCreate', async (interaction) => {
                { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
              );
 
-        return interaction.editReply({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed], components: [] }).catch(() => {});
+        await message.edit({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+        return;
+      }
+    }
+
+    // ❌ Cancel - host only
+    if (emoji === '❌' && user.id === lobby.host_id) {
+      await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      embed.setTitle('❌ Lobby Cancelled')
+           .setColor(0xff0000)
+           .setDescription(`This lobby was cancelled by ${user.username}`);
+      await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [embed] }).catch(() => {});
+      return;
+    }
+
+    // 🔔 Toggle Alerts
+    if (emoji === '🔔') {
+      notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id];
+      shouldUpdate = true;
+    }
+
+    // 📢 Tag Players - host only, 45 min cooldown
+    if (emoji === '📢' && user.id === lobby.host_id) {
+      const now = new Date();
+      const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
+
+      if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
+        const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
+        await reaction.users.remove(user.id).catch(() => {});
+        await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>`, ephemeral: true }).catch(() => {});
+        return;
       }
 
-      // Always update message and buttons after any state-changing action
-      if (shouldUpdate) {
-        await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
-      }
+      await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
+      
+      const targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+      const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+      
+      const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
+      const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
+      
+      const tagMessage = `🎲 Match looking for players (${players.length}/4) ${roleMention} ${asyncDuneStr}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
+      
+      await message.channel.send({ content: tagMessage, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
+      await reaction.users.remove(user.id).catch(() => {});
+      return;
+    }
+
+    if (shouldUpdate) {
+      await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
       
       const embed = EmbedBuilder.from(message.embeds[0]);
       const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
@@ -644,11 +607,13 @@ discordClient.on('interactionCreate', async (interaction) => {
         { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
       );
 
-      // Build buttons for THIS user based on current lobby state
-      const [primaryRow, secondaryRow] = buildButtonsForLobby(lobby, user.id);
-      
-      await interaction.editReply({ embeds: [embed], components: [primaryRow, secondaryRow] }).catch(() => {});
-    } catch (err) { console.error('Error handling async button trigger:', err); }
+      await message.edit({ embeds: [embed] }).catch(() => {});
+    }
+
+    // Remove reaction after handling
+    await reaction.users.remove(user.id).catch(() => {});
+  } catch (err) {
+    console.error('Error handling reaction:', err);
   }
 });
 
