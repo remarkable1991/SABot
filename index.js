@@ -77,12 +77,12 @@ const discordClient = new Client({
     GatewayIntentBits.GuildMembers, 
     GatewayIntentBits.MessageContent, 
     GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMessageReactions // Enables the bot to listen to emoji clicks
+    GatewayIntentBits.GuildMessageReactions 
   ],
   partials: [
     Partials.Message, 
     Partials.Channel, 
-    Partials.Reaction // Required so reactions work on old lobbies after restarts
+    Partials.Reaction 
   ]
 });
 
@@ -487,7 +487,6 @@ function getAsyncDuneEmoji(guild) {
   return emoji ? emoji.toString() : ':AsyncDune:';
 }
 
-// Intercept interactions safely
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
@@ -503,7 +502,7 @@ discordClient.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Reacting to Emojis (Join / Leave / Cancel / Start)
+// Reacting to Emojis (Join / Leave / Cancel / Start / Alerts / Ping Role)
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
@@ -575,15 +574,21 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       shouldUpdate = true;
     }
 
-    // Tag Players (Host only, 45 min cooldown)
-    if (emoji === '📢' && user.id === lobby.host_id) {
+    // Tag Players (Anyone can use, 45 min cooldown enforced)
+    if (emoji === '📢') {
       const now = new Date();
       const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
 
+      // Cooldown verification logic
       if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
         const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
         await reaction.users.remove(user.id).catch(() => {});
-        await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>`, ephemeral: true }).catch(() => {});
+        
+        // Temporary feedback channel message to prevent UI spam since standard reacts can't be ephemeral
+        const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>` }).catch(() => {});
+        setTimeout(() => {
+          cooldownMsg.delete().catch(() => {});
+        }, 5000);
         return;
       }
 
@@ -610,13 +615,13 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       embed.setFields(
         { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
+        { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false },
+        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false } // Keeps legend intact
       );
 
       await message.edit({ embeds: [embed] }).catch(() => {});
     }
 
-    // Always attempt to remove the reaction to keep UI clean, ignore errors
     await reaction.users.remove(user.id).catch(() => {});
   } catch (err) {
     console.error('Error handling reaction:', err);
