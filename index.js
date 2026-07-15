@@ -16,7 +16,7 @@ const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
 const tournamentCommand = require('./tournament');
-const massThreadsCommand = require('./mass-threads'); 
+const massThreadsCommand = require('./mass-threads'); // Added this import
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -52,6 +52,15 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
+// Reaction emojis for async lobbies
+const ASYNC_EMOJIS = {
+  join: 'AsyncDune', // Custom emoji name
+  start: '🎮',
+  cancel: '❌',
+  alerts: '🔔',
+  tag: '📢'
+};
+
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -70,7 +79,7 @@ const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
   [tournamentCommand.data.name, tournamentCommand],
-  [massThreadsCommand.data.name, massThreadsCommand] 
+  [massThreadsCommand.data.name, massThreadsCommand] // Added this mapping
 ]);
 
 const pendingGames = new Set();
@@ -240,7 +249,7 @@ async function createDiscordImagePayload(storagePath) {
 async function buildGameResultPayload(gameId) {
   const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
-  const { data: results, error: resultsError = null } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
+  const { data: results, error: resultsError } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
   const { data: ratings, error: ratingsError = null } = await supabase.from('player_ratings').select('player_key, display_name, game_version, elo').in('player_key', playerKeys).in('game_version', ['overall', game.game_version]);
@@ -320,7 +329,7 @@ function startGlobalDatabaseListener() {
         const { table, eventType, new: newRecord } = payload;
         if (!newRecord) return;
         console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
-
+        
         // HANDLER A: Tournament Registrations
         if (table === 'tournament_registrations') {
           if (newRecord.active_on_discord === true && Number(newRecord.tournament_num) === TARGET_TOURNAMENT_NUM) {
@@ -474,7 +483,6 @@ function getAsyncDuneEmoji(guild) {
 }
 
 discordClient.on('interactionCreate', async (interaction) => {
-  // --- Slash Command Handling ---
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
     try {
@@ -487,167 +495,125 @@ discordClient.on('interactionCreate', async (interaction) => {
     }
     return;
   }
+});
 
-  // --- Button Interaction Handling ---
-  if (interaction.isButton()) {
-    const customId = interaction.customId;
-    if (!customId.startsWith('async_')) return;
+discordClient.on('messageReactionAdd', async (reaction, user) => {
+  try {
+    // Ignore bot reactions
+    if (user.bot) return;
 
-    try {
-      await interaction.deferUpdate();
+    const message = reaction.message;
+    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
-      const message = interaction.message;
-      const { data: lobby, error: fetchErr } = await supabase
-        .from('active_async_matches')
-        .select('*')
-        .eq('message_id', message.id)
-        .single();
+    const emoji = reaction.emoji.name || reaction.emoji;
+    const asyncDuneStr = getAsyncDuneEmoji(message.guild);
+    const isAsyncDune = emoji === 'AsyncDune' || reaction.emoji.toString().includes('AsyncDune');
 
-      if (fetchErr || !lobby || lobby.status !== 'searching') return;
+    let players = [...(lobby.player_ids || [])];
+    let notifications = [...(lobby.notify_user_ids || [])];
+    let shouldUpdate = false;
 
-      let players = [...(lobby.player_ids || [])];
-      let notifications = [...(lobby.notify_user_ids || [])];
-      const userId = interaction.user.id;
-      let shouldUpdate = false;
-
-      // Handle: JOIN LOBBY
-      if (customId === 'async_join') {
-        if (!players.includes(userId) && players.length < 4) {
-          players.push(userId);
-          shouldUpdate = true;
-          if (notifications.length > 0) {
-            await message.channel.send({
-              content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${interaction.user.username}** joined the lobby!`
-            }).catch(() => {});
-          }
+    // :AsyncDune: Join/Leave toggle
+    if (isAsyncDune) {
+      if (players.includes(user.id)) {
+        players = players.filter(id => id !== user.id);
+        notifications = notifications.filter(id => id !== user.id);
+      } else if (players.length < 4) {
+        players.push(user.id);
+        if (notifications.length > 0) {
+          await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
         }
       }
+      shouldUpdate = true;
+    }
 
-      // Handle: LEAVE LOBBY
-      if (customId === 'async_leave') {
-        if (players.includes(userId)) {
-          players = players.filter(id => id !== userId);
-          notifications = notifications.filter(id => id !== userId);
-          shouldUpdate = true;
-        }
-      }
-
-      // Handle: TOGGLE ALERT PINGS
-      if (customId === 'async_toggle_bell') {
-        notifications = notifications.includes(userId) 
-          ? notifications.filter(id => id !== userId) 
-          : [...notifications, userId];
-        shouldUpdate = true;
-      }
-
-      // Handle: START GAME (Host only, or any lobby participant when 2+ players are ready)
-      if (customId === 'async_start') {
-        if (players.includes(userId) && players.length >= 2) {
-          await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
-          const embed = EmbedBuilder.from(message.embeds[0]);
-          const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
-
-          const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
-          const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
-
-          embed.setTitle('🏁 Async Match Started!')
-               .setColor(0x2ecc71)
-               .setFooter(null) 
-               .setFields(
-                 { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
-                 { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-                 { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
-               );
-
-          await message.edit({ 
-            content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, 
-            embeds: [embed],
-            components: [] // Strip off the components once started
-          }).catch(() => {});
-          return;
-        }
-      }
-
-      // Handle: CANCEL LOBBY (Host only)
-      if (customId === 'async_cancel') {
-        if (userId === lobby.host_id) {
-          await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
-          const embed = EmbedBuilder.from(message.embeds[0]);
-          embed.setTitle('❌ Lobby Cancelled')
-               .setColor(0xff0000)
-               .setDescription(`This lobby was cancelled by ${interaction.user.username}`);
-          await message.edit({ 
-            content: `🚫 **Lobby cancelled by ${interaction.user.username}**`, 
-            embeds: [embed],
-            components: [] // Strip off buttons on cancel
-          }).catch(() => {});
-        }
-        return;
-      }
-
-      // Handle: PING PLAYERS (Host only, has a 45 min cooldown)
-      if (customId === 'async_ping_lobby') {
-        if (userId === lobby.host_id) {
-          const now = new Date();
-          const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
-
-          if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
-            const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
-            await interaction.followUp({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>`, ephemeral: true }).catch(() => {});
-            return;
-          }
-
-          await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
-
-          const targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-          const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
-          const asyncDuneStr = getAsyncDuneEmoji(message.guild);
-
-          const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
-          const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
-
-          const tagMessage = `🎲 Match looking for players (${players.length}/4) ${roleMention} ${asyncDuneStr}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
-
-          await message.channel.send({ content: tagMessage, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
-        }
-        return;
-      }
-
-      // Render Layout Updates on State Change
-      if (shouldUpdate) {
-        await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
-
+    // 🎮 Start Game - anyone in game can start if 2+ players
+    if (emoji === '🎮') {
+      if (players.includes(user.id) && players.length >= 2) {
+        await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         const embed = EmbedBuilder.from(message.embeds[0]);
         const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
-        embed.setFields(
-          { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
-          { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-          { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
-        );
+        
+        const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
+        const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
 
-        // Render Join / Leave Button dynamically based on whether the viewing user is a participant
-        const isParticipant = players.includes(userId);
-        const dynamicJoinLeaveButton = isParticipant
-          ? new ButtonBuilder().setCustomId('async_leave').setLabel('Leave Lobby').setStyle(ButtonStyle.Danger)
-          : new ButtonBuilder().setCustomId('async_join').setLabel('Join Lobby').setStyle(ButtonStyle.Primary).setDisabled(players.length >= 4);
+        embed.setTitle('🏁 Async Match Started!')
+             .setColor(0x2ecc71)
+             .setFooter(null) 
+             .setFields(
+               { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
+               { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+               { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
+             );
 
-        const activeRow = new ActionRowBuilder().addComponents(
-          dynamicJoinLeaveButton,
-          new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(players.length < 2),
-          new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger)
-        );
+        await message.edit({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+        return;
+      }
+    }
 
-        const utilityRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('async_ping_lobby').setLabel('Ping Role').setEmoji('📢').setStyle(ButtonStyle.Secondary)
-        );
+    // ❌ Cancel - host only
+    if (emoji === '❌' && user.id === lobby.host_id) {
+      await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      embed.setTitle('❌ Lobby Cancelled')
+           .setColor(0xff0000)
+           .setDescription(`This lobby was cancelled by ${user.username}`);
+      await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [embed] }).catch(() => {});
+      return;
+    }
 
-        await message.edit({ embeds: [embed], components: [activeRow, utilityRow] }).catch(() => {});
+    // 🔔 Toggle Alerts
+    if (emoji === '🔔') {
+      notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id];
+      shouldUpdate = true;
+    }
+
+    // 📢 Tag Players - host only, 45 min cooldown
+    if (emoji === '📢' && user.id === lobby.host_id) {
+      const now = new Date();
+      const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
+
+      if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
+        const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
+        await reaction.users.remove(user.id).catch(() => {});
+        await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>`, ephemeral: true }).catch(() => {});
+        return;
       }
 
-    } catch (err) {
-      console.error('Error handling button interaction:', err);
+      await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
+      
+      const targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+      const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+      
+      const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
+      const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
+      
+      const tagMessage = `🎲 Match looking for players (${players.length}/4) ${roleMention} ${asyncDuneStr}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
+      
+      await message.channel.send({ content: tagMessage, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
+      await reaction.users.remove(user.id).catch(() => {});
+      return;
     }
+
+    if (shouldUpdate) {
+      await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+      
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
+      embed.setFields(
+        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
+      );
+
+      await message.edit({ embeds: [embed] }).catch(() => {});
+    }
+
+    // Remove reaction after handling
+    await reaction.users.remove(user.id).catch(() => {});
+  } catch (err) {
+    console.error('Error handling reaction:', err);
   }
 });
 
