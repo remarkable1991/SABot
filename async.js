@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -64,7 +64,7 @@ module.exports = {
     const immoEmoji = getCustomEmoji('Immo', '');
     const epicEmoji = getCustomEmoji('Epic', '');
     const uprisingEmoji = getCustomEmoji('Uprising', '');
-    const choamEmoji = getCustomEmoji('CHOAM', ''); // Fetches custom CHOAM emoji map string
+    const choamEmoji = getCustomEmoji('CHOAM', ''); 
 
     const isUprising = board === 'Uprising';
     const hasIxMode = selectedMode === 'Epic';
@@ -161,23 +161,27 @@ module.exports = {
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
 
-    // Only create utility buttons initially - Join/Leave buttons will be rendered dynamically in index.js
-    const actionRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(true),
-      new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger)
-    );
-
-    const utilityRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Ping Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary)
-    );
-
     const response = await interaction.reply({
       embeds: [embed],
-      components: [actionRow, utilityRow],
+      components: [], // No buttons!
       withResponse: true
     });
 
     const messageId = response.resource?.message?.id || response.id;
+
+    // React with the initial options so players can click them
+    const messageObj = await interaction.channel.messages.fetch(messageId);
+    const asyncDuneEmojiObject = guild?.emojis.cache.find((e) => e.name === 'AsyncDune');
+    
+    if (asyncDuneEmojiObject) {
+      await messageObj.react(asyncDuneEmojiObject.id);
+    } else {
+      await messageObj.react('🎲');
+    }
+    await messageObj.react('🎮');
+    await messageObj.react('❌');
+    await messageObj.react('🔔');
+    await messageObj.react('📢');
 
     // Dispatch raw text follow-up to circumvent native slash command notification suppressions
     const pingMessage = await interaction.followUp({
