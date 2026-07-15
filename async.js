@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -64,12 +64,11 @@ module.exports = {
     const immoEmoji = getCustomEmoji('Immo', '');
     const epicEmoji = getCustomEmoji('Epic', '');
     const uprisingEmoji = getCustomEmoji('Uprising', '');
-    const choamEmoji = getCustomEmoji('CHOAM', ''); 
+    const choamEmoji = getCustomEmoji('CHOAM', '');
 
     const isUprising = board === 'Uprising';
     const hasIxMode = selectedMode === 'Epic';
 
-    // Strict Rule Validation Layer
     let activeMode = selectedMode;
     if (hasIxMode && expansion !== 'Ix' && expansion !== 'Ix_Immo') {
       expansion = expansion === 'Immortality' ? 'Ix_Immo' : 'Ix';
@@ -78,7 +77,6 @@ module.exports = {
       activeMode = null; 
     }
 
-    // Combine parameters safely into expansionsStored array for index.js compatibility
     const expansionsStored = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
     if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
@@ -90,7 +88,6 @@ module.exports = {
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
     if (board === 'Base') boardDisplay = 'Base Game';
 
-    // UI Sentence String Generation
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -136,7 +133,6 @@ module.exports = {
     const targetRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
     const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
 
-    // Custom formatting phrase layout generation for mobile notifications
     let customPingSentence = `**${interaction.user.username}** is looking for players ${roleMention}`;
     if (board && board !== 'Base' && expansionText) {
       customPingSentence += ` for ${boardText} with ${expansionText}`;
@@ -161,29 +157,25 @@ module.exports = {
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
 
+    const actionRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('async_join').setLabel('Join Lobby').setStyle(ButtonStyle.Primary),
+      new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(true),
+      new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger)
+    );
+
+    const utilityRow = new ActionRowBuilder().addComponents(
+      new ButtonBuilder().setCustomId('async_toggle_bell').setLabel('Toggle Alerts').setEmoji('🔔').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('async_ping_lobby').setLabel('Ping Role').setEmoji('📢').setStyle(ButtonStyle.Secondary)
+    );
+
     const response = await interaction.reply({
       embeds: [embed],
-      components: [], // No buttons!
+      components: [actionRow, utilityRow],
       withResponse: true
     });
 
     const messageId = response.resource?.message?.id || response.id;
 
-    // React with the initial options so players can click them
-    const messageObj = await interaction.channel.messages.fetch(messageId);
-    const asyncDuneEmojiObject = guild?.emojis.cache.find((e) => e.name === 'AsyncDune');
-    
-    if (asyncDuneEmojiObject) {
-      await messageObj.react(asyncDuneEmojiObject.id);
-    } else {
-      await messageObj.react('🎲');
-    }
-    await messageObj.react('🎮');
-    await messageObj.react('❌');
-    await messageObj.react('🔔');
-    await messageObj.react('📢');
-
-    // Dispatch raw text follow-up to circumvent native slash command notification suppressions
     const pingMessage = await interaction.followUp({
       content: customPingSentence,
       allowedMentions: { roles: [targetRole?.id].filter(Boolean) }
