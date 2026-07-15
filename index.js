@@ -465,6 +465,66 @@ async function runInitialDatabaseSync() {
   }
 }
 
+// Build buttons dynamically based on user's state in the lobby
+function buildButtonsForUser(lobby, userId) {
+  const primaryRow = new ActionRowBuilder();
+  const userInLobby = (lobby.player_ids || []).includes(userId);
+  const userIsHost = userId === lobby.host_id;
+  const players = lobby.player_ids || [];
+  const notifications = lobby.notify_user_ids || [];
+
+  // Join/Leave button (mutually exclusive based on user's actual state)
+  if (userInLobby) {
+    primaryRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId('async_leave')
+        .setLabel('Leave Match')
+        .setStyle(ButtonStyle.Danger)
+    );
+  } else {
+    primaryRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId('async_join')
+        .setLabel('Join Match')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(players.length >= 4)
+    );
+  }
+
+  primaryRow.addComponents(
+    new ButtonBuilder()
+      .setCustomId('async_start')
+      .setLabel('Start Game')
+      .setStyle(ButtonStyle.Success)
+      .setDisabled(players.length < 2 || !userInLobby) // Only players can start
+  );
+
+  if (userIsHost) {
+    primaryRow.addComponents(
+      new ButtonBuilder()
+        .setCustomId('async_cancel')
+        .setLabel('Cancel Lobby')
+        .setStyle(ButtonStyle.Danger)
+    );
+  }
+
+  const alertActive = notifications.includes(userId);
+  const secondaryRow = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('async_toggle_bell')
+      .setLabel(alertActive ? 'Alerts: ON' : 'Alerts: OFF')
+      .setEmoji('🔔')
+      .setStyle(alertActive ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('async_ping_role')
+      .setLabel('📢 Request Players')
+      .setStyle(ButtonStyle.Secondary)
+      .setDisabled(!userIsHost) // Only host can ping
+  );
+
+  return [primaryRow, secondaryRow];
+}
+
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
@@ -564,26 +624,9 @@ discordClient.on('interactionCreate', async (interaction) => {
           { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
         );
 
-        const isUserHost = user.id === lobby.host_id;
-        const userInLobby = players.includes(user.id);
-        const alertActive = notifications.includes(user.id);
-
-        const primaryRow = new ActionRowBuilder();
-        if (userInLobby) {
-          primaryRow.addComponents(new ButtonBuilder().setCustomId('async_leave').setLabel('Leave Match').setStyle(ButtonStyle.Danger));
-        } else {
-          primaryRow.addComponents(new ButtonBuilder().setCustomId('async_join').setLabel('Join Match').setStyle(ButtonStyle.Primary).setDisabled(players.length >= 4));
-        }
-        primaryRow.addComponents(new ButtonBuilder().setCustomId('async_start').setLabel('Start Game').setStyle(ButtonStyle.Success).setDisabled(players.length < 2));
-        if (isUserHost) {
-          primaryRow.addComponents(new ButtonBuilder().setCustomId('async_cancel').setLabel('Cancel Lobby').setStyle(ButtonStyle.Danger));
-        }
-
-        const secondaryRow = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId('async_toggle_bell').setLabel(alertActive ? 'Alerts: ON' : 'Alerts: OFF').setEmoji('🔔').setStyle(alertActive ? ButtonStyle.Success : ButtonStyle.Secondary),
-          new ButtonBuilder().setCustomId('async_ping_role').setLabel('📢 Request Players').setStyle(ButtonStyle.Secondary)
-        );
-
+        // Use the new user-contextual button builder
+        const [primaryRow, secondaryRow] = buildButtonsForUser(lobby, user.id);
+        
         await interaction.editReply({ embeds: [embed], components: [primaryRow, secondaryRow] }).catch(() => {});
       }
     } catch (err) { console.error('Error handling async button trigger:', err); }
