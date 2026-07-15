@@ -465,15 +465,15 @@ async function runInitialDatabaseSync() {
   }
 }
 
-// Build buttons dynamically based on user's state in the lobby
-function buildButtonsForUser(lobby, userId) {
+// Build buttons based on current lobby state - shown to ALL users
+function buildButtonsForLobby(lobby, userId) {
   const primaryRow = new ActionRowBuilder();
-  const userInLobby = (lobby.player_ids || []).includes(userId);
-  const userIsHost = userId === lobby.host_id;
   const players = lobby.player_ids || [];
+  const userInLobby = players.includes(userId);
+  const userIsHost = userId === lobby.host_id;
   const notifications = lobby.notify_user_ids || [];
 
-  // Join/Leave button (mutually exclusive based on user's actual state)
+  // Always show Join/Leave - based on current lobby state, not user
   if (userInLobby) {
     primaryRow.addComponents(
       new ButtonBuilder()
@@ -491,14 +491,16 @@ function buildButtonsForUser(lobby, userId) {
     );
   }
 
+  // Start button: visible to everyone, enabled only if 2+ players AND user is in lobby
   primaryRow.addComponents(
     new ButtonBuilder()
       .setCustomId('async_start')
       .setLabel('Start Game')
       .setStyle(ButtonStyle.Success)
-      .setDisabled(players.length < 2 || !userInLobby) // Only players can start
+      .setDisabled(players.length < 2 || !userInLobby)
   );
 
+  // Cancel button: ONLY visible to host
   if (userIsHost) {
     primaryRow.addComponents(
       new ButtonBuilder()
@@ -519,7 +521,7 @@ function buildButtonsForUser(lobby, userId) {
       .setCustomId('async_ping_role')
       .setLabel('📢 Request Players')
       .setStyle(ButtonStyle.Secondary)
-      .setDisabled(!userIsHost) // Only host can ping
+      .setDisabled(!userIsHost)
   );
 
   return [primaryRow, secondaryRow];
@@ -637,8 +639,8 @@ discordClient.on('interactionCreate', async (interaction) => {
           { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false }
         );
 
-        // Use the new user-contextual button builder
-        const [primaryRow, secondaryRow] = buildButtonsForUser(lobby, user.id);
+        // Build buttons for THIS user based on current lobby state
+        const [primaryRow, secondaryRow] = buildButtonsForLobby(lobby, user.id);
         
         await interaction.editReply({ embeds: [embed], components: [primaryRow, secondaryRow] }).catch(() => {});
       }
