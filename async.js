@@ -152,7 +152,18 @@ module.exports = {
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
-        { name: '👥 Players (1/4)', value: `• ${host}`, inline: false }
+        { name: '👥 Players (1/4)', value: `• ${host}`, inline: false },
+        { 
+          name: 'ℹ️ Reaction Legend', 
+          value: [
+            `${asyncDuneEmoji} • **Join / Leave** the lobby`,
+            `🎮 • **Start Game** (Requires 2+ players)`,
+            `❌ • **Cancel Lobby** (Host only)`,
+            `🔔 • **Toggle Ping Alerts** on player updates`,
+            `📢 • **Ping Lobby Role** (Host only, 45m cooldown)`
+          ].join('\n'), 
+          inline: false 
+        }
       )
       .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
       .setTimestamp();
@@ -165,7 +176,6 @@ module.exports = {
     const messageId = response.resource?.message?.id || response.id;
     const message = response.resource?.message || await interaction.channel.messages.fetch(messageId);
 
-    // Bulletproof reaction pipeline with fallbacks
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'AsyncDune');
       if (customJoinEmoji) {
