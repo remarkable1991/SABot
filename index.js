@@ -588,8 +588,21 @@ discordClient.on('interactionCreate', async (interaction) => {
         notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id]; shouldUpdate = true;
       }
       if (customId === 'async_cancel' && user.id === lobby.host_id) {
+        // Update database with cancelled status
         await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
-        return message.delete().catch(() => null);
+        
+        // Update the message to show it was cancelled
+        const embed = EmbedBuilder.from(message.embeds[0]);
+        embed.setTitle('❌ Lobby Cancelled')
+             .setColor(0xff0000)
+             .setDescription(`This lobby was cancelled by ${user.username}`);
+        
+        await interaction.editReply({ 
+          content: `🚫 **Lobby cancelled by ${user.username}**`,
+          embeds: [embed], 
+          components: [] 
+        }).catch(() => {});
+        return;
       }
       if (customId === 'async_start' && players.includes(user.id)) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
