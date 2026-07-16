@@ -379,7 +379,7 @@ function startGlobalDatabaseListener() {
         if (table === 'sp_events' && eventType === 'INSERT') {
           try {
             const event = newRecord;
-            
+
             // Try resolving the Discord ID for this player_key
             const { data: mapRecord } = await supabase
               .from('player_discord_map')
@@ -392,7 +392,7 @@ function startGlobalDatabaseListener() {
 
             if (notificationChannel && targetDiscordId) {
               let displayAction = formatActionType(event.action_type);
-              
+
               // Define clean clarity labels for the different types of rewards
               let rewardClarity = 'Standard Reward';
               if (event.action_type === 'daily_first_message') {
@@ -549,18 +549,88 @@ function getAsyncDuneEmoji(guild, isLive = false) {
 }
 
 /**
- * Resolves a Discord User ID to their claimed player_key and user_id (UUID)
+ * Resolves a Discord User ID to their claimed player_key and user_id (UUID).
+ * Uses robust fuzzy fallback matching and automatically persists IDs to auto-link players.
  */
-async function getPlayerProfileFromDiscord(discordUserId) {
+async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
   if (!discordUserId) return null;
-  const { data, error } = await supabase
-    .from('player_discord_map')
-    .select('player_key, claimed_by')
-    .eq('discord_user_id', discordUserId)
-    .single();
 
-  if (error || !data) return null;
-  return { playerKey: data.player_key, userId: data.claimed_by };
+  // 1. First, try a direct, precise match on the snowflake ID
+  let { data, error } = await supabase
+    .from('player_discord_map')
+    .select('player_key, claimed_by, id, discord_user_id')
+    .eq('discord_user_id', discordUserId)
+    .maybeSingle();
+
+  if (data) {
+    return { playerKey: data.player_key, userId: data.claimed_by };
+  }
+
+  // 2. Fallback: If no direct match, try resolving them by usernames/nicknames
+  let member = memberObject;
+  if (!member) {
+    try {
+      const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+      member = await guild.members.fetch(discordUserId).catch(() => null);
+    } catch (err) {
+      console.error(`Failed to fetch guild member metadata for fallback mapping on ID ${discordUserId}:`, err);
+    }
+  }
+
+  if (!member) return null;
+
+  const candidates = [
+    member.user?.username,
+    member.user?.globalName,
+    member.displayName,
+    member.nickname
+  ].filter(Boolean);
+
+  const orFilters = [
+    ...candidates.map((value) => `discord_username.ilike.${value}`),
+    ...candidates.map((value) => `username.ilike.${value}`),
+    ...candidates.map((value) => `display_name.ilike.${value}`)
+  ];
+
+  const { data: searchData, error: searchError } = await supabase
+    .from('player_discord_map')
+    .select('player_key, claimed_by, id, username, discord_username, display_name, discord_user_id')
+    .or(orFilters.join(','))
+    .limit(10);
+
+  if (searchError || !searchData || !searchData.length) return null;
+
+  // Run similarity scores to find the absolute best match
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const row of searchData) {
+    const score = Math.max(
+      ...candidates.flatMap((candidate) => [
+        similarity(candidate, row.player_key),
+        similarity(candidate, row.display_name),
+        similarity(candidate, row.username),
+        similarity(candidate, row.discord_username)
+      ])
+    );
+
+    if (score > bestScore) {
+      bestMatch = row;
+      bestScore = score;
+    }
+  }
+
+  // If we find a highly confident match, auto-link them permanently in the DB!
+  if (bestMatch && bestScore >= DB_MATCH_THRESHOLD) {
+    console.log(`🔗 Auto-Linking Map: Resolved ${member.user.tag} to database player "${bestMatch.player_key}" (Score: ${bestScore.toFixed(2)})`);
+    
+    // Save the Discord ID to the DB so future lookups are instant
+    await persistDiscordUserId(bestMatch, discordUserId);
+
+    return { playerKey: bestMatch.player_key, userId: bestMatch.claimed_by };
+  }
+
+  return null;
 }
 
 /**
@@ -755,7 +825,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       if (players.includes(user.id) && totalCount >= 2) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         const embed = EmbedBuilder.from(message.embeds[0]);
-        
+
         const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
         const guestsList = guestPlayers.map(name => `• ${name} 👥`);
         const finalRosterDisplay = [...mentionsList, ...guestsList].join('\n');
@@ -787,9 +857,23 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
         const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
 
+        const unlinkedPlayers = [];
+
         for (const playerId of players) {
           const profile = await getPlayerProfileFromDiscord(playerId);
-          if (!profile) continue; // Skip guests or unmapped Discord accounts
+          
+          if (!profile) {
+            // Track potential missed SP for unlinked players
+            let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; // +50 base
+            if (isLiveLobby) {
+              potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; // +100 live daily bonus
+            } else {
+              potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; // +350 async weekly bonus
+            }
+            
+            unlinkedPlayers.push({ id: playerId, points: potentialSp });
+            continue;
+          }
 
           // 1. BASE REWARD: Match Started (50 SP, max 1 per hour)
           const { data: hourlyMatchEvents } = await supabase
@@ -849,6 +933,21 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
             }
           }
         }
+
+        // --- UNLINKED ACCOUNTS WARNING MESSAGE ---
+        if (unlinkedPlayers.length > 0) {
+          const warningLines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`);
+          
+          const warningEmbed = new EmbedBuilder()
+            .setTitle('⚠️ Missed Strategy Points!')
+            .setDescription(
+              `${warningLines.join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`
+            )
+            .setColor(0xe74c3c); // Red warning color
+
+          await message.channel.send({ embeds: [warningEmbed] }).catch(() => {});
+        }
+
         return;
       }
     }
@@ -880,7 +979,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
         const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
         await reaction.users.remove(user.id).catch(() => {});
-        
+
         const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>` }).catch(() => {});
         setTimeout(() => {
           cooldownMsg.delete().catch(() => {});
@@ -917,7 +1016,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
 
       const embed = EmbedBuilder.from(message.embeds[0]);
-      
+
       const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
       const guestsList = guestPlayers.map(name => `• ${name} 👥`);
       const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
@@ -986,7 +1085,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
       await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
 
       const embed = EmbedBuilder.from(message.embeds[0]);
-      
+
       const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
       const guestsList = guestPlayers.map(name => `• ${name} 👥`);
       const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
