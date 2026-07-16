@@ -56,7 +56,7 @@ const SP_ROLES_CONFIG = [
 // --- SP SYSTEM CONFIGURATION ---
 const SP_REWARDS_CONFIG = {
   DAILY_FIRST_MESSAGE: { amount: 10,  label: 'Daily First Message' },
-  IMAGE_UPLOAD:        { amount: 50,  label: 'Image Upload' },
+  IMAGE_UPLOAD:        { amount: 50,  label: 'Recruitment Proof Posted' },
   MATCH_START_BASE:    { amount: 50,  label: 'Match Started' },
   FIRST_DAILY_LIVE:    { amount: 100, label: 'First Daily Live Game' },
   FIRST_WEEKLY_ASYNC:  { amount: 350, label: 'First Weekly Async Game' }
@@ -389,15 +389,22 @@ function startGlobalDatabaseListener() {
             const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
 
             if (notificationChannel && targetDiscordId) {
-              const displayAction = formatActionType(event.action_type);
+              let displayAction = formatActionType(event.action_type);
               
               // Define clean clarity labels for the different types of rewards
               let rewardClarity = 'Standard Reward';
-              if (event.action_type === 'daily_first_message') rewardClarity = 'Daily Bonus (First message of the day)';
-              if (event.action_type === 'first_live_game') rewardClarity = 'Daily Bonus (First live game of the day)';
-              if (event.action_type === 'first_weekly_async') rewardClarity = 'Weekly Bonus (First async game of the week)';
-              if (event.action_type === 'image_upload') rewardClarity = 'Hourly Reward (Image post)';
-              if (event.action_type === 'match_start_base') rewardClarity = 'Hourly Reward (Match Started)';
+              if (event.action_type === 'daily_first_message') {
+                rewardClarity = 'Daily Bonus (First message of the day)';
+              } else if (event.action_type === 'first_live_game') {
+                rewardClarity = 'Daily Bonus (First live game of the day)';
+              } else if (event.action_type === 'first_weekly_async') {
+                rewardClarity = 'Weekly Bonus (First async game of the week)';
+              } else if (event.action_type === 'image_upload') {
+                rewardClarity = 'Standard Reward';
+                displayAction = 'Recruitment Proof Posted';
+              } else if (event.action_type === 'match_start_base') {
+                rewardClarity = 'Standard Reward';
+              }
 
               const alertEmbed = new EmbedBuilder()
                 .setTitle('🪙 Strategy Points Earned!')
