@@ -12,26 +12,26 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
-// Comprehensive mapping for ALL actions (Discord Bot AND Website)
+// Comprehensive mapping for ALL true actions (Discord Bot AND Website)
 const ACTION_LABELS = {
   // --- Discord Bot Actions ---
-  daily_first_message: 'Daily Message Bonus',
-  image_upload:        'Recruitment Proof Posted',
-  match_start_base:    'Match Lobbies Started',
-  first_live_game:     'Daily Live Match Bonus',
-  first_weekly_async:  'Weekly Async Match Bonus',
+  daily_first_message:             'Daily Message Bonus',
+  image_upload:                    'Recruitment Proof Posted',
+  match_start_base:                'Match Lobbies Started',
+  first_live_game:                 'Daily Live Match Bonus',
+  first_weekly_async:              'Weekly Async Match Bonus',
 
   // --- Website Actions ---
-  daily_check_in:      'Daily Website Check-in',
-  verify_match:        'Match Verified',
-  report_match:        'Match Reported',
-  tournament_complete: 'Tournament Completed',
-  tournament_win:      'Tournament Match Win',
-  semi_finals:         'Reached Semi-Finals',
-  grand_finals:        'Reached Grand Finals',
-  tournament_champion: 'Tournament Champion Finish',
-  referral_signup:     'Referral Sign Up Payout',
-  referral_milestone:  'Referral Friend Active Milestone'
+  daily_check_in:                  'Daily Website Check-in',
+  match_participation:             'Match Reported/Verified',
+  tournament_completion:           'Tournament Completed',
+  tournament_round_win:            'Tournament Match Win',
+  tournament_semifinals_reached:   'Reached Semi-Finals',
+  tournament_grand_finals_reached: 'Reached Grand Finals',
+  tournament_grand_finals_won:     'Tournament Champion Finish',
+  referral_signup:                 'Referral Sign Up Payout',
+referral_signup_new_user:        'Referral Bonus (New User)',
+  referral_jackpot:                'Referral Jackpot'
 };
 
 function normalizeName(value) {
