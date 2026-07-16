@@ -53,6 +53,18 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
+// --- SP SYSTEM CONFIGURATION ---
+const SP_REWARDS_CONFIG = {
+  DAILY_FIRST_MESSAGE: { amount: 10,  label: 'Daily First Message' },
+  IMAGE_UPLOAD:        { amount: 50,  label: 'Image Upload' },
+  MATCH_START_BASE:    { amount: 50,  label: 'Match Started' },
+  FIRST_DAILY_LIVE:    { amount: 100, label: 'First Daily Live Game' },
+  FIRST_WEEKLY_ASYNC:  { amount: 350, label: 'First Weekly Async Game' }
+};
+
+const SP_NOTIFICATION_CHANNEL_ID = '1233026531291566132';
+const IMAGE_UPLOADS_CHANNEL_ID = '1233026527294390385';
+
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -359,6 +371,41 @@ function startGlobalDatabaseListener() {
             }
           }
         }
+
+        // HANDLER C: Live SP Alerts & Notifications (Discord & Website events)
+        if (table === 'sp_events' && eventType === 'INSERT') {
+          try {
+            const event = newRecord;
+            
+            // Try resolving the Discord ID for this player_key
+            const { data: mapRecord } = await supabase
+              .from('player_discord_map')
+              .select('discord_user_id')
+              .eq('player_key', event.player_key)
+              .single();
+
+            const targetDiscordId = mapRecord?.discord_user_id;
+            const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
+
+            if (notificationChannel && targetDiscordId) {
+              const displayAction = formatActionType(event.action_type);
+
+              const alertEmbed = new EmbedBuilder()
+                .setTitle('🪙 Spice Points Earned!')
+                .setDescription(`Congratulations <@${targetDiscordId}>!`)
+                .setColor(0xf1c40f) // Gold color for rewards
+                .addFields(
+                  { name: '✨ Action', value: `\`${displayAction}\``, inline: true },
+                  { name: '💰 Reward', value: `**+${event.amount} SP**`, inline: true }
+                )
+                .setTimestamp();
+
+              await notificationChannel.send({ content: `<@${targetDiscordId}>`, embeds: [alertEmbed] });
+            }
+          } catch (err) {
+            console.error('Failed to dispatch real-time SP notification alert:', err);
+          }
+        }
       }
     )
     .subscribe();
@@ -483,6 +530,78 @@ function getAsyncDuneEmoji(guild, isLive = false) {
   return emoji ? emoji.toString() : (isLive ? '⚔️' : '🎲');
 }
 
+/**
+ * Resolves a Discord User ID to their claimed player_key and user_id (UUID)
+ */
+async function getPlayerProfileFromDiscord(discordUserId) {
+  if (!discordUserId) return null;
+  const { data, error } = await supabase
+    .from('player_discord_map')
+    .select('player_key, claimed_by')
+    .eq('discord_user_id', discordUserId)
+    .single();
+
+  if (error || !data) return null;
+  return { playerKey: data.player_key, userId: data.claimed_by };
+}
+
+/**
+ * Formats raw action types into human-readable titles dynamically
+ */
+function formatActionType(action) {
+  return action
+    .split('_')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+/**
+ * Safely inserts an event into sp_events and increments both lifetime_sp and seasonal_sp in player_sp
+ */
+async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
+  try {
+    // 1. Log transaction in the sp_events ledger
+    const { error: eventError } = await supabase
+      .from('sp_events')
+      .insert({
+        player_key: playerKey,
+        user_id: userId || null,
+        action_type: actionType,
+        amount: amount,
+        metadata: metadata
+      });
+
+    if (eventError) throw eventError;
+
+    // 2. Increment aggregates in player_sp
+    const { data: currentSp, error: selectError } = await supabase
+      .from('player_sp')
+      .select('lifetime_sp, seasonal_sp')
+      .eq('player_key', playerKey)
+      .single();
+
+    if (selectError) throw selectError;
+
+    const newLifetime = (currentSp?.lifetime_sp || 0) + amount;
+    const newSeasonal = (currentSp?.seasonal_sp || 0) + amount;
+
+    const { error: updateError } = await supabase
+      .from('player_sp')
+      .update({
+        lifetime_sp: newLifetime,
+        seasonal_sp: newSeasonal,
+        updated_at: new Date().toISOString()
+      })
+      .eq('player_key', playerKey);
+
+    if (updateError) throw updateError;
+
+    console.log(`🪙 Awarded +${amount} SP to ${playerKey} for ${actionType}`);
+  } catch (err) {
+    console.error(`Failed to award SP to ${playerKey}:`, err);
+  }
+}
+
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
@@ -495,6 +614,68 @@ discordClient.on('interactionCreate', async (interaction) => {
       else { await interaction.reply({ content: message, ephemeral: true }).catch(() => {}); }
     }
     return;
+  }
+});
+
+// Listener for Message-based SP (Daily Text and Image Uploads)
+discordClient.on('messageCreate', async (message) => {
+  try {
+    if (message.author.bot || !message.guild) return;
+
+    // Resolve the user's game identity
+    const profile = await getPlayerProfileFromDiscord(message.author.id);
+    if (!profile) return; // Silent skip if they haven't claimed/linked their Discord
+
+    const now = new Date();
+    const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+
+    // --- RULE 1: First Message Anywhere on the Server of the Day (+10 SP) ---
+    const { data: dailyTextEvents, error: textErr } = await supabase
+      .from('sp_events')
+      .select('id')
+      .eq('player_key', profile.playerKey)
+      .eq('action_type', 'daily_first_message')
+      .gte('created_at', startOfToday);
+
+    if (!textErr && (!dailyTextEvents || dailyTextEvents.length === 0)) {
+      await awardSP(
+        profile.playerKey,
+        profile.userId,
+        'daily_first_message',
+        SP_REWARDS_CONFIG.DAILY_FIRST_MESSAGE.amount,
+        { discord_user_id: message.author.id, channel_id: message.channel.id }
+      );
+    }
+
+    // --- RULE 2: Image Upload in Specific Channel (+50 SP, Max 1 per Hour) ---
+    const hasImage = message.attachments.some(attachment => 
+      attachment.contentType?.startsWith('image/') || 
+      /\.(jpg|jpeg|png|gif|webp)$/i.test(attachment.url)
+    );
+
+    if (message.channel.id === IMAGE_UPLOADS_CHANNEL_ID && hasImage) {
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+
+      // Check if they uploaded an image within the last hour
+      const { data: recentImageEvents, error: imgErr } = await supabase
+        .from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'image_upload')
+        .gte('created_at', oneHourAgo);
+
+      if (!imgErr && (!recentImageEvents || recentImageEvents.length === 0)) {
+        await awardSP(
+          profile.playerKey,
+          profile.userId,
+          'image_upload',
+          SP_REWARDS_CONFIG.IMAGE_UPLOAD.amount,
+          { discord_user_id: message.author.id, message_id: message.id }
+        );
+      }
+    }
+  } catch (err) {
+    console.error('Error processing message for SP triggers:', err);
   }
 });
 
@@ -566,6 +747,79 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
              );
 
         await message.edit({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+
+        // --- CORE SP GAME START AWARD DISTRIBUTIONS ---
+        const now = new Date();
+        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+        const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+
+        // Calculate start of current UTC week (Previous Sunday 00:00:00 UTC)
+        const currentUtcDay = now.getUTCDay(); // 0 is Sunday, 1 is Monday...
+        const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
+        const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
+
+        for (const playerId of players) {
+          const profile = await getPlayerProfileFromDiscord(playerId);
+          if (!profile) continue; // Skip guests or unmapped Discord accounts
+
+          // 1. BASE REWARD: Match Started (50 SP, max 1 per hour)
+          const { data: hourlyMatchEvents } = await supabase
+            .from('sp_events')
+            .select('id')
+            .eq('player_key', profile.playerKey)
+            .eq('action_type', 'match_start_base')
+            .gte('created_at', oneHourAgo);
+
+          if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
+            await awardSP(
+              profile.playerKey,
+              profile.userId,
+              'match_start_base',
+              SP_REWARDS_CONFIG.MATCH_START_BASE.amount,
+              { discord_user_id: playerId, match_id: lobby.id }
+            );
+          }
+
+          // 2. BONUS REWARD: Live Game (100 SP, max 1 per day)
+          if (isLiveLobby) {
+            const { data: dailyLiveEvents } = await supabase
+              .from('sp_events')
+              .select('id')
+              .eq('player_key', profile.playerKey)
+              .eq('action_type', 'first_live_game')
+              .gte('created_at', startOfToday);
+
+            if (!dailyLiveEvents || dailyLiveEvents.length === 0) {
+              await awardSP(
+                profile.playerKey,
+                profile.userId,
+                'first_live_game',
+                SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount,
+                { discord_user_id: playerId, match_id: lobby.id }
+              );
+            }
+          }
+
+          // 3. BONUS REWARD: Async Game (350 SP, max 1 per week)
+          if (!isLiveLobby) {
+            const { data: weeklyAsyncEvents } = await supabase
+              .from('sp_events')
+              .select('id')
+              .eq('player_key', profile.playerKey)
+              .eq('action_type', 'first_weekly_async')
+              .gte('created_at', startOfThisWeek);
+
+            if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) {
+              await awardSP(
+                profile.playerKey,
+                profile.userId,
+                'first_weekly_async',
+                SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount,
+                { discord_user_id: playerId, match_id: lobby.id }
+              );
+            }
+          }
+        }
         return;
       }
     }
