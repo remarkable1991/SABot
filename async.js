@@ -10,6 +10,11 @@ module.exports = {
         .setRequired(false)
     )
     .addStringOption(option =>
+      option.setName('players')
+        .setDescription('Add up to 2 other players: tag them, enter names, or type a number (e.g., "2")')
+        .setRequired(false)
+    )
+    .addStringOption(option =>
       option.setName('board')
         .setDescription('Choose game base variant')
         .setRequired(false)
@@ -47,6 +52,7 @@ module.exports = {
 
   async execute(interaction, { supabase }) {
     const notes = interaction.options.getString('text') || 'Looking for an async match!';
+    const playersInput = interaction.options.getString('players');
     const board = interaction.options.getString('board');
     let expansion = interaction.options.getString('expansion');
     const selectedMode = interaction.options.getString('mode');
@@ -145,6 +151,54 @@ module.exports = {
     }
     customPingSentence += '.';
 
+    // --- Core Parsing Logic for the "players" option ---
+    const playerIds = [host.id];
+    const guestPlayers = [];
+
+    if (playersInput) {
+      // 1. Extract Mentioned Discord IDs (e.g. <@123456789>)
+      const mentionRegex = /<@!?(\d+)>/g;
+      let match;
+      const parsedMentions = [];
+      while ((match = mentionRegex.exec(playersInput)) !== null) {
+        parsedMentions.push(match[1]);
+      }
+
+      if (parsedMentions.length > 0) {
+        // Limit to 2 additional tagged players maximum
+        const toAdd = parsedMentions.slice(0, 2);
+        for (const id of toAdd) {
+          if (!playerIds.includes(id)) playerIds.push(id);
+        }
+      } else {
+        const cleanInput = playersInput.trim();
+        const numberVal = parseInt(cleanInput, 10);
+
+        // 2. Parse Single Number Input (e.g. "2")
+        if (!isNaN(numberVal) && /^\d+$/.test(cleanInput)) {
+          const count = Math.min(Math.max(numberVal, 1), 2); // Limit addition between 1 and 2 guests
+          for (let i = 0; i < count; i++) {
+            guestPlayers.push(`Friend of ${host.username}`);
+          }
+        } else {
+          // 3. Fallback to Raw Names (e.g. "Paul" or "Paul, Leto")
+          const rawNames = cleanInput.split(',').map(n => n.trim()).filter(Boolean);
+          const toAddNames = rawNames.slice(0, 2);
+          for (const name of toAddNames) {
+            guestPlayers.push(name);
+          }
+        }
+      }
+    }
+
+    // Prepare total lobby spots occupied
+    const totalSlotCount = playerIds.length + guestPlayers.length;
+
+    // Render roster for the embed
+    const mentionsList = playerIds.map(id => `• <@${id}>`);
+    const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+    const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+
     const embed = new EmbedBuilder()
       .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
       .setDescription(`"${notes}"`)
@@ -152,7 +206,7 @@ module.exports = {
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
-        { name: '👥 Players (1/4)', value: `• ${host}`, inline: false },
+        { name: `👥 Players (${totalSlotCount}/4)`, value: fullRosterDisplay, inline: false },
         { 
           name: 'Reaction Legend', 
           value: [
@@ -207,8 +261,9 @@ module.exports = {
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
-        player_ids: [host.id],
+        player_ids: playerIds,
         notify_user_ids: [],
+        guest_players: guestPlayers, // Save guest names array directly to Supabase
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
