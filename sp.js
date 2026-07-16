@@ -12,16 +12,24 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
-// Map internal database action_types to clean, readable descriptions
+// Comprehensive mapping for ALL actions (Discord Bot AND Website)
 const ACTION_LABELS = {
+  // --- Discord Bot Actions ---
   daily_first_message: 'Daily Message Bonus',
   image_upload:        'Recruitment Proof Posted',
   match_start_base:    'Match Lobbies Started',
   first_live_game:     'Daily Live Match Bonus',
   first_weekly_async:  'Weekly Async Match Bonus',
+
+  // --- Website Actions ---
   daily_check_in:      'Daily Website Check-in',
-  tournament_match_completed: 'Tournament Match Completed',
-  tournament_won:      'Tournament Won',
+  verify_match:        'Match Verified',
+  report_match:        'Match Reported',
+  tournament_complete: 'Tournament Completed',
+  tournament_win:      'Tournament Match Win',
+  semi_finals:         'Reached Semi-Finals',
+  grand_finals:        'Reached Grand Finals',
+  tournament_champion: 'Tournament Champion Finish',
   referral_signup:     'Referral Sign Up Payout',
   referral_milestone:  'Referral Friend Active Milestone'
 };
@@ -107,9 +115,6 @@ async function resolvePlayerByDiscordUser(supabase, discordUser) {
   return best;
 }
 
-/**
- * Builds a visual text progress bar representing progression to the next SP rank
- */
 function buildProgressBar(currentSp, currentRankIndex) {
   if (currentRankIndex === 0) {
     return '`[▰▰▰▰▰▰▰▰▰▰]` **MAX RANK REACHED**';
@@ -130,9 +135,6 @@ function buildProgressBar(currentSp, currentRankIndex) {
   return `\`[${bar}]\` **${currentSp} / ${nextRank.min} SP**`;
 }
 
-/**
- * Calculates current overall and seasonal ranking from player_sp table
- */
 async function fetchLeaderboardRanks(supabase, playerKey) {
   const { data, error } = await supabase
     .from('player_sp')
@@ -141,11 +143,9 @@ async function fetchLeaderboardRanks(supabase, playerKey) {
 
   if (error || !data) return { overallRank: '—', seasonalRank: '—' };
 
-  // Calculate overall lifetime rank
   const overallIndex = data.findIndex(row => row.player_key === playerKey);
   const overallRank = overallIndex !== -1 ? `#${overallIndex + 1}` : '—';
 
-  // Sort by seasonal and calculate seasonal rank
   const seasonalData = [...data].sort((a, b) => Number(b.seasonal_sp || 0) - Number(a.seasonal_sp || 0));
   const seasonalIndex = seasonalData.findIndex(row => row.player_key === playerKey);
   const seasonalRank = seasonalIndex !== -1 ? `#${seasonalIndex + 1}` : '—';
@@ -177,7 +177,7 @@ module.exports = {
         return;
       }
 
-      // 1. Fetch current aggregates from player_sp
+      // 1. Fetch aggregates
       const { data: spRecord, error: spErr } = await supabase
         .from('player_sp')
         .select('lifetime_sp, seasonal_sp')
@@ -191,7 +191,7 @@ module.exports = {
         return;
       }
 
-      // 2. Query all historic event counts grouped by action_type
+      // 2. Fetch all raw events
       const { data: rawEvents, error: eventErr } = await supabase
         .from('sp_events')
         .select('action_type')
@@ -199,15 +199,14 @@ module.exports = {
 
       if (eventErr) throw eventErr;
 
-      // Deduplicate and aggregate totals
       const eventCounts = {};
       (rawEvents || []).forEach(evt => {
         eventCounts[evt.action_type] = (eventCounts[evt.action_type] || 0) + 1;
       });
 
-      // 3. Resolve Current Strategic Rank Config
+      // 3. Resolve Current Strategic Rank
       const lifetimeSp = Number(spRecord.lifetime_sp || 0);
-      let currentRankIndex = SP_ROLES_CONFIG.length - 1; // Default to lowest rank (Spiceworker)
+      let currentRankIndex = SP_ROLES_CONFIG.length - 1;
 
       for (let i = 0; i < SP_ROLES_CONFIG.length; i++) {
         if (lifetimeSp >= SP_ROLES_CONFIG[i].min) {
@@ -221,7 +220,7 @@ module.exports = {
       // 4. Fetch dynamic Leaderboard Placements
       const { overallRank, seasonalRank } = await fetchLeaderboardRanks(supabase, player.player_key);
 
-      // Build and SORT aggregate lines from highest count to lowest count
+      // 5. Gather and Sort activity counts
       const aggregateList = [];
       Object.keys(ACTION_LABELS).forEach(key => {
         const count = eventCounts[key] || 0;
@@ -230,21 +229,18 @@ module.exports = {
         }
       });
 
-      // Sort with highest occurrences first
       aggregateList.sort((a, b) => b.count - a.count);
 
       const aggregateDisplayLines = aggregateList.map(item => `• **${item.label}:** \`${item.count}\` times`);
 
-      // 5. Build clean, colorized description role pings
       let rankDescription = `Current Rank: <@&${currentRank.id}>`;
       if (nextRank) {
         rankDescription += `\nNext Goal: <@&${nextRank.id}>`;
       }
 
-      // Construct final Discord Embed response
       const spEmbed = new EmbedBuilder()
         .setTitle(`Strategy Profile: ${player.display_name || player.player_key}`)
-        .setColor(0xf1c40f) // Gold color
+        .setColor(0xf1c40f)
         .setDescription(rankDescription)
         .addFields(
           { name: '📊 Progress to Next Rank', value: buildProgressBar(lifetimeSp, currentRankIndex), inline: false },
