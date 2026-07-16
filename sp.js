@@ -15,11 +15,15 @@ const SP_ROLES_CONFIG = [
 // Map internal database action_types to clean, readable descriptions
 const ACTION_LABELS = {
   daily_first_message: 'Daily Message Bonus',
-  image_upload:        'Recruitment Proofs Posted',
+  image_upload:        'Recruitment Proof Posted',
   match_start_base:    'Match Lobbies Started',
-  first_live_game:     'Daily Live Match Bonuses',
-  first_weekly_async:  'Weekly Async Match Bonuses',
-  daily_check_in:      'Daily Website Check-ins'
+  first_live_game:     'Daily Live Match Bonus',
+  first_weekly_async:  'Weekly Async Match Bonus',
+  daily_check_in:      'Daily Website Check-in',
+  tournament_match_completed: 'Tournament Match Completed',
+  tournament_won:      'Tournament Won',
+  referral_signup:     'Referral Sign Up Payout',
+  referral_milestone:  'Referral Friend Active Milestone'
 };
 
 function normalizeName(value) {
@@ -44,7 +48,11 @@ function similarity(a, b) {
   for (let i = 1; i <= x.length; i++) {
     for (let j = 1; j <= y.length; j++) {
       const cost = x[i - 1] === y[j - 1] ? 0 : 1;
-      dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + cost
+      );
     }
   }
   return 1 - dp[x.length][y.length] / Math.max(x.length, y.length);
@@ -119,7 +127,30 @@ function buildProgressBar(currentSp, currentRankIndex) {
   const emptySegments = totalSegments - filledSegments;
   
   const bar = '▰'.repeat(filledSegments) + '▱'.repeat(emptySegments);
-  return `\`[${bar}]\` **${currentSp} / ${nextRank.min} SP** (to *${nextRank.name}*)`;
+  return `\`[${bar}]\` **${currentSp} / ${nextRank.min} SP**`;
+}
+
+/**
+ * Calculates current overall and seasonal ranking from player_sp table
+ */
+async function fetchLeaderboardRanks(supabase, playerKey) {
+  const { data, error } = await supabase
+    .from('player_sp')
+    .select('player_key, lifetime_sp, seasonal_sp')
+    .order('lifetime_sp', { ascending: false });
+
+  if (error || !data) return { overallRank: '—', seasonalRank: '—' };
+
+  // Calculate overall lifetime rank
+  const overallIndex = data.findIndex(row => row.player_key === playerKey);
+  const overallRank = overallIndex !== -1 ? `#${overallIndex + 1}` : '—';
+
+  // Sort by seasonal and calculate seasonal rank
+  const seasonalData = [...data].sort((a, b) => Number(b.seasonal_sp || 0) - Number(a.seasonal_sp || 0));
+  const seasonalIndex = seasonalData.findIndex(row => row.player_key === playerKey);
+  const seasonalRank = seasonalIndex !== -1 ? `#${seasonalIndex + 1}` : '—';
+
+  return { overallRank, seasonalRank };
 }
 
 module.exports = {
@@ -185,27 +216,44 @@ module.exports = {
         }
       }
       const currentRank = SP_ROLES_CONFIG[currentRankIndex];
+      const nextRank = currentRankIndex > 0 ? SP_ROLES_CONFIG[currentRankIndex - 1] : null;
 
-      // Build out cumulative occurrences display block
-      const aggregateLines = [];
+      // 4. Fetch dynamic Leaderboard Placements
+      const { overallRank, seasonalRank } = await fetchLeaderboardRanks(supabase, player.player_key);
+
+      // Build and SORT aggregate lines from highest count to lowest count
+      const aggregateList = [];
       Object.keys(ACTION_LABELS).forEach(key => {
         const count = eventCounts[key] || 0;
-        aggregateLines.push(`• **${ACTION_LABELS[key]}:** \`${count}\` times`);
+        if (count > 0) {
+          aggregateList.push({ label: ACTION_LABELS[key], count });
+        }
       });
+
+      // Sort with highest occurrences first
+      aggregateList.sort((a, b) => b.count - a.count);
+
+      const aggregateDisplayLines = aggregateList.map(item => `• **${item.label}:** \`${item.count}\` times`);
+
+      // 5. Build clean, colorized description role pings
+      let rankDescription = `Current Rank: <@&${currentRank.id}>`;
+      if (nextRank) {
+        rankDescription += `\nNext Goal: <@&${nextRank.id}>`;
+      }
 
       // Construct final Discord Embed response
       const spEmbed = new EmbedBuilder()
-        .setTitle(`Strategy Ledger: ${player.display_name || player.player_key}`)
+        .setTitle(`Strategy Profile: ${player.display_name || player.player_key}`)
         .setColor(0xf1c40f) // Gold color
+        .setDescription(rankDescription)
         .addFields(
-          { name: '🏆 Lifetime Ranks', value: `Current Title: **${currentRank.name}**`, inline: false },
-          { name: '📊 Progression Tracker', value: buildProgressBar(lifetimeSp, currentRankIndex), inline: false },
-          { name: '🍂 Season 1 Strategy Points', value: `**${spRecord.seasonal_sp || 0} SP** / \`1,000 SP\` Target`, inline: true },
-          { name: '👑 Lifetime Strategy Points', value: `**${lifetimeSp} SP**`, inline: true },
-          { name: '📋 Cumulative Milestone Events', value: aggregateLines.join('\n') || '*No recorded events in ledger yet*', inline: false }
+          { name: '📊 Progress to Next Rank', value: buildProgressBar(lifetimeSp, currentRankIndex), inline: false },
+          { name: '🍂 Season 1 Points', value: `**${spRecord.seasonal_sp || 0} SP**\nRank: **${seasonalRank}**`, inline: true },
+          { name: '👑 Lifetime Points', value: `**${lifetimeSp} SP**\nRank: **${overallRank}**`, inline: true },
+          { name: '📋 Cumulative Activity Metrics', value: aggregateDisplayLines.join('\n') || '*No recorded active stats found in the database yet.*', inline: false }
         )
         .setTimestamp()
-        .setFooter({ text: 'Check out your complete, itemized ledger at https://dunestats.cc/ledger' });
+        .setFooter({ text: 'Show your ranking and complete stats at https://dunestats.cc/ledger' });
 
       await interaction.editReply({ embeds: [spEmbed] });
 
