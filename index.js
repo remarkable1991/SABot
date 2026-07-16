@@ -15,6 +15,7 @@ const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
+const liveCommand = require('./live'); // 1. Imported the new live command file
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads'); 
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
@@ -52,15 +53,6 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
-// Reaction emojis for async lobbies
-const ASYNC_EMOJIS = {
-  join: 'AsyncDune',
-  start: '🎮',
-  cancel: '❌',
-  alerts: '🔔',
-  tag: '📢'
-};
-
 if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
   console.error('Missing required environment variables.');
   process.exit(1);
@@ -86,9 +78,11 @@ const discordClient = new Client({
   ]
 });
 
+// 2. Registered liveCommand within the internal slashCommands Map
 const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
+  [liveCommand.data.name, liveCommand], 
   [tournamentCommand.data.name, tournamentCommand],
   [massThreadsCommand.data.name, massThreadsCommand] 
 ]);
@@ -481,10 +475,12 @@ async function runInitialDatabaseSync() {
   }
 }
 
-function getAsyncDuneEmoji(guild) {
-  if (!guild || !guild.emojis || !guild.emojis.cache) return ':AsyncDune:';
-  const emoji = guild.emojis.cache.find((e) => e.name === 'AsyncDune');
-  return emoji ? emoji.toString() : ':AsyncDune:';
+// 3. Dynamic Emoji Resolver that handles both Async and Live custom emojis
+function getAsyncDuneEmoji(guild, isLive = false) {
+  if (!guild || !guild.emojis || !guild.emojis.cache) return isLive ? '⚔️' : '🎲';
+  const targetName = isLive ? 'LiveDune' : 'AsyncDune';
+  const emoji = guild.emojis.cache.find((e) => e.name === targetName);
+  return emoji ? emoji.toString() : (isLive ? '⚔️' : '🎲');
 }
 
 discordClient.on('interactionCreate', async (interaction) => {
@@ -511,9 +507,15 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
+    // 4. Checking if the lobby is a live lobby based on the presence of our "expires_at" or the embed title
+    const isLiveLobby = lobby.expires_at !== null || (message.embeds[0] && message.embeds[0].title && message.embeds[0].title.includes('Live'));
+    const joinEmojiString = getAsyncDuneEmoji(message.guild, isLiveLobby);
+
     const emoji = reaction.emoji.name || reaction.emoji;
-    const asyncDuneStr = getAsyncDuneEmoji(message.guild);
-    const isAsyncDune = emoji === 'AsyncDune' || reaction.emoji.toString().includes('AsyncDune') || emoji === '🎲';
+    // Check match for custom AsyncDune / LiveDune or fallback 🎲 / ⚔️
+    const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
+                        reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
+                        emoji === '🎲' || emoji === '⚔️';
 
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
@@ -521,7 +523,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     let shouldUpdate = false;
 
     // Join Lobby (Only if the combined space has room)
-    if (isAsyncDune) {
+    if (isJoinEmoji) {
       if (!players.includes(user.id)) {
         const totalCount = players.length + guestPlayers.length;
         if (totalCount < 4) {
@@ -551,7 +553,10 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
         const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
 
-        embed.setTitle('🏁 Async Match Started!')
+        // Preserve matching context naming (Async vs Live Match)
+        const matchTypeTitle = isLiveLobby ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+
+        embed.setTitle(matchTypeTitle)
              .setColor(0x2ecc71)
              .setFooter(null) 
              .setFields(
@@ -602,16 +607,25 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
       await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
 
-      const targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-      const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+      // 5. Check whether to ping the Async or Live Role
+      let targetRole;
+      let roleMention;
+      if (isLiveLobby) {
+        roleMention = `<@&1219666679764877424>`; // Live target role ID
+      } else {
+        targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+        roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+      }
 
       const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
       const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
 
       const totalCount = players.length + guestPlayers.length;
-      const tagMessage = `🎲 Match looking for players (${totalCount}/4) ${roleMention} ${asyncDuneStr}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
+      const tagMessage = `🎲 Match looking for players (${totalCount}/4) ${roleMention} ${joinEmojiString}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
 
-      await message.channel.send({ content: tagMessage, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
+      const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: [targetRole?.id].filter(Boolean) };
+
+      await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
       await reaction.users.remove(user.id).catch(() => {});
       return;
     }
@@ -650,7 +664,9 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
     const emoji = reaction.emoji.name || reaction.emoji;
-    const isAsyncDune = emoji === 'AsyncDune' || reaction.emoji.toString().includes('AsyncDune') || emoji === '🎲';
+    const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
+                        reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
+                        emoji === '🎲' || emoji === '⚔️';
 
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
@@ -658,7 +674,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     let shouldUpdate = false;
 
     // Leave Lobby
-    if (isAsyncDune) {
+    if (isJoinEmoji) {
       if (players.includes(user.id)) {
         players = players.filter(id => id !== user.id);
         notifications = notifications.filter(id => id !== user.id);
