@@ -79,6 +79,7 @@ const discordClient = new Client({
   intents: [
     GatewayIntentBits.Guilds, 
     GatewayIntentBits.GuildMembers, 
+    GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent, 
     GatewayIntentBits.DirectMessages,
     GatewayIntentBits.GuildMessageReactions 
@@ -389,10 +390,18 @@ function startGlobalDatabaseListener() {
 
             if (notificationChannel && targetDiscordId) {
               const displayAction = formatActionType(event.action_type);
+              
+              // Define clean clarity labels for the different types of rewards
+              let rewardClarity = 'Standard Reward';
+              if (event.action_type === 'daily_first_message') rewardClarity = 'Daily Bonus (First message of the day)';
+              if (event.action_type === 'first_live_game') rewardClarity = 'Daily Bonus (First live game of the day)';
+              if (event.action_type === 'first_weekly_async') rewardClarity = 'Weekly Bonus (First async game of the week)';
+              if (event.action_type === 'image_upload') rewardClarity = 'Hourly Reward (Image post)';
+              if (event.action_type === 'match_start_base') rewardClarity = 'Hourly Reward (Match Started)';
 
               const alertEmbed = new EmbedBuilder()
-                .setTitle('🪙 Spice Points Earned!')
-                .setDescription(`Congratulations <@${targetDiscordId}>!`)
+                .setTitle('🪙 Strategy Points Earned!')
+                .setDescription(`Congratulations <@${targetDiscordId}>!\nYou've earned a **${rewardClarity}**!`)
                 .setColor(0xf1c40f) // Gold color for rewards
                 .addFields(
                   { name: '✨ Action', value: `\`${displayAction}\``, inline: true },
@@ -648,8 +657,9 @@ discordClient.on('messageCreate', async (message) => {
     }
 
     // --- RULE 2: Image Upload in Specific Channel (+50 SP, Max 1 per Hour) ---
-    const hasImage = message.attachments.some(attachment => 
-      attachment.contentType?.startsWith('image/') || 
+    const attachments = Array.from(message.attachments.values());
+    const hasImage = attachments.some(attachment => 
+      (attachment.contentType && attachment.contentType.startsWith('image/')) || 
       /\.(jpg|jpeg|png|gif|webp)$/i.test(attachment.url)
     );
 
@@ -683,6 +693,16 @@ discordClient.on('messageCreate', async (message) => {
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
+
+    // Resolve partial messages to ensure we get structural property definitions
+    if (reaction.partial) {
+      try {
+        await reaction.fetch();
+      } catch (err) {
+        console.error('Failed to resolve partial reaction structure:', err);
+        return;
+      }
+    }
 
     const message = reaction.message;
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
@@ -912,6 +932,15 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 discordClient.on('messageReactionRemove', async (reaction, user) => {
   try {
     if (user.bot) return;
+
+    if (reaction.partial) {
+      try {
+        await reaction.fetch();
+      } catch (err) {
+        console.error('Failed to resolve partial unreaction structure:', err);
+        return;
+      }
+    }
 
     const message = reaction.message;
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
