@@ -502,7 +502,7 @@ discordClient.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Reacting to Emojis (Join / Leave / Cancel / Start / Alerts / Ping Role)
+// Reacting to Emojis (Join / Alert / Cooldown Tag / Start / Cancel)
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
@@ -517,28 +517,36 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
+    const guestPlayers = [...(lobby.guest_players || [])];
     let shouldUpdate = false;
 
-    // Join/Leave toggle
+    // Join Lobby (Only if the combined space has room)
     if (isAsyncDune) {
-      if (players.includes(user.id)) {
-        players = players.filter(id => id !== user.id);
-        notifications = notifications.filter(id => id !== user.id);
-      } else if (players.length < 4) {
-        players.push(user.id);
-        if (notifications.length > 0) {
-          await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+      if (!players.includes(user.id)) {
+        const totalCount = players.length + guestPlayers.length;
+        if (totalCount < 4) {
+          players.push(user.id);
+          shouldUpdate = true;
+          if (notifications.length > 0) {
+            await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+          }
+        } else {
+          // If the lobby was full, remove the invalid join reaction to maintain accurate UI counts
+          await reaction.users.remove(user.id).catch(() => {});
         }
       }
-      shouldUpdate = true;
     }
 
     // Start Game
     if (emoji === '🎮') {
-      if (players.includes(user.id) && players.length >= 2) {
+      const totalCount = players.length + guestPlayers.length;
+      if (players.includes(user.id) && totalCount >= 2) {
         await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
         const embed = EmbedBuilder.from(message.embeds[0]);
-        const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
+        
+        const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+        const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+        const finalRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
         const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
         const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
@@ -549,7 +557,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
              .setFields(
                { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
                { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-               { name: `👥 Final Roster (${players.length}/4)`, value: playerList, inline: false }
+               { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
              );
 
         await message.edit({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
@@ -570,21 +578,21 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     // Toggle Alerts
     if (emoji === '🔔') {
-      notifications = notifications.includes(user.id) ? notifications.filter(id => id !== user.id) : [...notifications, user.id];
-      shouldUpdate = true;
+      if (!notifications.includes(user.id)) {
+        notifications.push(user.id);
+        shouldUpdate = true;
+      }
     }
 
-    // Tag Players (Anyone can use, 45 min cooldown enforced)
+    // Tag Players (45 min cooldown)
     if (emoji === '📢') {
       const now = new Date();
       const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
 
-      // Cooldown verification logic
       if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
         const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
         await reaction.users.remove(user.id).catch(() => {});
         
-        // Temporary feedback channel message to prevent UI spam since standard reacts can't be ephemeral
         const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>` }).catch(() => {});
         setTimeout(() => {
           cooldownMsg.delete().catch(() => {});
@@ -600,7 +608,8 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
       const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
 
-      const tagMessage = `🎲 Match looking for players (${players.length}/4) ${roleMention} ${asyncDuneStr}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
+      const totalCount = players.length + guestPlayers.length;
+      const tagMessage = `🎲 Match looking for players (${totalCount}/4) ${roleMention} ${asyncDuneStr}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
 
       await message.channel.send({ content: tagMessage, allowedMentions: { roles: [targetRole?.id].filter(Boolean) } });
       await reaction.users.remove(user.id).catch(() => {});
@@ -611,20 +620,81 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
 
       const embed = EmbedBuilder.from(message.embeds[0]);
-      const playerList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`).join('\n');
+      
+      const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+      const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+      const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+      const totalCount = players.length + guestPlayers.length;
+
       embed.setFields(
         { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (${players.length}/4)`, value: playerList, inline: false },
-        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false } // Keeps legend intact
+        { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay, inline: false },
+        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
       );
 
       await message.edit({ embeds: [embed] }).catch(() => {});
     }
-
-    await reaction.users.remove(user.id).catch(() => {});
   } catch (err) {
     console.error('Error handling reaction:', err);
+  }
+});
+
+// Reacting to Un-Reactions (Leaving / Untoggling alerts)
+discordClient.on('messageReactionRemove', async (reaction, user) => {
+  try {
+    if (user.bot) return;
+
+    const message = reaction.message;
+    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (fetchErr || !lobby || lobby.status !== 'searching') return;
+
+    const emoji = reaction.emoji.name || reaction.emoji;
+    const isAsyncDune = emoji === 'AsyncDune' || reaction.emoji.toString().includes('AsyncDune') || emoji === '🎲';
+
+    let players = [...(lobby.player_ids || [])];
+    let notifications = [...(lobby.notify_user_ids || [])];
+    const guestPlayers = [...(lobby.guest_players || [])];
+    let shouldUpdate = false;
+
+    // Leave Lobby
+    if (isAsyncDune) {
+      if (players.includes(user.id)) {
+        players = players.filter(id => id !== user.id);
+        notifications = notifications.filter(id => id !== user.id);
+        shouldUpdate = true;
+      }
+    }
+
+    // Untoggle Alerts
+    if (emoji === '🔔') {
+      if (notifications.includes(user.id)) {
+        notifications = notifications.filter(id => id !== user.id);
+        shouldUpdate = true;
+      }
+    }
+
+    if (shouldUpdate) {
+      await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      
+      const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+      const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+      const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+      const totalCount = players.length + guestPlayers.length;
+
+      embed.setFields(
+        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay, inline: false },
+        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
+      );
+
+      await message.edit({ embeds: [embed] }).catch(() => {});
+    }
+  } catch (err) {
+    console.error('Error handling reaction remove:', err);
   }
 });
 
