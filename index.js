@@ -18,6 +18,7 @@ const asyncCommand = require('./async');
 const liveCommand = require('./live'); // 1. Imported the new live command file
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads'); 
+const spCommand = require('./sp'); // Imported the new sp command module
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -91,13 +92,14 @@ const discordClient = new Client({
   ]
 });
 
-// 2. Registered liveCommand within the internal slashCommands Map
+// 2. Registered spCommand within the internal slashCommands Map
 const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
   [liveCommand.data.name, liveCommand], 
   [tournamentCommand.data.name, tournamentCommand],
-  [massThreadsCommand.data.name, massThreadsCommand] 
+  [massThreadsCommand.data.name, massThreadsCommand],
+  [spCommand.data.name, spCommand] // Map the new Strategy Points command module here
 ]);
 
 const pendingGames = new Set();
