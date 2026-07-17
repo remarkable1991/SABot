@@ -492,21 +492,37 @@ async function executeGlobalSpAuditSweep() {
 
     if (spError || !claimedSpRecords || !claimedSpRecords.length) return;
 
-    const playerKeys = claimedSpRecords.map(r => r.player_key);
-    const { data: mapRecords, error: mapError } = await supabase
-      .from('player_discord_map')
-      .select('player_key, discord_user_id')
-      .in('player_key', playerKeys);
-
-    if (mapError || !mapRecords) return;
-
-    const mapDict = {};
-    for (const row of mapRecords) {
-      if (row.discord_user_id) mapDict[row.player_key] = row.discord_user_id;
-    }
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    if (!guild) return;
 
     for (const record of claimedSpRecords) {
-      const discordId = mapDict[record.player_key];
+      // 1. Try to find an existing direct Discord ID map
+      let { data: mapRecord } = await supabase
+        .from('player_discord_map')
+        .select('id, discord_user_id, discord_username, display_name, username')
+        .eq('player_key', record.player_key)
+        .maybeSingle();
+
+      let discordId = mapRecord?.discord_user_id;
+
+      // 2. Fallback: If no saved ID, perform a smart guild search using their known database names
+      if (!discordId && mapRecord) {
+        const searchNames = [
+          mapRecord.discord_username,
+          mapRecord.display_name,
+          mapRecord.username,
+          record.player_key
+        ].filter(Boolean);
+
+        const member = await searchGuildMemberByNames(guild, searchNames);
+        if (member) {
+          discordId = member.id;
+          console.log(`🔗 Sweep Auto-Link: Mapped unclaimed ID for "${record.player_key}" -> ${member.user.tag}`);
+          await persistDiscordUserId(mapRecord, member.id);
+        }
+      }
+
+      // 3. Sync the role if we have an ID
       if (discordId) {
         await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
       }
