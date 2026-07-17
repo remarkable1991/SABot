@@ -267,12 +267,74 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase.from('games').select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders').eq('id', gameId).single();
+  // 1. Fetch main game properties including tournament fields
+  const { data: game, error: gameError } = await supabase
+    .from('games')
+    .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num')
+    .eq('id', gameId)
+    .single();
+
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
-  const { data: results, error: resultsError = null } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
+  
+  // 2. Fetch specific layout positions of current game reporting rows
+  const { data: results, error: resultsError = null } = await supabase
+    .from('game_results')
+    .select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall')
+    .eq('game_id', gameId)
+    .order('placement', { ascending: true });
+
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
+  
+  // 3. Dynamic Tournament Cross-Reference Table Grouping Layout
+  let tournamentDetails = null;
+  if (game.tournament_num) {
+    try {
+      const currentPlayers = results.map(r => normalizeName(r.player_name));
+
+      const { data: matchRows, error: tourneyError } = await supabase
+        .from('tournament_matches')
+        .select('round_type, table_identifier, player_name')
+        .eq('tournament_num', game.tournament_num);
+
+      if (!tourneyError && matchRows && matchRows.length > 0) {
+        const tablesMap = new Map();
+        
+        matchRows.forEach(row => {
+          const groupKey = `${row.round_type}||${row.table_identifier}`;
+          if (!tablesMap.has(groupKey)) {
+            tablesMap.set(groupKey, {
+              roundType: row.round_type,
+              tableIdentifier: row.table_identifier,
+              players: []
+            });
+          }
+          tablesMap.get(groupKey).players.push(normalizeName(row.player_name));
+        });
+
+        const matchedTable = Array.from(tablesMap.values()).find(t => {
+          return currentPlayers.every(p => t.players.includes(p));
+        });
+
+        if (matchedTable) {
+          tournamentDetails = {
+            roundType: matchedTable.roundType,
+            tableIdentifier: matchedTable.tableIdentifier
+          };
+        }
+      }
+    } catch (err) {
+      console.error('Error cross-referencing tournament match metadata pairings:', err);
+    }
+  }
+
+  // 4. Collect generic Elo ratings records mapping coordinates
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
-  const { data: ratings, error: ratingsError = null } = await supabase.from('player_ratings').select('player_key, display_name, game_version, elo').in('player_key', playerKeys).in('game_version', ['overall', game.game_version]);
+  const { data: ratings, error: ratingsError = null } = await supabase
+    .from('player_ratings')
+    .select('player_key, display_name, game_version, elo')
+    .in('player_key', playerKeys)
+    .in('game_version', ['overall', game.game_version]);
+
   if (ratingsError) { console.error('Failed to fetch ratings', ratingsError); }
   const ratingsMap = {};
   for (const row of ratings || []) {
@@ -280,12 +342,25 @@ async function buildGameResultPayload(gameId) {
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
   const screenshotMedia = game.image_url ? await createDiscordImagePayload(game.image_url) : null;
-  return { game, results, ratingsMap, screenshotMedia };
+  return { game, results, ratingsMap, screenshotMedia, tournamentDetails };
 }
 
 async function buildEmbed(payload, guild) {
   const game = payload.game; const results = payload.results; const ratingsMap = payload.ratingsMap; const screenshotMedia = payload.screenshotMedia;
+  const tourney = payload.tournamentDetails;
+  
   const modeLabel = capitalize(game.game_version || 'unknown'); const tags = buildGameTags(game, guild); const lines = [];
+  
+  // Set up titles based on casual vs tournament data definitions
+  let titleString = `Game Finished - ${modeLabel}`;
+  if (game.tournament_num) {
+    if (tourney) {
+      titleString = `🏆 Tournament ${game.tournament_num} | ${tourney.roundType} ${tourney.tableIdentifier}`;
+    } else {
+      titleString = `🏆 Tournament ${game.tournament_num} Match Finished!`;
+    }
+  }
+
   for (const row of results) {
     const place = getPlacementEmoji(guild, row.placement); const playerKey = String(row.player_name || '').toLowerCase();
     const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined; const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
@@ -299,7 +374,7 @@ async function buildEmbed(payload, guild) {
     lines.push(text);
   }
   if (tags.length) { lines.push('Game modes played: ' + tags.join(' | ')); }
-  const embed = new EmbedBuilder().setTitle('Game Finished - ' + modeLabel).setDescription(lines.join('\n\n')).setColor(0xC9A24B).setTimestamp(new Date());
+  const embed = new EmbedBuilder().setTitle(titleString).setDescription(lines.join('\n\n')).setColor(game.tournament_num ? 0xd35400 : 0xC9A24B).setTimestamp(new Date());
   if (screenshotMedia?.imageUrl) { embed.setImage(screenshotMedia.imageUrl); }
   return { embed, screenshotMedia };
 }
