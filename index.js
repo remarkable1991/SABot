@@ -15,10 +15,11 @@ const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
-const liveCommand = require('./live'); // 1. Imported the new live command file
+const liveCommand = require('./live'); 
+const fixCommand = require('./fix'); // Registered the new fix command module
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads'); 
-const spCommand = require('./sp'); // Imported the new sp command module
+const spCommand = require('./sp'); 
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -92,14 +93,15 @@ const discordClient = new Client({
   ]
 });
 
-// 2. Registered spCommand within the internal slashCommands Map
+// Registered fixCommand within the internal slashCommands Map
 const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
   [liveCommand.data.name, liveCommand], 
+  [fixCommand.data.name, fixCommand],
   [tournamentCommand.data.name, tournamentCommand],
   [massThreadsCommand.data.name, massThreadsCommand],
-  [spCommand.data.name, spCommand] // Map the new Strategy Points command module here
+  [spCommand.data.name, spCommand]
 ]);
 
 const pendingGames = new Set();
@@ -267,7 +269,6 @@ async function createDiscordImagePayload(storagePath) {
 }
 
 async function buildGameResultPayload(gameId) {
-  // 1. Fetch main game properties including tournament fields
   const { data: game, error: gameError } = await supabase
     .from('games')
     .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num')
@@ -276,7 +277,6 @@ async function buildGameResultPayload(gameId) {
 
   if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   
-  // 2. Fetch specific layout positions of current game reporting rows
   const { data: results, error: resultsError = null } = await supabase
     .from('game_results')
     .select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall')
@@ -285,7 +285,6 @@ async function buildGameResultPayload(gameId) {
 
   if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
   
-  // 3. Dynamic Tournament Cross-Reference Table Grouping Layout
   let tournamentDetails = null;
   if (game.tournament_num) {
     try {
@@ -327,7 +326,6 @@ async function buildGameResultPayload(gameId) {
     }
   }
 
-  // 4. Collect generic Elo ratings records mapping coordinates
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
   const { data: ratings, error: ratingsError = null } = await supabase
     .from('player_ratings')
@@ -351,7 +349,6 @@ async function buildEmbed(payload, guild) {
   
   const modeLabel = capitalize(game.game_version || 'unknown'); const tags = buildGameTags(game, guild); const lines = [];
   
-  // Set up titles based on casual vs tournament data definitions
   let titleString = `Game Finished - ${modeLabel}`;
   if (game.tournament_num) {
     if (tourney) {
@@ -425,7 +422,6 @@ function startGlobalDatabaseListener() {
         if (!newRecord) return;
         console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
 
-        // HANDLER A: Tournament Registrations
         if (table === 'tournament_registrations') {
           if (newRecord.active_on_discord === true && Number(newRecord.tournament_num) === TARGET_TOURNAMENT_NUM) {
             await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, true);
@@ -434,7 +430,6 @@ function startGlobalDatabaseListener() {
           }
         }
 
-        // HANDLER B: Live SP Tier Progression Hierarchy Updates
         if (table === 'player_sp' && eventType === 'UPDATE') {
           if (newRecord.is_claimed === true) {
             const { data: mapRecord } = await supabase
@@ -450,12 +445,9 @@ function startGlobalDatabaseListener() {
           }
         }
 
-        // HANDLER C: Live SP Alerts & Notifications (Discord & Website events)
         if (table === 'sp_events' && eventType === 'INSERT') {
           try {
             const event = newRecord;
-
-            // Try resolving the Discord ID for this player_key
             const { data: mapRecord } = await supabase
               .from('player_discord_map')
               .select('discord_user_id')
@@ -467,8 +459,6 @@ function startGlobalDatabaseListener() {
 
             if (notificationChannel && targetDiscordId) {
               let displayAction = formatActionType(event.action_type);
-
-              // Define clean clarity labels for the different types of rewards
               let rewardClarity = 'Standard Reward';
               if (event.action_type === 'daily_first_message') {
                 rewardClarity = 'Daily Bonus (First message of the day)';
@@ -486,7 +476,7 @@ function startGlobalDatabaseListener() {
               const alertEmbed = new EmbedBuilder()
                 .setTitle('🪙 Strategy Points Earned!')
                 .setDescription(`Congratulations <@${targetDiscordId}>!\nYou've earned a **${rewardClarity}**!`)
-                .setColor(0xf1c40f) // Gold color for rewards
+                .setColor(0xf1c40f)
                 .addFields(
                   { name: '✨ Action', value: `\`${displayAction}\``, inline: true },
                   { name: '💰 Reward', value: `**+${event.amount} SP**`, inline: true }
@@ -571,7 +561,6 @@ async function executeGlobalSpAuditSweep() {
     if (!guild) return;
 
     for (const record of claimedSpRecords) {
-      // 1. Try to find an existing direct Discord ID map
       let { data: mapRecord } = await supabase
         .from('player_discord_map')
         .select('id, discord_user_id, discord_username, display_name, username')
@@ -580,7 +569,6 @@ async function executeGlobalSpAuditSweep() {
 
       let discordId = mapRecord?.discord_user_id;
 
-      // 2. Fallback: If no saved ID, perform a smart guild search using their known database names
       if (!discordId && mapRecord) {
         const searchNames = [
           mapRecord.discord_username,
@@ -597,7 +585,6 @@ async function executeGlobalSpAuditSweep() {
         }
       }
 
-      // 3. Sync the role if we have an ID
       if (discordId) {
         await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
       }
@@ -631,7 +618,6 @@ async function runInitialDatabaseSync() {
   }
 }
 
-// 3. Dynamic Emoji Resolver that handles both Async and Live custom emojis
 function getAsyncDuneEmoji(guild, isLive = false) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return isLive ? '⚔️' : '🎲';
   const targetName = isLive ? 'LiveDune' : 'AsyncDune';
@@ -639,14 +625,9 @@ function getAsyncDuneEmoji(guild, isLive = false) {
   return emoji ? emoji.toString() : (isLive ? '⚔️' : '🎲');
 }
 
-/**
- * Resolves a Discord User ID to their claimed player_key and user_id (UUID).
- * Uses robust fuzzy fallback matching and automatically persists IDs to auto-link players.
- */
 async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
   if (!discordUserId) return null;
 
-  // 1. First, try a direct, precise match on the snowflake ID
   let { data, error } = await supabase
     .from('player_discord_map')
     .select('player_key, claimed_by, id, discord_user_id')
@@ -657,7 +638,6 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
     return { playerKey: data.player_key, userId: data.claimed_by };
   }
 
-  // 2. Fallback: If no direct match, try resolving them by usernames/nicknames
   let member = memberObject;
   if (!member) {
     try {
@@ -691,7 +671,6 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
 
   if (searchError || !searchData || !searchData.length) return null;
 
-  // Run similarity scores to find the absolute best match
   let bestMatch = null;
   let bestScore = 0;
 
@@ -711,22 +690,15 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
     }
   }
 
-  // If we find a highly confident match, auto-link them permanently in the DB!
   if (bestMatch && bestScore >= DB_MATCH_THRESHOLD) {
     console.log(`🔗 Auto-Linking Map: Resolved ${member.user.tag} to database player "${bestMatch.player_key}" (Score: ${bestScore.toFixed(2)})`);
-    
-    // Save the Discord ID to the DB so future lookups are instant
     await persistDiscordUserId(bestMatch, discordUserId);
-
     return { playerKey: bestMatch.player_key, userId: bestMatch.claimed_by };
   }
 
   return null;
 }
 
-/**
- * Formats raw action types into human-readable titles dynamically
- */
 function formatActionType(action) {
   return action
     .split('_')
@@ -734,12 +706,8 @@ function formatActionType(action) {
     .join(' ');
 }
 
-/**
- * Safely inserts an event into sp_events and increments both lifetime_sp and seasonal_sp in player_sp
- */
 async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   try {
-    // 1. Log transaction in the sp_events ledger
     const { error: eventError } = await supabase
       .from('sp_events')
       .insert({
@@ -752,7 +720,6 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
 
     if (eventError) throw eventError;
 
-    // 2. Increment aggregates in player_sp
     const { data: currentSp, error: selectError } = await supabase
       .from('player_sp')
       .select('lifetime_sp, seasonal_sp')
@@ -796,19 +763,16 @@ discordClient.on('interactionCreate', async (interaction) => {
   }
 });
 
-// Listener for Message-based SP (Daily Text and Image Uploads)
 discordClient.on('messageCreate', async (message) => {
   try {
     if (message.author.bot || !message.guild) return;
 
-    // Resolve the user's game identity
     const profile = await getPlayerProfileFromDiscord(message.author.id);
-    if (!profile) return; // Silent skip if they haven't claimed/linked their Discord
+    if (!profile) return; 
 
     const now = new Date();
     const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
 
-    // --- RULE 1: First Message Anywhere on the Server of the Day (+10 SP) ---
     const { data: dailyTextEvents, error: textErr } = await supabase
       .from('sp_events')
       .select('id')
@@ -826,7 +790,6 @@ discordClient.on('messageCreate', async (message) => {
       );
     }
 
-    // --- RULE 2: Image Upload in Specific Channel (+50 SP, Max 1 per Hour) ---
     const attachments = Array.from(message.attachments.values());
     const hasImage = attachments.some(attachment => 
       (attachment.contentType && attachment.contentType.startsWith('image/')) || 
@@ -836,7 +799,6 @@ discordClient.on('messageCreate', async (message) => {
     if (message.channel.id === IMAGE_UPLOADS_CHANNEL_ID && hasImage) {
       const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
 
-      // Check if they uploaded an image within the last hour
       const { data: recentImageEvents, error: imgErr } = await supabase
         .from('sp_events')
         .select('id')
@@ -859,17 +821,15 @@ discordClient.on('messageCreate', async (message) => {
   }
 });
 
-// Reacting to Emojis (Join / Alert / Cooldown Tag / Start / Cancel)
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
 
-    // Resolve partial messages to ensure we get structural property definitions
     if (reaction.partial) {
       try {
         await reaction.fetch();
       } catch (err) {
-        console.error('Failed to resolve partial reaction structure:', err);
+        console.error('Failed to resolve partial unreaction structure:', err);
         return;
       }
     }
@@ -878,12 +838,10 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
-    // 4. Checking if the lobby is a live lobby based on the presence of our "expires_at" or the embed title
     const isLiveLobby = lobby.expires_at !== null || (message.embeds[0] && message.embeds[0].title && message.embeds[0].title.includes('Live'));
     const joinEmojiString = getAsyncDuneEmoji(message.guild, isLiveLobby);
 
     const emoji = reaction.emoji.name || reaction.emoji;
-    // Check match for custom AsyncDune / LiveDune or fallback 🎲 / ⚔️
     const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
                         reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
                         emoji === '🎲' || emoji === '⚔️';
@@ -893,7 +851,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const guestPlayers = [...(lobby.guest_players || [])];
     let shouldUpdate = false;
 
-    // Join Lobby (Only if the combined space has room)
     if (isJoinEmoji) {
       if (!players.includes(user.id)) {
         const totalCount = players.length + guestPlayers.length;
@@ -904,13 +861,11 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
             await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
           }
         } else {
-          // If the lobby was full, remove the invalid join reaction to maintain accurate UI counts
           await reaction.users.remove(user.id).catch(() => {});
         }
       }
     }
 
-    // Start Game
     if (emoji === '🎮') {
       const totalCount = players.length + guestPlayers.length;
       if (players.includes(user.id) && totalCount >= 2) {
@@ -924,7 +879,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
         const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
 
-        // Preserve matching context naming (Async vs Live Match)
         const matchTypeTitle = isLiveLobby ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
 
         embed.setTitle(matchTypeTitle)
@@ -936,15 +890,14 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
                { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
              );
 
-        await message.edit({ content: `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+        const labelMatchId = lobby.match_id ? ` [ID: ${lobby.match_id}]` : '';
+        await message.edit({ content: `🚀 **The match${labelMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
 
-        // --- CORE SP GAME START AWARD DISTRIBUTIONS ---
         const now = new Date();
         const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
         const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
 
-        // Calculate start of current UTC week (Previous Sunday 00:00:00 UTC)
-        const currentUtcDay = now.getUTCDay(); // 0 is Sunday, 1 is Monday...
+        const currentUtcDay = now.getUTCDay(); 
         const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
         const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
 
@@ -954,19 +907,17 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
           const profile = await getPlayerProfileFromDiscord(playerId);
           
           if (!profile) {
-            // Track potential missed SP for unlinked players
-            let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; // +50 base
+            let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; 
             if (isLiveLobby) {
-              potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; // +100 live daily bonus
+              potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; 
             } else {
-              potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; // +350 async weekly bonus
+              potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; 
             }
             
             unlinkedPlayers.push({ id: playerId, points: potentialSp });
             continue;
           }
 
-          // 1. BASE REWARD: Match Started (50 SP, max 1 per hour)
           const { data: hourlyMatchEvents } = await supabase
             .from('sp_events')
             .select('id')
@@ -984,7 +935,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
             );
           }
 
-          // 2. BONUS REWARD: Live Game (100 SP, max 1 per day)
           if (isLiveLobby) {
             const { data: dailyLiveEvents } = await supabase
               .from('sp_events')
@@ -1004,7 +954,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
             }
           }
 
-          // 3. BONUS REWARD: Async Game (350 SP, max 1 per week)
           if (!isLiveLobby) {
             const { data: weeklyAsyncEvents } = await supabase
               .from('sp_events')
@@ -1025,7 +974,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
           }
         }
 
-        // --- UNLINKED ACCOUNTS WARNING MESSAGE ---
         if (unlinkedPlayers.length > 0) {
           const warningLines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`);
           
@@ -1034,7 +982,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
             .setDescription(
               `${warningLines.join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`
             )
-            .setColor(0xe74c3c); // Red warning color
+            .setColor(0xe74c3c); 
 
           await message.channel.send({ embeds: [warningEmbed] }).catch(() => {});
         }
@@ -1043,7 +991,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       }
     }
 
-    // Cancel Lobby (Host only)
     if (emoji === '❌' && user.id === lobby.host_id) {
       await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
       const embed = EmbedBuilder.from(message.embeds[0]);
@@ -1054,7 +1001,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       return;
     }
 
-    // Toggle Alerts
     if (emoji === '🔔') {
       if (!notifications.includes(user.id)) {
         notifications.push(user.id);
@@ -1062,7 +1008,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       }
     }
 
-    // Tag Players (45 min cooldown)
     if (emoji === '📢') {
       const now = new Date();
       const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
@@ -1080,21 +1025,21 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
       await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
 
-      // 5. Check whether to ping the Async or Live Role
       let targetRole;
       let roleMention;
       if (isLiveLobby) {
-        roleMention = `<@&1219666679764877424>`; // Live target role ID
+        roleMention = `<@&1219666679764877424>`; 
       } else {
         targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-        roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+        roleMention = targetRole ? `<&${targetRole.id}>` : '@DuneASYNC';
       }
 
       const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
       const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
 
       const totalCount = players.length + guestPlayers.length;
-      const tagMessage = `🎲 Match looking for players (${totalCount}/4) ${roleMention} ${joinEmojiString}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
+      const labelMatchId = lobby.match_id ? `[ID: ${lobby.match_id}] ` : '';
+      const tagMessage = `🎲 Match ${labelMatchId}looking for players (${totalCount}/4) ${roleMention} ${joinEmojiString}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
 
       const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: [targetRole?.id].filter(Boolean) };
 
@@ -1127,7 +1072,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
   }
 });
 
-// Reacting to Un-Reactions (Leaving / Untoggling alerts)
 discordClient.on('messageReactionRemove', async (reaction, user) => {
   try {
     if (user.bot) return;
@@ -1155,7 +1099,6 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     const guestPlayers = [...(lobby.guest_players || [])];
     let shouldUpdate = false;
 
-    // Leave Lobby
     if (isJoinEmoji) {
       if (players.includes(user.id)) {
         players = players.filter(id => id !== user.id);
@@ -1164,7 +1107,6 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
       }
     }
 
-    // Untoggle Alerts
     if (emoji === '🔔') {
       if (notifications.includes(user.id)) {
         notifications = notifications.filter(id => id !== user.id);
