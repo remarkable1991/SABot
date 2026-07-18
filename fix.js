@@ -29,7 +29,6 @@ module.exports = {
     const action = interaction.options.getString('action');
     const targetInput = interaction.options.getString('target').trim();
 
-    // 1. Look up the active lobby
     const { data: lobby, error: fetchErr } = await supabase
       .from('active_async_matches')
       .select('*')
@@ -44,7 +43,6 @@ module.exports = {
       return interaction.reply({ content: `❌ This lobby has already been ${lobby.status} and cannot be modified.`, ephemeral: true });
     }
 
-    // Helper functions for fuzzy matching
     const normalize = (val) => String(val || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
     const calculateSimilarity = (a, b) => {
       const x = normalize(a); const y = normalize(b);
@@ -67,15 +65,12 @@ module.exports = {
     let notifications = [...(lobby.notify_user_ids || [])];
     let logMessage = '';
 
-    // --- HANDLE ADD ACTION ---
     if (action === 'add') {
-      const currentTotal = players.length + guestPlayers.length;
+      let currentTotal = players.length + guestPlayers.length;
       if (currentTotal >= 4) {
         return interaction.reply({ content: `❌ This lobby is already completely full (4/4).`, ephemeral: true });
       }
-      const spaceLeft = 4 - currentTotal;
 
-      // Check for Discord mentions
       const mentionRegex = /<@!?(\d+)>/g;
       let match;
       const parsedMentions = [];
@@ -84,63 +79,96 @@ module.exports = {
       }
 
       if (parsedMentions.length > 0) {
-        const toAdd = parsedMentions.slice(0, spaceLeft);
         let addedCount = 0;
-        for (const id of toAdd) {
+        for (const id of parsedMentions) {
+          if (players.length + guestPlayers.length >= 4) break;
           if (!players.includes(id)) {
             players.push(id);
             addedCount++;
           }
         }
-        logMessage = addedCount > 0 ? `✅ Added registered Discord users to the roster.` : `ℹ️ No new players were added (already in lobby).`;
-      } else {
-        // Integer Check: STRICTLY only allow 1 or 2. Ignore everything else completely.
-        if (/^\d+$/.test(targetInput)) {
-          const numberVal = parseInt(targetInput, 10);
-          if (numberVal === 1 || numberVal === 2) {
-            const count = Math.min(numberVal, spaceLeft);
-            for (let i = 0; i < count; i++) {
-              guestPlayers.push(`Friend of ${interaction.user.username}`);
-            }
-            logMessage = `✅ Added ${count} guest slot(s) to the roster.`;
-          } else {
-            return interaction.reply({ content: `❌ Invalid format. Numeric entry must be exactly 1 or 2.`, ephemeral: true });
+        logMessage = addedCount > 0 ? `✅ Added registered Discord users.` : `ℹ️ No new players were added.`;
+      } else if (/^\d+$/.test(targetInput)) {
+        const numberVal = parseInt(targetInput, 10);
+        if (numberVal === 1 || numberVal === 2) {
+          const count = Math.min(numberVal, 4 - (players.length + guestPlayers.length));
+          for (let i = 0; i < count; i++) {
+            guestPlayers.push(`Friend of ${interaction.user.username}`);
           }
+          logMessage = `✅ Added ${count} guest slot(s).`;
         } else {
-          // Add as raw string names separated by comma
-          const rawNames = targetInput.split(',').map(n => n.trim()).filter(Boolean);
-          const toAddNames = rawNames.slice(0, spaceLeft);
-          for (const name of toAddNames) {
-            guestPlayers.push(name);
-          }
-          logMessage = `✅ Added custom guest name(s) to the roster.`;
+          return interaction.reply({ content: `❌ Invalid format. Numeric entry must be exactly 1 or 2.`, ephemeral: true });
         }
+      } else {
+        const rawNames = targetInput.split(',').map(n => n.trim()).filter(Boolean);
+        let addedReal = 0;
+        let addedGuest = 0;
+
+        for (const name of rawNames) {
+          if (players.length + guestPlayers.length >= 4) break;
+
+          let bestDbMatch = null;
+          let bestDbScore = 0;
+
+          try {
+            const pattern = `%${name}%`;
+            const { data: dbRows } = await supabase
+              .from('player_discord_map')
+              .select('discord_user_id, player_key, display_name, username, discord_username')
+              .or(`display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`)
+              .limit(5);
+
+            if (dbRows) {
+              for (const row of dbRows) {
+                if (!row.discord_user_id) continue;
+                const score = Math.max(
+                  calculateSimilarity(name, row.display_name),
+                  calculateSimilarity(name, row.discord_username),
+                  calculateSimilarity(name, row.username),
+                  calculateSimilarity(name, row.player_key)
+                );
+                if (score > bestDbScore) {
+                  bestDbScore = score;
+                  bestDbMatch = row.discord_user_id;
+                }
+              }
+            }
+          } catch (e) { console.error(e); }
+
+          if (bestDbMatch && bestDbScore >= 0.72) {
+            if (!players.includes(bestDbMatch)) {
+              players.push(bestDbMatch);
+              addedReal++;
+            }
+          } else {
+            guestPlayers.push(name);
+            addedGuest++;
+          }
+        }
+        logMessage = `✅ Roster updated (Fuzzy Players: ${addedReal}, Guests: ${addedGuest}).`;
       }
     }
 
-    // --- HANDLE REMOVE ACTION ---
     if (action === 'remove') {
       const mentionMatch = targetInput.match(/<@!?(\d+)>/);
       let targetId = mentionMatch ? mentionMatch[1] : null;
 
       if (targetId) {
         if (targetId === lobby.host_id) {
-          return interaction.reply({ content: `❌ The host cannot be removed from the lobby. Use the ❌ reaction or cancel flows instead.`, ephemeral: true });
+          return interaction.reply({ content: `❌ The host cannot be removed from the lobby.`, ephemeral: true });
         }
         if (players.includes(targetId)) {
           players = players.filter(id => id !== targetId);
           notifications = notifications.filter(id => id !== targetId);
-          logMessage = `✅ Removed player <@${targetId}> from the lobby.`;
+          logMessage = `✅ Removed player <@${targetId}>.`;
         } else {
           return interaction.reply({ content: `❌ That player is not present in this lobby.`, ephemeral: true });
         }
       } else {
-        // Run Fuzzy matching verification loops over all present occupants
         let bestMatch = null;
         let bestScore = 0;
-        let bestTargetType = ''; // 'player' or 'guest'
+        let bestTargetType = '';
 
-        // Scan Discord Users (fetching cached name values)
         for (const pid of players) {
           if (pid === lobby.host_id) continue;
           const cachedUser = interaction.guild.members.cache.get(pid)?.user;
@@ -155,48 +183,43 @@ module.exports = {
           }
         }
 
-        // Scan Guest String Names
         for (let i = 0; i < guestPlayers.length; i++) {
           const score = calculateSimilarity(targetInput, guestPlayers[i]);
           if (score > bestScore) {
             bestScore = score;
-            bestMatch = i; // Store array index configuration coordinate
+            bestMatch = i;
             bestTargetType = 'guest';
           }
         }
 
-        // Threshold evaluation limit criteria checking
         if (bestScore >= 0.60) {
           if (bestTargetType === 'player') {
             players = players.filter(id => id !== bestMatch);
             notifications = notifications.filter(id => id !== bestMatch);
-            logMessage = `✅ Fuzzy match success (${Math.floor(bestScore * 100)}%): Removed <@${bestMatch}>.`;
+            logMessage = `✅ Removed matched player <@${bestMatch}>.`;
           } else if (bestTargetType === 'guest') {
             const removedName = guestPlayers[bestMatch];
-            guestPlayers.splice(bestMatch, 1); // Pops out exactly the first instance found
-            logMessage = `✅ Fuzzy match success (${Math.floor(bestScore * 100)}%): Removed guest "${removedName}".`;
+            guestPlayers.splice(bestMatch, 1);
+            logMessage = `✅ Removed guest "${removedName}".`;
           }
         } else {
-          return interaction.reply({ content: `❌ Could not confidently match "${targetInput}" to any player or guest in this lobby.`, ephemeral: true });
+          return interaction.reply({ content: `❌ Could not confidently match "${targetInput}" to anyone in this lobby.`, ephemeral: true });
         }
       }
     }
 
-    // 2. Persist updated changes to Supabase database columns
     const totalCount = players.length + guestPlayers.length;
     await supabase
       .from('active_async_matches')
       .update({ player_ids: players, guest_players: guestPlayers, notify_user_ids: notifications })
       .eq('id', lobby.id);
 
-    // 3. Re-fetch original Discord parent message context to refresh embed markup UI layout frames
     try {
       const channel = await interaction.guild.channels.fetch(lobby.channel_id).catch(() => null);
       if (channel) {
         const targetMessage = await channel.messages.fetch(lobby.message_id).catch(() => null);
         if (targetMessage && targetMessage.embeds[0]) {
           const embed = EmbedBuilder.from(targetMessage.embeds[0]);
-          
           const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
           const guestsList = guestPlayers.map(name => `• ${name} 👥`);
           const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
@@ -212,9 +235,9 @@ module.exports = {
         }
       }
     } catch (err) {
-      console.error('Failed to dynamically update target lobby embed fields via /fix execution:', err);
+      console.error(err);
     }
 
-    return interaction.reply({ content: `${logMessage} Lobby layout updated successfully.`, ephemeral: true });
+    return interaction.reply({ content: `${logMessage} Lobby updated.`, ephemeral: true });
   }
 };
