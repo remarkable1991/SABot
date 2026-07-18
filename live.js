@@ -16,7 +16,7 @@ module.exports = {
     )
     .addStringOption(option =>
       option.setName('players')
-        .setDescription('Add up to 2 other players: tag them, enter names, or type a number (e.g., "2")')
+        .setDescription('Add up to 2 other players: tag them, enter names, or type a number ("1" or "2")')
         .setRequired(false)
     )
     .addStringOption(option =>
@@ -143,7 +143,7 @@ module.exports = {
     const liveDuneEmoji = getCustomEmoji('LiveDune', '⚔️');
     
     // Calculate custom expiration timeframe
-    const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180; // 3 hours (180 mins) default
+    const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180; // 3 hours default
     const expirationMs = minutesToExpiry * 60 * 1000;
     const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
@@ -182,12 +182,14 @@ module.exports = {
         }
       } else {
         const cleanInput = playersInput.trim();
-        const numberVal = parseInt(cleanInput, 10);
-
-        if (!isNaN(numberVal) && /^\d+$/.test(cleanInput)) {
-          const count = Math.min(Math.max(numberVal, 1), 2);
-          for (let i = 0; i < count; i++) {
-            guestPlayers.push(`Friend of ${host.username}`);
+        
+        // Integer Check: STRICTLY only process if it's 1 or 2. Ignore higher/other bounds entirely.
+        if (/^\d+$/.test(cleanInput)) {
+          const numberVal = parseInt(cleanInput, 10);
+          if (numberVal === 1 || numberVal === 2) {
+            for (let i = 0; i < numberVal; i++) {
+              guestPlayers.push(`Friend of ${host.username}`);
+            }
           }
         } else {
           const rawNames = cleanInput.split(',').map(n => n.trim()).filter(Boolean);
@@ -199,15 +201,54 @@ module.exports = {
       }
     }
 
+    // --- GENERATE DYNAMIC NAME-BLENDER MATCH ID ---
+    let generatedMatchId = `MATCH-${Math.floor(100 + Math.random() * 900)}`;
+    try {
+      const { data: nameRows } = await supabase
+        .from('player_discord_map')
+        .select('display_name')
+        .not('display_name', 'is', null)
+        .limit(40);
+
+      if (nameRows && nameRows.length >= 2) {
+        const cleanNames = nameRows
+          .map(r => r.display_name.trim().replace(/[^a-zA-Z]/g, ''))
+          .filter(n => n.length >= 4);
+
+        if (cleanNames.length >= 2) {
+          const shuffled = cleanNames.sort(() => 0.5 - Math.random());
+          const pickCount = Math.random() > 0.5 ? 3 : 2;
+          const selectedChunks = shuffled.slice(0, Math.min(pickCount, shuffled.length));
+          
+          let combinedWord = '';
+          selectedChunks.forEach((name) => {
+            const halfLength = Math.ceil(name.length / 2);
+            if (Math.random() > 0.5) {
+              combinedWord += name.slice(0, halfLength);
+            } else {
+              combinedWord += name.slice(-halfLength);
+            }
+          });
+
+          if (combinedWord.length > 3) {
+            combinedWord = combinedWord.charAt(0).toUpperCase() + combinedWord.slice(1).toLowerCase();
+            generatedMatchId = `${combinedWord}-${Math.floor(100 + Math.random() * 900)}`;
+          }
+        }
+      }
+    } catch (idErr) {
+      console.error('Failed to run name-blender calculation loop:', idErr);
+    }
+
     const totalSlotCount = playerIds.length + guestPlayers.length;
     const mentionsList = playerIds.map(id => `• <@${id}>`);
     const guestsList = guestPlayers.map(name => `• ${name} 👥`);
     const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
     const embed = new EmbedBuilder()
-      .setTitle(`${liveDuneEmoji} New Live Match Open!`)
+      .setTitle(`${liveDuneEmoji} New Live Match Open! [ID: ${generatedMatchId}]`)
       .setDescription(`"${notes}"`)
-      .setColor(0xe74c3c) // Distinct red color for Live games
+      .setColor(0xe74c3c) 
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
@@ -252,7 +293,7 @@ module.exports = {
 
     const pingMessage = await interaction.followUp({
       content: customPingSentence,
-      allowedMentions: { roles: ['1219666679764877424'] } // Explicit live role ID ping permission
+      allowedMentions: { roles: ['1219666679764877424'] } 
     });
 
     setTimeout(() => {
@@ -263,6 +304,7 @@ module.exports = {
       .from('active_async_matches')
       .insert({
         message_id: messageId,
+        match_id: generatedMatchId, // Persists the new unique Name-Blender Match ID
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
@@ -274,7 +316,7 @@ module.exports = {
         board_type: boardDisplay,
         expansions: expansionsStored,
         status: 'searching',
-        expires_at: expiresAtISO // Stores the dynamic expiration time
+        expires_at: expiresAtISO 
       });
   }
 };
