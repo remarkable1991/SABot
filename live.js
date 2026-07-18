@@ -72,6 +72,23 @@ module.exports = {
       return emoji ? emoji.toString() : fallback;
     };
 
+    const normalize = (val) => String(val || '').trim().toLowerCase().replace(/[^a-z0-9]/g, '');
+    const calculateSimilarity = (a, b) => {
+      const x = normalize(a); const y = normalize(b);
+      if (!x || !y) return 0; if (x === y) return 1;
+      if (x.includes(y) || y.includes(x)) return Math.min(x.length, y.length) / Math.max(x.length, y.length);
+      const dp = Array.from({ length: x.length + 1 }, () => Array(y.length + 1).fill(0));
+      for (let i = 0; i <= x.length; i++) dp[i][0] = i;
+      for (let j = 0; j <= y.length; j++) dp[0][j] = j;
+      for (let i = 1; i <= x.length; i++) {
+        for (let j = 1; j <= y.length; j++) {
+          const cost = x[i - 1] === y[j - 1] ? 0 : 1;
+          dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
+        }
+      }
+      return 1 - dp[x.length][y.length] / Math.max(x.length, y.length);
+    };
+
     const ixEmoji = getCustomEmoji('Ix', '');
     const immoEmoji = getCustomEmoji('Immo', '');
     const epicEmoji = getCustomEmoji('Epic', '');
@@ -139,16 +156,13 @@ module.exports = {
     }
     statusSentence += '.';
 
-    // Live-specific parameters
     const liveDuneEmoji = getCustomEmoji('LiveDune', '⚔️');
     
-    // Calculate custom expiration timeframe
-    const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180; // 3 hours default
+    const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180;
     const expirationMs = minutesToExpiry * 60 * 1000;
     const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
 
-    // Specific live role ID target tag
     const roleMention = `<@&1219666679764877424>`;
 
     let customPingSentence = `**${interaction.user.username}** is looking for live players ${roleMention}`;
@@ -163,7 +177,6 @@ module.exports = {
     }
     customPingSentence += '.';
 
-    // Parse guest players / pre-added tags
     const playerIds = [host.id];
     const guestPlayers = [];
 
@@ -183,7 +196,6 @@ module.exports = {
       } else {
         const cleanInput = playersInput.trim();
         
-        // Integer Check: STRICTLY only process if it's 1 or 2. Ignore higher/other bounds entirely.
         if (/^\d+$/.test(cleanInput)) {
           const numberVal = parseInt(cleanInput, 10);
           if (numberVal === 1 || numberVal === 2) {
@@ -194,14 +206,46 @@ module.exports = {
         } else {
           const rawNames = cleanInput.split(',').map(n => n.trim()).filter(Boolean);
           const toAddNames = rawNames.slice(0, 2);
+          
           for (const name of toAddNames) {
-            guestPlayers.push(name);
+            let bestDbMatch = null;
+            let bestDbScore = 0;
+
+            try {
+              const pattern = `%${name}%`;
+              const { data: dbRows } = await supabase
+                .from('player_discord_map')
+                .select('discord_user_id, player_key, display_name, username, discord_username')
+                .or(`display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`)
+                .limit(5);
+
+              if (dbRows) {
+                for (const row of dbRows) {
+                  if (!row.discord_user_id) continue;
+                  const score = Math.max(
+                    calculateSimilarity(name, row.display_name),
+                    calculateSimilarity(name, row.discord_username),
+                    calculateSimilarity(name, row.username),
+                    calculateSimilarity(name, row.player_key)
+                  );
+                  if (score > bestDbScore) {
+                    bestDbScore = score;
+                    bestDbMatch = row.discord_user_id;
+                  }
+                }
+              }
+            } catch (e) { console.error(e); }
+
+            if (bestDbMatch && bestDbScore >= 0.72) {
+              if (!playerIds.includes(bestDbMatch)) playerIds.push(bestDbMatch);
+            } else {
+              guestPlayers.push(name);
+            }
           }
         }
       }
     }
 
-    // --- GENERATE DYNAMIC NAME-BLENDER MATCH ID ---
     let generatedMatchId = `MATCH-${Math.floor(100 + Math.random() * 900)}`;
     try {
       const { data: nameRows } = await supabase
@@ -236,9 +280,7 @@ module.exports = {
           }
         }
       }
-    } catch (idErr) {
-      console.error('Failed to run name-blender calculation loop:', idErr);
-    }
+    } catch (idErr) { console.error(idErr); }
 
     const totalSlotCount = playerIds.length + guestPlayers.length;
     const mentionsList = playerIds.map(id => `• <@${id}>`);
@@ -287,9 +329,7 @@ module.exports = {
       await message.react('❌').catch(() => {});
       await message.react('🔔').catch(() => {});
       await message.react('📢').catch(() => {});
-    } catch (reactErr) {
-      console.error('Failed to apply initial live lobby reactions:', reactErr);
-    }
+    } catch (reactErr) { console.error(reactErr); }
 
     const pingMessage = await interaction.followUp({
       content: customPingSentence,
@@ -304,7 +344,7 @@ module.exports = {
       .from('active_async_matches')
       .insert({
         message_id: messageId,
-        match_id: generatedMatchId, // Persists the new unique Name-Blender Match ID
+        match_id: generatedMatchId,
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
