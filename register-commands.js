@@ -4,9 +4,10 @@ const { REST, Routes } = require('discord.js');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
 const liveCommand = require('./live'); 
+const fixCommand = require('./fix'); // Imported the new fix command module
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads');
-const spCommand = require('./sp'); // Imported the new SP command module
+const spCommand = require('./sp'); 
 
 const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
@@ -30,14 +31,15 @@ const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
           statsCommand.data.toJSON(), 
           asyncCommand.data.toJSON(),
           liveCommand.data.toJSON(), 
+          fixCommand.data.toJSON(), // Added fix command JSON body data here
           tournamentCommand.data.toJSON(),
           massThreadsCommand.data.toJSON(),
-          spCommand.data.toJSON() // Added SP command JSON body data here
+          spCommand.data.toJSON() 
         ] 
       }
     );
 
-    console.log('Successfully registered all commands: /stats, /async, /live, /tournament, /mass-threads, and /sp.');
+    console.log('Successfully registered all commands: /stats, /async, /live, /fix, /tournament, /mass-threads, and /sp.');
   } catch (error) {
     console.error('Failed to register commands:', error);
     process.exit(1);
