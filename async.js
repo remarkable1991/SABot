@@ -3,15 +3,20 @@ const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
-    .setDescription('Look for opponents for an asynchronous game')
+    .setDescription('Look for opponents for an async game')
     .addStringOption(option =>
       option.setName('text')
         .setDescription('Any extra details or notes for this match')
         .setRequired(false)
     )
+    .addIntegerOption(option =>
+      option.setName('hours')
+        .setDescription('How many hours before the lobby expires? (Defaults to 72 hours / 3 days)')
+        .setRequired(false)
+    )
     .addStringOption(option =>
       option.setName('players')
-        .setDescription('Add up to 2 other players: tag them, enter names, or type a number (e.g., "2")')
+        .setDescription('Add up to 2 other players: tag them, enter names, or type a number ("1" or "2")')
         .setRequired(false)
     )
     .addStringOption(option =>
@@ -52,6 +57,7 @@ module.exports = {
 
   async execute(interaction, { supabase }) {
     const notes = interaction.options.getString('text') || 'Looking for an async match!';
+    const customHours = interaction.options.getInteger('hours');
     const playersInput = interaction.options.getString('players');
     const board = interaction.options.getString('board');
     let expansion = interaction.options.getString('expansion');
@@ -133,13 +139,20 @@ module.exports = {
     }
     statusSentence += '.';
 
+    // Async-specific parameters
     const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
-    const timeoutTimestamp = Math.floor((Date.now() + 15 * 60 * 1000) / 1000);
+    
+    // Calculate custom expiration timeframe based on hours
+    const hoursToExpiry = customHours ? Math.max(customHours, 1) : 72; // Default to 72 hours
+    const expirationMs = hoursToExpiry * 60 * 60 * 1000;
+    const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
+    const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
 
-    const targetRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-    const roleMention = targetRole ? `<@&${targetRole.id}>` : '@DuneASYNC';
+    // Specific async target role name checking
+    const asyncRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+    const roleMention = asyncRole ? `<@&${asyncRole.id}>` : '@DuneASYNC';
 
-    let customPingSentence = `**${interaction.user.username}** is looking for players ${roleMention}`;
+    let customPingSentence = `**${interaction.user.username}** is looking for async players ${roleMention}`;
     if (board && board !== 'Base' && expansionText) {
       customPingSentence += ` for ${boardText} with ${expansionText}`;
     } else if (board && board !== 'Base') {
@@ -151,12 +164,11 @@ module.exports = {
     }
     customPingSentence += '.';
 
-    // --- Core Parsing Logic for the "players" option ---
+    // Parse guest players / pre-added tags
     const playerIds = [host.id];
     const guestPlayers = [];
 
     if (playersInput) {
-      // 1. Extract Mentioned Discord IDs (e.g. <@123456789>)
       const mentionRegex = /<@!?(\d+)>/g;
       let match;
       const parsedMentions = [];
@@ -165,23 +177,22 @@ module.exports = {
       }
 
       if (parsedMentions.length > 0) {
-        // Limit to 2 additional tagged players maximum
         const toAdd = parsedMentions.slice(0, 2);
         for (const id of toAdd) {
           if (!playerIds.includes(id)) playerIds.push(id);
         }
       } else {
         const cleanInput = playersInput.trim();
-        const numberVal = parseInt(cleanInput, 10);
-
-        // 2. Parse Single Number Input (e.g. "2")
-        if (!isNaN(numberVal) && /^\d+$/.test(cleanInput)) {
-          const count = Math.min(Math.max(numberVal, 1), 2); // Limit addition between 1 and 2 guests
-          for (let i = 0; i < count; i++) {
-            guestPlayers.push(`Friend of ${host.username}`);
+        
+        // Integer Check: STRICTLY only process if it's 1 or 2. Ignore higher/other bounds entirely.
+        if (/^\d+$/.test(cleanInput)) {
+          const numberVal = parseInt(cleanInput, 10);
+          if (numberVal === 1 || numberVal === 2) {
+            for (let i = 0; i < numberVal; i++) {
+              guestPlayers.push(`Friend of ${host.username}`);
+            }
           }
         } else {
-          // 3. Fallback to Raw Names (e.g. "Paul" or "Paul, Leto")
           const rawNames = cleanInput.split(',').map(n => n.trim()).filter(Boolean);
           const toAddNames = rawNames.slice(0, 2);
           for (const name of toAddNames) {
@@ -191,18 +202,56 @@ module.exports = {
       }
     }
 
-    // Prepare total lobby spots occupied
-    const totalSlotCount = playerIds.length + guestPlayers.length;
+    // --- GENERATE DYNAMIC NAME-BLENDER MATCH ID ---
+    let generatedMatchId = `MATCH-${Math.floor(100 + Math.random() * 900)}`;
+    try {
+      const { data: nameRows } = await supabase
+        .from('player_discord_map')
+        .select('display_name')
+        .not('display_name', 'is', null)
+        .limit(40);
 
-    // Render roster for the embed
+      if (nameRows && nameRows.length >= 2) {
+        const cleanNames = nameRows
+          .map(r => r.display_name.trim().replace(/[^a-zA-Z]/g, ''))
+          .filter(n => n.length >= 4);
+
+        if (cleanNames.length >= 2) {
+          // Shuffle the names array sample pool
+          const shuffled = cleanNames.sort(() => 0.5 - Math.random());
+          const pickCount = Math.random() > 0.5 ? 3 : 2;
+          const selectedChunks = shuffled.slice(0, Math.min(pickCount, shuffled.length));
+          
+          let combinedWord = '';
+          selectedChunks.forEach((name) => {
+            const halfLength = Math.ceil(name.length / 2);
+            if (Math.random() > 0.5) {
+              combinedWord += name.slice(0, halfLength);
+            } else {
+              combinedWord += name.slice(-halfLength);
+            }
+          });
+
+          // Capitalize clean segments
+          if (combinedWord.length > 3) {
+            combinedWord = combinedWord.charAt(0).toUpperCase() + combinedWord.slice(1).toLowerCase();
+            generatedMatchId = `${combinedWord}-${Math.floor(100 + Math.random() * 900)}`;
+          }
+        }
+      }
+    } catch (idErr) {
+      console.error('Failed to run name-blender calculation loop:', idErr);
+    }
+
+    const totalSlotCount = playerIds.length + guestPlayers.length;
     const mentionsList = playerIds.map(id => `• <@${id}>`);
     const guestsList = guestPlayers.map(name => `• ${name} 👥`);
     const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
     const embed = new EmbedBuilder()
-      .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
+      .setTitle(`${asyncDuneEmoji} New Async Match Open! [ID: ${generatedMatchId}]`)
       .setDescription(`"${notes}"`)
-      .setColor(0x3498db)
+      .setColor(0xC9A24B)
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
@@ -219,7 +268,7 @@ module.exports = {
           inline: false 
         }
       )
-      .setFooter({ text: 'Lobbies time out automatically if unstarted after 15 hours.' })
+      .setFooter({ text: `Lobbies time out automatically if unstarted after ${hoursToExpiry} hours.` })
       .setTimestamp();
 
     const response = await interaction.reply({
@@ -242,12 +291,12 @@ module.exports = {
       await message.react('🔔').catch(() => {});
       await message.react('📢').catch(() => {});
     } catch (reactErr) {
-      console.error('Failed to apply initial lobby emoji reactions:', reactErr);
+      console.error('Failed to apply initial async lobby reactions:', reactErr);
     }
 
     const pingMessage = await interaction.followUp({
       content: customPingSentence,
-      allowedMentions: { roles: [targetRole?.id].filter(Boolean) }
+      allowedMentions: { roles: [asyncRole?.id].filter(Boolean) }
     });
 
     setTimeout(() => {
@@ -258,17 +307,19 @@ module.exports = {
       .from('active_async_matches')
       .insert({
         message_id: messageId,
+        match_id: generatedMatchId, // Persists the new unique Name-Blender Match ID
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
         player_ids: playerIds,
         notify_user_ids: [],
-        guest_players: guestPlayers, // Save guest names array directly to Supabase
+        guest_players: guestPlayers,
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
         board_type: boardDisplay,
         expansions: expansionsStored,
-        status: 'searching'
+        status: 'searching',
+        expires_at: expiresAtISO
       });
   }
 };
