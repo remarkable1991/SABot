@@ -1024,8 +1024,8 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       }
 
       await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-lobby.last_prompted_at = now.toISOString();
-      // --- BULLETPROOF FIX: Check literal text from generated embed titles ---
+      lobby.last_prompted_at = now.toISOString();
+
       const embedTitle = message.embeds[0]?.title || '';
       const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
 
@@ -1036,19 +1036,67 @@ lobby.last_prompted_at = now.toISOString();
         roleMention = `<@&1219666516644204554>`; // Safe Hardcoded Async role ID
       }
 
-      const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
-      const nextAvailableTime = Math.floor((now.getTime() + TAG_COOLDOWN_MS) / 1000);
+      // Rebuild raw details directly from field values
+      const detailsBlock = message.embeds[0]?.fields[0]?.value || '';
+      const modeInformation = detailsBlock.split('\n')[0].replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '').replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '');
 
       const totalCount = players.length + guestPlayers.length;
-      const labelMatchId = lobby.match_id ? `[ID: ${lobby.match_id}] ` : '';
-      const tagMessage = `🎲 Match ${labelMatchId}looking for players (${totalCount}/4) ${roleMention} ${joinEmojiString}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
+      const hostMentionString = `<@${lobby.host_id}>`;
+      const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
+      const accurateEndEmoji = representsLive ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
+      const labelMatchId = lobby.match_id ? `[ID: ${lobby.match_id}]` : '';
 
-      // Explicitly separate allow limits mapping to avoid crossing networks
+      // Clean Ping Format Formulation
+      const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji} ${labelMatchId}`;
+      
       const allowedMentionsOptions = representsLive 
         ? { roles: ['1219666679764877424'] } 
         : { roles: ['1219666516644204554'] };
 
-      await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
+      // Dynamic check of message history layout bounds
+      let historyCountMet = false;
+      try {
+        const fetchedHistory = await message.channel.messages.fetch({ after: message.id, limit: 12 }).catch(() => null);
+        if (fetchedHistory && fetchedHistory.size >= 5) {
+          historyCountMet = true;
+        }
+      } catch (err) { console.error('Failed to run dynamic history check loops:', err); }
+
+      if (historyCountMet) {
+        // Post the new active card wrapper down low
+        const activeEmbed = EmbedBuilder.from(message.embeds[0]);
+        const newLobbyMsg = await message.channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
+
+        // Seed original reactive items back onto the fresh platform instance
+        try {
+          const joinEmojiObj = message.guild.emojis.cache.find(e => e.name === (representsLive ? 'LiveDune' : 'AsyncDune'));
+          if (joinEmojiObj) {
+            await newLobbyMsg.react(joinEmojiObj).catch(() => {});
+          } else {
+            await newLobbyMsg.react(representsLive ? '⚔️' : '🎲').catch(() => {});
+          }
+          await newLobbyMsg.react('🎮').catch(() => {});
+          await newLobbyMsg.react('❌').catch(() => {});
+          await newLobbyMsg.react('🔔').catch(() => {});
+          await newLobbyMsg.react('📢').catch(() => {});
+        } catch (rErr) { console.error(rErr); }
+
+        // Update database pointers safely to point directly to the new snowflake destination
+        await supabase.from('active_async_matches').update({ message_id: newLobbyMsg.id }).eq('id', lobby.id);
+
+        // Strip bot-only footprints from old anchor block
+        message.reactions.cache.forEach(async (r) => {
+          await r.users.remove(discordClient.user.id).catch(() => {});
+        });
+
+        // Edit the old anchor block into a clear text link direction pointer wrapper
+        const moveRefLink = `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${newLobbyMsg.id}`;
+        await message.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
+      } else {
+        // Fallback to sending standard announcement text inline if threshold is not met
+        await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
+      }
+
       await reaction.users.remove(user.id).catch(() => {});
       return;
     }
