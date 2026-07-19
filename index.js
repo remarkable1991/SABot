@@ -1010,7 +1010,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     if (emoji === '📢') {
       const now = new Date();
-      const lastTagged = lobby.last_tagged_at ? new Date(lobby.last_tagged_at) : null;
+      const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
 
       if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
         const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
@@ -1023,8 +1023,8 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         return;
       }
 
-      await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
-
+      await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+lobby.last_prompted_at = now.toISOString();
       // --- BULLETPROOF FIX: Check literal text from generated embed titles ---
       const embedTitle = message.embeds[0]?.title || '';
       const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
