@@ -748,6 +748,134 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   }
 }
 
+// Separate procedural routine to execute a standardized lobby boot/start payload sequence
+async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
+  let channel = targetChannel;
+  if (!channel) {
+    channel = await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
+  }
+  if (!channel) return;
+
+  const targetMsg = await channel.messages.fetch(lobbyRecord.message_id).catch(() => null);
+  if (!targetMsg || !targetMsg.embeds[0]) return;
+
+  const embedTitle = targetMsg.embeds[0].title || '';
+  const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
+
+  await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
+
+  let players = [...(lobbyRecord.player_ids || [])];
+  let notifications = [...(lobbyRecord.notify_user_ids || [])];
+  const guestPlayers = [...(lobbyRecord.guest_players || [])];
+  const totalCount = players.length + guestPlayers.length;
+
+  const embed = EmbedBuilder.from(targetMsg.embeds[0]);
+  const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+  const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+  const finalRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+
+  const originalDetailsSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0];
+  const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
+  const matchTypeTitle = representsLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+
+  embed.setTitle(matchTypeTitle)
+       .setColor(0x2ecc71)
+       .setFooter(null) 
+       .setFields(
+         { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
+         { name: '🔑 Password', value: lobbyRecord.lobby_password ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
+         { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
+       );
+
+  const labelMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
+  await targetMsg.edit({ content: `🚀 **The match${labelMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+
+  const now = new Date();
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+  const currentUtcDay = now.getUTCDay(); 
+  const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
+  const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
+
+  const unlinkedPlayers = [];
+
+  for (const playerId of players) {
+    const profile = await getPlayerProfileFromDiscord(playerId);
+    if (!profile) {
+      let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; 
+      if (representsLive) {
+        potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; 
+      } else {
+        potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; 
+      }
+      unlinkedPlayers.push({ id: playerId, points: potentialSp });
+      continue;
+    }
+
+    const { data: hourlyMatchEvents } = await supabase
+      .from('sp_events')
+      .select('id')
+      .eq('player_key', profile.playerKey)
+      .eq('action_type', 'match_start_base')
+      .gte('created_at', oneHourAgo);
+
+    if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
+      await awardSP(
+        profile.playerKey,
+        profile.userId,
+        'match_start_base',
+        SP_REWARDS_CONFIG.MATCH_START_BASE.amount,
+        { discord_user_id: playerId, match_id: lobbyRecord.id }
+      );
+    }
+
+    if (representsLive) {
+      const { data: dailyLiveEvents } = await supabase
+        .from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'first_live_game')
+        .gte('created_at', startOfToday);
+
+      if (!dailyLiveEvents || dailyLiveEvents.length === 0) {
+        await awardSP(
+          profile.playerKey,
+          profile.userId,
+          'first_live_game',
+          SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount,
+          { discord_user_id: playerId, match_id: lobbyRecord.id }
+        );
+      }
+    } else {
+      const { data: weeklyAsyncEvents } = await supabase
+        .from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'first_weekly_async')
+        .gte('created_at', startOfThisWeek);
+
+      if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) {
+        await awardSP(
+          profile.playerKey,
+          profile.userId,
+          'first_weekly_async',
+          SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount,
+          { discord_user_id: playerId, match_id: lobbyRecord.id }
+        );
+      }
+    }
+  }
+
+  if (unlinkedPlayers.length > 0) {
+    const warningLines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`);
+    const warningEmbed = new EmbedBuilder()
+      .setTitle('⚠️ Missed Strategy Points!')
+      .setDescription(`${warningLines.join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`)
+      .setColor(0xe74c3c); 
+    await channel.send({ embeds: [warningEmbed] }).catch(() => {});
+  }
+}
+
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
@@ -838,7 +966,9 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
-    const isLiveLobby = lobby.expires_at !== null || (message.embeds[0] && message.embeds[0].title && message.embeds[0].title.includes('Live'));
+    // --- EMBED-BASED IDENTITY RESOLUTION FIX ---
+    const embedTitle = message.embeds[0]?.title || '';
+    const isLiveLobby = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
     const joinEmojiString = getAsyncDuneEmoji(message.guild, isLiveLobby);
 
     const emoji = reaction.emoji.name || reaction.emoji;
@@ -869,130 +999,13 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     if (emoji === '🎮') {
       const totalCount = players.length + guestPlayers.length;
       if (players.includes(user.id) && totalCount >= 2) {
-        await supabase.from('active_async_matches').update({ status: 'started' }).eq('id', lobby.id);
-        const embed = EmbedBuilder.from(message.embeds[0]);
-
-        const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
-        const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-        const finalRosterDisplay = [...mentionsList, ...guestsList].join('\n');
-
-        const originalDetailsSentence = String(message.embeds[0].fields[0].value).split('\n')[0];
-        const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
-
-        const matchTypeTitle = isLiveLobby ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
-
-        embed.setTitle(matchTypeTitle)
-             .setColor(0x2ecc71)
-             .setFooter(null) 
-             .setFields(
-               { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
-               { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-               { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
-             );
-
-        const labelMatchId = lobby.match_id ? ` [ID: ${lobby.match_id}]` : '';
-        await message.edit({ content: `🚀 **The match${labelMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
-
-        const now = new Date();
-        const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-        const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-
-        const currentUtcDay = now.getUTCDay(); 
-        const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
-        const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
-
-        const unlinkedPlayers = [];
-
-        for (const playerId of players) {
-          const profile = await getPlayerProfileFromDiscord(playerId);
-          
-          if (!profile) {
-            let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; 
-            if (isLiveLobby) {
-              potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; 
-            } else {
-              potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; 
-            }
-            
-            unlinkedPlayers.push({ id: playerId, points: potentialSp });
-            continue;
-          }
-
-          const { data: hourlyMatchEvents } = await supabase
-            .from('sp_events')
-            .select('id')
-            .eq('player_key', profile.playerKey)
-            .eq('action_type', 'match_start_base')
-            .gte('created_at', oneHourAgo);
-
-          if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
-            await awardSP(
-              profile.playerKey,
-              profile.userId,
-              'match_start_base',
-              SP_REWARDS_CONFIG.MATCH_START_BASE.amount,
-              { discord_user_id: playerId, match_id: lobby.id }
-            );
-          }
-
-          if (isLiveLobby) {
-            const { data: dailyLiveEvents } = await supabase
-              .from('sp_events')
-              .select('id')
-              .eq('player_key', profile.playerKey)
-              .eq('action_type', 'first_live_game')
-              .gte('created_at', startOfToday);
-
-            if (!dailyLiveEvents || dailyLiveEvents.length === 0) {
-              await awardSP(
-                profile.playerKey,
-                profile.userId,
-                'first_live_game',
-                SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount,
-                { discord_user_id: playerId, match_id: lobby.id }
-              );
-            }
-          }
-
-          if (!isLiveLobby) {
-            const { data: weeklyAsyncEvents } = await supabase
-              .from('sp_events')
-              .select('id')
-              .eq('player_key', profile.playerKey)
-              .eq('action_type', 'first_weekly_async')
-              .gte('created_at', startOfThisWeek);
-
-            if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) {
-              await awardSP(
-                profile.playerKey,
-                profile.userId,
-                'first_weekly_async',
-                SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount,
-                { discord_user_id: playerId, match_id: lobby.id }
-              );
-            }
-          }
-        }
-
-        if (unlinkedPlayers.length > 0) {
-          const warningLines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`);
-          
-          const warningEmbed = new EmbedBuilder()
-            .setTitle('⚠️ Missed Strategy Points!')
-            .setDescription(
-              `${warningLines.join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`
-            )
-            .setColor(0xe74c3c); 
-
-          await message.channel.send({ embeds: [warningEmbed] }).catch(() => {});
-        }
-
+        await executeLobbyStartSequence(lobby, message.channel);
         return;
       }
     }
 
     if (emoji === '❌' && user.id === lobby.host_id) {
-      await supabase.from('active_async_matches').update({ status: 'cancelled' }).eq('id', lobby.id);
+      await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
       const embed = EmbedBuilder.from(message.embeds[0]);
       embed.setTitle('❌ Lobby Cancelled')
            .setColor(0xff0000)
@@ -1026,54 +1039,39 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
       lobby.last_prompted_at = now.toISOString();
 
-      const embedTitle = message.embeds[0]?.title || '';
-      const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
+      let roleMention = isLiveLobby ? `<@&1219666679764877424>` : `<@&1219666516644204554>`;
 
-      let roleMention;
-      if (representsLive) {
-        roleMention = `<@&1219666679764877424>`; // Live target role ID
-      } else {
-        roleMention = `<@&1219666516644204554>`; // Safe Hardcoded Async role ID
-      }
-
-      // Rebuild raw details directly from field values
       const detailsBlock = message.embeds[0]?.fields[0]?.value || '';
       const modeInformation = detailsBlock.split('\n')[0].replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '').replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '');
 
       const totalCount = players.length + guestPlayers.length;
       const hostMentionString = `<@${lobby.host_id}>`;
       const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
-      const accurateEndEmoji = representsLive ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
+      const accurateEndEmoji = isLiveLobby ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
       const labelMatchId = lobby.match_id ? `[ID: ${lobby.match_id}]` : '';
 
-      // Clean Ping Format Formulation
       const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji} ${labelMatchId}`;
       
-      const allowedMentionsOptions = representsLive 
-        ? { roles: ['1219666679764877424'] } 
-        : { roles: ['1219666516644204554'] };
+      const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: ['1219666516644204554'] };
 
-      // Dynamic check of message history layout bounds
       let historyCountMet = false;
       try {
         const fetchedHistory = await message.channel.messages.fetch({ after: message.id, limit: 12 }).catch(() => null);
         if (fetchedHistory && fetchedHistory.size >= 5) {
           historyCountMet = true;
         }
-      } catch (err) { console.error('Failed to run dynamic history check loops:', err); }
+      } catch (err) { console.error(err); }
 
       if (historyCountMet) {
-        // Post the new active card wrapper down low
         const activeEmbed = EmbedBuilder.from(message.embeds[0]);
         const newLobbyMsg = await message.channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
 
-        // Seed original reactive items back onto the fresh platform instance
         try {
-          const joinEmojiObj = message.guild.emojis.cache.find(e => e.name === (representsLive ? 'LiveDune' : 'AsyncDune'));
+          const joinEmojiObj = message.guild.emojis.cache.find(e => e.name === (isLiveLobby ? 'LiveDune' : 'AsyncDune'));
           if (joinEmojiObj) {
             await newLobbyMsg.react(joinEmojiObj).catch(() => {});
           } else {
-            await newLobbyMsg.react(representsLive ? '⚔️' : '🎲').catch(() => {});
+            await newLobbyMsg.react(isLiveLobby ? '⚔️' : '🎲').catch(() => {});
           }
           await newLobbyMsg.react('🎮').catch(() => {});
           await newLobbyMsg.react('❌').catch(() => {});
@@ -1081,19 +1079,15 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
           await newLobbyMsg.react('📢').catch(() => {});
         } catch (rErr) { console.error(rErr); }
 
-        // Update database pointers safely to point directly to the new snowflake destination
         await supabase.from('active_async_matches').update({ message_id: newLobbyMsg.id }).eq('id', lobby.id);
 
-        // Strip bot-only footprints from old anchor block
         message.reactions.cache.forEach(async (r) => {
           await r.users.remove(discordClient.user.id).catch(() => {});
         });
 
-        // Edit the old anchor block into a clear text link direction pointer wrapper
         const moveRefLink = `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${newLobbyMsg.id}`;
         await message.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
       } else {
-        // Fallback to sending standard announcement text inline if threshold is not met
         await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
       }
 
@@ -1102,19 +1096,30 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     }
 
     if (shouldUpdate) {
-      await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+      const finalTotal = players.length + guestPlayers.length;
+      let updatePayload = { player_ids: players, notify_user_ids: notifications };
+      
+      // --- AUTOMATED 15-MINUTE AUTOMATIC COUNTDOWN INITIALIZATION TRIGGER ---
+      if (finalTotal === 4 && !lobby.auto_start_at) {
+        const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
+        updatePayload.auto_start_at = startTargetDate.toISOString();
+        
+        const timestampSeconds = Math.floor(startTargetDate.getTime() / 1000);
+        const countdownAlert = `⏳ **Lobby full!** Match ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} will automatically begin <t:${timestampSeconds}:R>. Setup your in-game rooms now!`;
+        await message.channel.send({ content: countdownAlert }).catch(() => {});
+      }
+
+      await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
 
       const embed = EmbedBuilder.from(message.embeds[0]);
-
       const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
       const guestsList = guestPlayers.map(name => `• ${name} 👥`);
       const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
-      const totalCount = players.length + guestPlayers.length;
 
       embed.setFields(
         { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay, inline: false },
+        { name: `👥 Players (${finalTotal}/4)`, value: fullRosterDisplay, inline: false },
         { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
       );
 
@@ -1168,19 +1173,26 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     }
 
     if (shouldUpdate) {
-      await supabase.from('active_async_matches').update({ player_ids: players, notify_user_ids: notifications }).eq('id', lobby.id);
+      const finalTotal = players.length + guestPlayers.length;
+      let updatePayload = { player_ids: players, notify_user_ids: notifications };
+      
+      // --- COUNTDOWN RESET INTERCEPTION ROUTINE ---
+      if (finalTotal < 4 && lobby.auto_start_at) {
+        updatePayload.auto_start_at = null;
+        await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} aborted.` }).catch(() => {});
+      }
+
+      await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
 
       const embed = EmbedBuilder.from(message.embeds[0]);
-
       const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
       const guestsList = guestPlayers.map(name => `• ${name} 👥`);
       const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
-      const totalCount = players.length + guestPlayers.length;
 
       embed.setFields(
         { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay, inline: false },
+        { name: `👥 Players (${finalTotal}/4)`, value: fullRosterDisplay, inline: false },
         { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
       );
 
@@ -1200,6 +1212,27 @@ discordClient.once('clientReady', async () => {
   setInterval(async () => {
     await executeGlobalSpAuditSweep();
   }, 24 * 60 * 60 * 1000);
+
+  // --- PERSISTENT CRON POLLING LOOP SWEEP FOR AUTO-START TIMESTAMPS ---
+  setInterval(async () => {
+    try {
+      const nowISO = new Date().toISOString();
+      const { data: expiredLobbies } = await supabase
+        .from('active_async_matches')
+        .select('*')
+        .eq('status', 'searching')
+        .lte('auto_start_at', nowISO);
+
+      if (expiredLobbies && expiredLobbies.length > 0) {
+        for (const targetLobby of expiredLobbies) {
+          console.log(`⏱️ Auto-Start triggered for lobby: ${targetLobby.match_id}`);
+          await executeLobbyStartSequence(targetLobby).catch(err => console.error(err));
+        }
+      }
+    } catch (cronErr) {
+      console.error('Error running automated countdown polling sweeps:', cronErr);
+    }
+  }, 30 * 60 * 1000); // 30 seconds interval check loop
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
