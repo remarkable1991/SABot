@@ -158,7 +158,7 @@ module.exports = {
 
     const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
     
-    const hoursToExpiry = customHours ? Math.max(customHours, 1) : 72;
+    const hoursToExpiry = customHours ? Math.max(customHours, 1) : 12;
     const expirationMs = hoursToExpiry * 60 * 60 * 1000;
     const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
