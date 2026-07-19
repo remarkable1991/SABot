@@ -1031,7 +1031,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         roleMention = `<@&1219666679764877424>`; 
       } else {
         targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-        roleMention = targetRole ? `<&${targetRole.id}>` : '@DuneASYNC';
+        roleMention = targetRole ? `<&@${targetRole.id}>` : '@DuneASYNC';
       }
 
       const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
