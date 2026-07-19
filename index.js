@@ -1025,13 +1025,15 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
       await supabase.from('active_async_matches').update({ last_tagged_at: now.toISOString() }).eq('id', lobby.id);
 
-      let targetRole;
+      // --- BULLETPROOF FIX: Check literal text from generated embed titles ---
+      const embedTitle = message.embeds[0]?.title || '';
+      const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
+
       let roleMention;
-      if (isLiveLobby) {
-        roleMention = `<@&1219666679764877424>`; 
+      if (representsLive) {
+        roleMention = `<@&1219666679764877424>`; // Live target role ID
       } else {
-        targetRole = message.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-        roleMention = targetRole ? `<&@${targetRole.id}>` : '@DuneASYNC';
+        roleMention = `<@&1219666516644204554>`; // Safe Hardcoded Async role ID
       }
 
       const cleanDetailsLine = String(message.embeds[0].fields[0].value).split('\n')[0];
@@ -1041,7 +1043,10 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const labelMatchId = lobby.match_id ? `[ID: ${lobby.match_id}] ` : '';
       const tagMessage = `🎲 Match ${labelMatchId}looking for players (${totalCount}/4) ${roleMention} ${joinEmojiString}!\nDetails: ${cleanDetailsLine}\nNext ping available in: <t:${nextAvailableTime}:R>`;
 
-      const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: [targetRole?.id].filter(Boolean) };
+      // Explicitly separate allow limits mapping to avoid crossing networks
+      const allowedMentionsOptions = representsLive 
+        ? { roles: ['1219666679764877424'] } 
+        : { roles: ['1219666516644204554'] };
 
       await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
       await reaction.users.remove(user.id).catch(() => {});
