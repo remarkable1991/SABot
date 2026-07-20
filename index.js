@@ -32,7 +32,7 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 300;
-const GAME_ROWS_WAIT_MS = 2000;
+const GAME_ROWS_WAIT_MS = 5000; // Updated: Extended to 5 seconds to prevent race conditions
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
 const MEMBER_SEARCH_LIMIT = 10;
@@ -73,6 +73,10 @@ if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
+  auth: {
+    autoRefreshToken: true,
+    persistSession: false
+  },
   realtime: { transport: WebSocket, params: { eventsPerSecond: 10 } },
   global: { WebSocket }
 });
@@ -143,6 +147,7 @@ function formatDelta(value) {
   return (num > 0 ? '+' : '') + num.toFixed(2);
 }
 
+// Function checking visual channels matching specific name parameters inside standard mapping
 function getEmoji(guild, name, fallback) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
@@ -247,11 +252,35 @@ async function resolveMentionForName(guild, playerName) {
 
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
-  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
-  if (error || !data || !data.signedUrl) { console.error('Failed to create signed URL for image', storagePath, error); return null; }
+  
+  // Implemented an inline asset settling retry-loop to handle image write synchronization gaps cleanly
+  let attempts = 3;
+  let response = null;
+  let data = null;
+  
+  while (attempts > 0) {
+    try {
+      const signedUrlResult = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
+      if (!signedUrlResult.error && signedUrlResult.data?.signedUrl) {
+        data = signedUrlResult.data;
+        response = await fetch(data.signedUrl);
+        if (response.ok) break;
+      }
+    } catch (fetchErr) {
+      console.error(`Storage asset fetch attempt failed (${attempts} remaining):`, fetchErr);
+    }
+    attempts -= 1;
+    if (attempts > 0) {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+    }
+  }
+
+  if (!response || !response.ok || !data) { 
+    console.error('Failed to retrieve verified asset buffer payload for path:', storagePath); 
+    return null; 
+  }
+
   try {
-    const response = await fetch(data.signedUrl);
-    if (!response.ok) { console.error('Failed to fetch signed image URL', response.status, response.statusText); return null; }
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     const maxBytes = Math.floor(7.5 * 1024 * 1024);
     if (!contentType.startsWith('image/')) { return { attachment: null, imageUrl: data.signedUrl, tooLarge: false }; }
@@ -403,8 +432,18 @@ function startRealtimeListener() {
     console.log('Supabase realtime subscription status:', status);
     if (status === 'SUBSCRIBED') { realtimeRetryCount = 0; return; }
     if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
-      if (err) { console.error('Realtime error:', err); }
-      if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { console.error('Realtime failed after max retries'); return; }
+      if (err) { console.error('Realtime error caught:', err); }
+      
+      // Option 1 Implementation: Inject the permanent administration secret token parameters right into the channel structure
+      // right before the retry attempts land to prevent internal JWT 24-hour expiration failures.
+      supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
+      
+      if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
+        console.error('Realtime failed after max retries. Executing total listener reset...'); 
+        realtimeRetryCount = 0;
+        setTimeout(startRealtimeListener, REALTIME_RETRY_DELAY_MS);
+        return; 
+      }
       realtimeRetryCount += 1; const delay = REALTIME_RETRY_DELAY_MS * realtimeRetryCount;
       setTimeout(startRealtimeListener, delay);
     }
@@ -473,7 +512,7 @@ function startGlobalDatabaseListener() {
                 rewardClarity = 'Standard Reward';
               }
 
-              const alertEmbed = new EmbedBuilder()
+            const alertEmbed = new EmbedBuilder()
                 .setTitle('🪙 Strategy Points Earned!')
                 .setDescription(`Congratulations <@${targetDiscordId}>!\nYou've earned a **${rewardClarity}**!`)
                 .setColor(0xf1c40f)
@@ -491,7 +530,11 @@ function startGlobalDatabaseListener() {
         }
       }
     )
-    .subscribe();
+    .subscribe((status, err) => {
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
+      }
+    });
 }
 
 async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
@@ -1232,7 +1275,7 @@ discordClient.once('clientReady', async () => {
     } catch (cronErr) {
       console.error('Error running automated countdown polling sweeps:', cronErr);
     }
-  }, 30 * 60 * 1000); // 30 seconds interval check loop
+  }, 30 * 1000); // 30 seconds interval check loop
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
