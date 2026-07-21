@@ -45,6 +45,35 @@ const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 const TOURNAMENT_ROLE_ID = '1525805277662679121';
 const TARGET_TOURNAMENT_NUM = 14;
 
+// --- LEADER EMOJI MAP CONFIGURATION ---
+// --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
+const LEADER_EMOJI_MAP = {
+  '"Princess" Yuna Moritani': 'princessyunamoritani',
+  'Archduke Armand Ecaz': 'archdukearmandecaz',
+  'Baron Vladimir Harkonnen': 'baronvladimirharkonnen',
+  'Count Ilban Richese': 'countilbanrichese',
+  'Countess Ariana Thorvald': 'countessarianathorvald',
+  'Duke Leto Atreides': 'dukeletoatreides',
+  'Earl Memnon Thorvald': 'earlmemnonthorvald',
+  'Feyd-Rautha Harkonnen': 'feyd',
+  'Glossu "Beast" Rabban': 'glossubeastrabban',
+  'Gurney Halleck': 'gurneyhalleck',
+  'Helena Richese': 'helenarichese',
+  'Ilesa Ecaz': 'ilesaecaz',
+  'Lady Amber Metulli': 'ladyambermetulli',
+  'Lady Jessica': 'ladyjessica',
+  'Lady Margot Fenring': 'ladymargotfenring',
+  "Muad'Dib": 'muaddib',
+  "Muad''Dib": 'muaddib',
+  'Paul Atreides': 'paulatreides',
+  'Prince Rhombur Vernius': 'princerhomburvernius',
+  'Princess Irulan': 'princessirulan',
+  'Shaddam Corrino IV': 'shaddamcorrinoiv',
+  'Staban Tuek': 'stabantuek',
+  'Tessia Vernius': 'tessiavernius',
+  'Viscount Hundro Moritani': 'viscounthundromoritani'
+};
+
 // Automated SP Progression Tier Structure Array Configuration
 const SP_ROLES_CONFIG = [
   { name: 'Kwisatz Haderach', min: 10000, id: '152621467311616082' },
@@ -152,6 +181,13 @@ function getEmoji(guild, name, fallback) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
   return emoji ? emoji.toString() : fallback;
+}
+
+function getLeaderEmoji(guild, leaderName) {
+  if (!leaderName) return '';
+  const emojiKey = LEADER_EMOJI_MAP[leaderName];
+  if (!emojiKey) return '';
+  return getEmoji(guild, emojiKey, '');
 }
 
 function getPlacementEmoji(guild, placement) {
@@ -392,7 +428,12 @@ async function buildEmbed(payload, guild) {
     const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined; const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
     const mention = await resolveMentionForName(guild, row.player_name);
     const playerPart = mention ? '**' + row.player_name + '** ' + mention : '**' + row.player_name + '**';
-    let text = place + ' ' + playerPart + ' - ' + (row.leader_name || 'Unknown Leader') + ' - ' + (row.points ?? '?') + ' pts';
+    
+    // Automatically retrieve and append the leader custom emoji if available
+    const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
+    const leaderDisplay = leaderEmoji ? `${leaderEmoji} ${row.leader_name}` : (row.leader_name || 'Unknown Leader');
+
+    let text = place + ' ' + playerPart + ' - ' + leaderDisplay + ' - ' + (row.points ?? '?') + ' pts';
     text += '\nOverall: ' + formatDelta(row.elo_delta_overall);
     if (currentOverall !== undefined) { text += ' (-> ' + Number(currentOverall).toFixed(1) + ')'; }
     text += ' | ' + modeLabel + ': ' + formatDelta(row.elo_delta);
@@ -434,8 +475,7 @@ function startRealtimeListener() {
     if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
       if (err) { console.error('Realtime error caught:', err); }
       
-      // Option 1 Implementation: Inject the permanent administration secret token parameters right into the channel structure
-      // right before the retry attempts land to prevent internal JWT 24-hour expiration failures.
+      // Inject the permanent administration secret token parameters right into the channel structure
       supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
       
       if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
