@@ -45,7 +45,6 @@ const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 const TOURNAMENT_ROLE_ID = '1525805277662679121';
 const TARGET_TOURNAMENT_NUM = 14;
 
-// --- LEADER EMOJI MAP CONFIGURATION ---
 // --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
 const LEADER_EMOJI_MAP = {
   '"Princess" Yuna Moritani': 'princessyunamoritani',
@@ -140,6 +139,7 @@ const slashCommands = new Map([
 const pendingGames = new Set();
 let realtimeRetryCount = 0;
 let realtimeChannel = null;
+let reconnectTimer = null;
 
 function capitalize(word) {
   if (!word) return '';
@@ -453,7 +453,18 @@ async function announceGame(gameId) {
   if (built.screenshotMedia?.attachment) { messagePayload.files = [built.screenshotMedia.attachment]; }
   else if (built.screenshotMedia?.tooLarge) { messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; }
   await channel.send(messagePayload);
-  console.log('Announced game', gameId);
+
+  // Mark as announced in the database after successfully sending the Discord embed
+  const { error: updateErr } = await supabase
+    .from('games')
+    .update({ announced_to_discord: true })
+    .eq('id', gameId);
+
+  if (updateErr) {
+    console.error(`Failed to update announced_to_discord flag for game ${gameId}:`, updateErr);
+  } else {
+    console.log('Announced game and updated database flag:', gameId);
+  }
 }
 
 function scheduleAnnouncement(gameId) {
@@ -466,26 +477,70 @@ function scheduleAnnouncement(gameId) {
 }
 
 function startRealtimeListener() {
-  if (realtimeChannel) { supabase.removeChannel(realtimeChannel); }
+  // Clear any existing pending reconnect timers to prevent duplicate execution loops
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  // Completely destroy and clean up the old channel if it exists
+  if (realtimeChannel) {
+    console.log('Cleaning up stale Realtime channel...');
+    supabase.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+
   realtimeChannel = supabase.channel('game_results_inserts').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
     const gameId = payload && payload.new ? payload.new.game_id : null; if (gameId) scheduleAnnouncement(gameId);
-  }).subscribe((status, err) => {
+  }).subscribe(async (status, err) => {
     console.log('Supabase realtime subscription status:', status);
-    if (status === 'SUBSCRIBED') { realtimeRetryCount = 0; return; }
+    
+    if (status === 'SUBSCRIBED') { 
+      realtimeRetryCount = 0; 
+
+      // Database Catch-Up Scan: Fetch ALL unannounced games regardless of offline duration
+      try {
+        const { data: unannouncedGames } = await supabase
+          .from('games')
+          .select('id')
+          .eq('announced_to_discord', false)
+          .order('created_at', { ascending: true });
+
+        if (unannouncedGames && unannouncedGames.length > 0) {
+          console.log(`Found ${unannouncedGames.length} unannounced games in DB. Processing queue...`);
+          for (const g of unannouncedGames) {
+            scheduleAnnouncement(g.id);
+          }
+        }
+      } catch (catchUpErr) {
+        console.error('Error running reconnect catch-up scan:', catchUpErr);
+      }
+
+      return; 
+    }
+
     if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
       if (err) { console.error('Realtime error caught:', err); }
       
-      // Inject the permanent administration secret token parameters right into the channel structure
+      // Inject token update into realtime parameters
       supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
       
       if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
-        console.error('Realtime failed after max retries. Executing total listener reset...'); 
+        console.error('Realtime failed after max retries. Resetting count for fresh attempt...'); 
         realtimeRetryCount = 0;
-        setTimeout(startRealtimeListener, REALTIME_RETRY_DELAY_MS);
-        return; 
       }
-      realtimeRetryCount += 1; const delay = REALTIME_RETRY_DELAY_MS * realtimeRetryCount;
-      setTimeout(startRealtimeListener, delay);
+      
+      realtimeRetryCount += 1; 
+      const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000); // Cap max delay at 30s
+      console.log(`Scheduling reconnection in ${delay / 1000}s (Attempt ${realtimeRetryCount})...`);
+
+      // Single-timer guard lock
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          startRealtimeListener();
+        }, delay);
+      }
     }
   });
 }
