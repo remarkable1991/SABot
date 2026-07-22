@@ -447,14 +447,39 @@ async function buildEmbed(payload, guild) {
 }
 
 async function announceGame(gameId) {
-  const payload = await buildGameResultPayload(gameId); if (!payload) return;
-  const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); if (!channel) { console.error('Could not find target channel', DISCORD_CHANNEL_ID); return; }
-  const built = await buildEmbed(payload, channel.guild); const messagePayload = { embeds: [built.embed] };
-  if (built.screenshotMedia?.attachment) { messagePayload.files = [built.screenshotMedia.attachment]; }
-  else if (built.screenshotMedia?.tooLarge) { messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; }
+  // 1. Double-check if this game was already announced to prevent duplicate posts
+  const { data: checkGame } = await supabase
+    .from('games')
+    .select('announced_to_discord')
+    .eq('id', gameId)
+    .single();
+
+  if (checkGame && checkGame.announced_to_discord === true) {
+    console.log(`Game ${gameId} was already announced. Skipping duplicate.`);
+    return;
+  }
+
+  const payload = await buildGameResultPayload(gameId); 
+  if (!payload) return;
+
+  const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); 
+  if (!channel) { 
+    console.error('Could not find target channel', DISCORD_CHANNEL_ID); 
+    return; 
+  }
+
+  const built = await buildEmbed(payload, channel.guild); 
+  const messagePayload = { embeds: [built.embed] };
+
+  if (built.screenshotMedia?.attachment) { 
+    messagePayload.files = [built.screenshotMedia.attachment]; 
+  } else if (built.screenshotMedia?.tooLarge) { 
+    messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; 
+  }
+
   await channel.send(messagePayload);
 
-  // Mark as announced in the database after successfully sending the Discord embed
+  // 2. Mark as announced in the database after successfully sending the Discord embed
   const { error: updateErr } = await supabase
     .from('games')
     .update({ announced_to_discord: true })
@@ -498,16 +523,18 @@ function startRealtimeListener() {
     if (status === 'SUBSCRIBED') { 
       realtimeRetryCount = 0; 
 
-      // Database Catch-Up Scan: Fetch ALL unannounced games regardless of offline duration
+      // Recovery Catch-Up: Only grab games older than 10 seconds that were missed during an outage
       try {
+        const tenSecondsAgo = new Date(Date.now() - 10000).toISOString();
         const { data: unannouncedGames } = await supabase
           .from('games')
           .select('id')
           .eq('announced_to_discord', false)
+          .lt('created_at', tenSecondsAgo)
           .order('created_at', { ascending: true });
 
         if (unannouncedGames && unannouncedGames.length > 0) {
-          console.log(`Found ${unannouncedGames.length} unannounced games in DB. Processing queue...`);
+          console.log(`Found ${unannouncedGames.length} missed unannounced games in DB. Processing queue...`);
           for (const g of unannouncedGames) {
             scheduleAnnouncement(g.id);
           }
