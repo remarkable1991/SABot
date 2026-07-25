@@ -32,7 +32,7 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 300;
-const GAME_ROWS_WAIT_MS = 5000; // Updated: Extended to 5 seconds to prevent race conditions
+const GAME_ROWS_WAIT_MS = 5000; // Extended to 5 seconds to prevent race conditions
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
 const MEMBER_SEARCH_LIMIT = 10;
@@ -176,7 +176,6 @@ function formatDelta(value) {
   return (num > 0 ? '+' : '') + num.toFixed(2);
 }
 
-// Function checking visual channels matching specific name parameters inside standard mapping
 function getEmoji(guild, name, fallback) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
@@ -289,7 +288,6 @@ async function resolveMentionForName(guild, playerName) {
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
   
-  // Implemented an inline asset settling retry-loop to handle image write synchronization gaps cleanly
   let attempts = 3;
   let response = null;
   let data = null;
@@ -429,7 +427,6 @@ async function buildEmbed(payload, guild) {
     const mention = await resolveMentionForName(guild, row.player_name);
     const playerPart = mention ? '**' + row.player_name + '** ' + mention : '**' + row.player_name + '**';
     
-    // Automatically retrieve and append the leader custom emoji if available
     const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
     const leaderDisplay = leaderEmoji ? `${leaderEmoji} ${row.leader_name}` : (row.leader_name || 'Unknown Leader');
 
@@ -447,7 +444,6 @@ async function buildEmbed(payload, guild) {
 }
 
 async function announceGame(gameId) {
-  // 1. Double-check if this game was already announced to prevent duplicate posts
   const { data: checkGame } = await supabase
     .from('games')
     .select('announced_to_discord')
@@ -479,7 +475,6 @@ async function announceGame(gameId) {
 
   await channel.send(messagePayload);
 
-  // 2. Mark as announced in the database after successfully sending the Discord embed
   const { error: updateErr } = await supabase
     .from('games')
     .update({ announced_to_discord: true })
@@ -502,13 +497,11 @@ function scheduleAnnouncement(gameId) {
 }
 
 function startRealtimeListener() {
-  // Clear any existing pending reconnect timers to prevent duplicate execution loops
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
   }
 
-  // Completely destroy and clean up the old channel if it exists
   if (realtimeChannel) {
     console.log('Cleaning up stale Realtime channel...');
     supabase.removeChannel(realtimeChannel);
@@ -523,7 +516,6 @@ function startRealtimeListener() {
     if (status === 'SUBSCRIBED') { 
       realtimeRetryCount = 0; 
 
-      // Recovery Catch-Up: Only grab games older than 10 seconds that were missed during an outage
       try {
         const tenSecondsAgo = new Date(Date.now() - 10000).toISOString();
         const { data: unannouncedGames } = await supabase
@@ -549,7 +541,6 @@ function startRealtimeListener() {
     if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
       if (err) { console.error('Realtime error caught:', err); }
       
-      // Inject token update into realtime parameters
       supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
       
       if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
@@ -558,10 +549,9 @@ function startRealtimeListener() {
       }
       
       realtimeRetryCount += 1; 
-      const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000); // Cap max delay at 30s
+      const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000);
       console.log(`Scheduling reconnection in ${delay / 1000}s (Attempt ${realtimeRetryCount})...`);
 
-      // Single-timer guard lock
       if (!reconnectTimer) {
         reconnectTimer = setTimeout(() => {
           reconnectTimer = null;
@@ -634,7 +624,7 @@ function startGlobalDatabaseListener() {
                 rewardClarity = 'Standard Reward';
               }
 
-            const alertEmbed = new EmbedBuilder()
+              const alertEmbed = new EmbedBuilder()
                 .setTitle('🪙 Strategy Points Earned!')
                 .setDescription(`Congratulations <@${targetDiscordId}>!\nYou've earned a **${rewardClarity}**!`)
                 .setColor(0xf1c40f)
@@ -913,7 +903,7 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   }
 }
 
-// Separate procedural routine to execute a standardized lobby boot/start payload sequence
+// Procedural routine executing a standardized lobby boot/start payload sequence
 async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   let channel = targetChannel;
   if (!channel) {
@@ -1131,7 +1121,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
-    // --- EMBED-BASED IDENTITY RESOLUTION FIX ---
     const embedTitle = message.embeds[0]?.title || '';
     const isLiveLobby = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
     const joinEmojiString = getAsyncDuneEmoji(message.guild, isLiveLobby);
@@ -1213,9 +1202,11 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const hostMentionString = `<@${lobby.host_id}>`;
       const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
       const accurateEndEmoji = isLiveLobby ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
-      const labelMatchId = lobby.match_id ? `[ID: ${lobby.match_id}]` : '';
+      
+      // Copyable match ID on a new line for mobile /fix usage
+      const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
 
-      const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji} ${labelMatchId}`;
+      const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
       
       const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: ['1219666516644204554'] };
 
@@ -1264,13 +1255,16 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const finalTotal = players.length + guestPlayers.length;
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
       
-      // --- AUTOMATED 15-MINUTE AUTOMATIC COUNTDOWN INITIALIZATION TRIGGER ---
+      // --- FIX: AUTOMATED 15-MINUTE COUNTDOWN INITIALIZATION TRIGGER ---
       if (finalTotal === 4 && !lobby.auto_start_at) {
         const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
         updatePayload.auto_start_at = startTargetDate.toISOString();
+        lobby.auto_start_at = startTargetDate.toISOString(); // Keep local memory in sync!
         
         const timestampSeconds = Math.floor(startTargetDate.getTime() / 1000);
-        const countdownAlert = `⏳ **Lobby full!** Match ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} will automatically begin <t:${timestampSeconds}:R>. Setup your in-game rooms now!`;
+        
+        const countdownAlert = `⏳ **Lobby full!** Match will automatically begin <t:${timestampSeconds}:R>. Set up your in-game rooms now!`;
+        
         await message.channel.send({ content: countdownAlert }).catch(() => {});
       }
 
@@ -1341,9 +1335,10 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
       const finalTotal = players.length + guestPlayers.length;
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
       
-      // --- COUNTDOWN RESET INTERCEPTION ROUTINE ---
+      // Countdown reset when roster drops below 4
       if (finalTotal < 4 && lobby.auto_start_at) {
         updatePayload.auto_start_at = null;
+        lobby.auto_start_at = null; // Sync local memory
         await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} aborted.` }).catch(() => {});
       }
 
@@ -1378,7 +1373,7 @@ discordClient.once('clientReady', async () => {
     await executeGlobalSpAuditSweep();
   }, 24 * 60 * 60 * 1000);
 
-  // --- PERSISTENT CRON POLLING LOOP SWEEP FOR AUTO-START TIMESTAMPS ---
+  // --- FIX: PERSISTENT CRON POLLING LOOP SWEEP FOR AUTO-START TIMESTAMPS ---
   setInterval(async () => {
     try {
       const nowISO = new Date().toISOString();
@@ -1386,6 +1381,7 @@ discordClient.once('clientReady', async () => {
         .from('active_async_matches')
         .select('*')
         .eq('status', 'searching')
+        .not('auto_start_at', 'is', null) // Strictly ignore NULL rows
         .lte('auto_start_at', nowISO);
 
       if (expiredLobbies && expiredLobbies.length > 0) {
@@ -1397,7 +1393,7 @@ discordClient.once('clientReady', async () => {
     } catch (cronErr) {
       console.error('Error running automated countdown polling sweeps:', cronErr);
     }
-  }, 30 * 1000); // 30 seconds interval check loop
+  }, 30 * 1000); // Check every 30 seconds
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
