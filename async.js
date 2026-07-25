@@ -247,41 +247,36 @@ module.exports = {
       }
     }
 
-    let generatedMatchId = `MATCH-${Math.floor(100 + Math.random() * 900)}`;
+    // --- SEQUENTIAL HOST MATCH ID CREATION ENGINE (HostName-A#) ---
+    const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+    const prefixPattern = `${cleanHostName}-A`;
+    let generatedMatchId = `${prefixPattern}1`;
+
     try {
-      const { data: nameRows } = await supabase
-        .from('player_discord_map')
-        .select('display_name')
-        .not('display_name', 'is', null)
-        .limit(40);
+      const { data: existingHostLobbies } = await supabase
+        .from('active_async_matches')
+        .select('match_id')
+        .ilike('match_id', `${prefixPattern}%`);
 
-      if (nameRows && nameRows.length >= 2) {
-        const cleanNames = nameRows
-          .map(r => r.display_name.trim().replace(/[^a-zA-Z]/g, ''))
-          .filter(n => n.length >= 4);
+      if (existingHostLobbies && existingHostLobbies.length > 0) {
+        let maxNumber = 0;
+        const numberRegex = new RegExp(`^${cleanHostName}-A(\\d+)$`, 'i');
 
-        if (cleanNames.length >= 2) {
-          const shuffled = cleanNames.sort(() => 0.5 - Math.random());
-          const pickCount = Math.random() > 0.5 ? 3 : 2;
-          const selectedChunks = shuffled.slice(0, Math.min(pickCount, shuffled.length));
-          
-          let combinedWord = '';
-          selectedChunks.forEach((name) => {
-            const halfLength = Math.ceil(name.length / 2);
-            if (Math.random() > 0.5) {
-              combinedWord += name.slice(0, halfLength);
-            } else {
-              combinedWord += name.slice(-halfLength);
+        existingHostLobbies.forEach((row) => {
+          const match = row.match_id ? row.match_id.match(numberRegex) : null;
+          if (match) {
+            const num = parseInt(match[1], 10);
+            if (!isNaN(num) && num > maxNumber) {
+              maxNumber = num;
             }
-          });
-
-          if (combinedWord.length > 3) {
-            combinedWord = combinedWord.charAt(0).toUpperCase() + combinedWord.slice(1).toLowerCase();
-            generatedMatchId = `${combinedWord}-${Math.floor(100 + Math.random() * 900)}`;
           }
-        }
+        });
+
+        generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
       }
-    } catch (idErr) { console.error(idErr); }
+    } catch (idErr) {
+      console.error('Error generating host-based match ID:', idErr);
+    }
 
     const totalSlotCount = playerIds.length + guestPlayers.length;
     const mentionsList = playerIds.map(id => `• <@${id}>`);
@@ -311,11 +306,14 @@ module.exports = {
       .setFooter({ text: `Lobbies time out automatically if unstarted after ${hoursToExpiry} hours.` })
       .setTimestamp();
 
-    // Copyable match ID text outside the embed for quick mobile copying
-    const copyableMatchIdContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    // Tap-to-copy code blocks placed outside the embed
+    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    if (password !== 'None') {
+      copyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
+    }
 
     const response = await interaction.reply({
-      content: copyableMatchIdContent,
+      content: copyableContent,
       embeds: [embed],
       withResponse: true
     });
