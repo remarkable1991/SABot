@@ -15,6 +15,11 @@ module.exports = {
         .setRequired(false)
     )
     .addStringOption(option =>
+      option.setName('password')
+        .setDescription('Optional lobby password')
+        .setRequired(false)
+    )
+    .addStringOption(option =>
       option.setName('players')
         .setDescription('Add up to 2 other players: tag them, enter names, or type a number ("1" or "2")')
         .setRequired(false)
@@ -48,21 +53,16 @@ module.exports = {
           { name: 'CHOAM Module', value: 'CHOAM' },
           { name: 'Base Leaders + CHOAM', value: 'Leaders_CHOAM' }
         )
-    )
-    .addStringOption(option =>
-      option.setName('password')
-        .setDescription('Optional lobby password')
-        .setRequired(false)
     ),
 
   async execute(interaction, { supabase }) {
     const notes = interaction.options.getString('text') || 'Looking for a live match!';
     const customMinutes = interaction.options.getInteger('minutes');
+    const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
     const board = interaction.options.getString('board');
     let expansion = interaction.options.getString('expansion');
     const selectedMode = interaction.options.getString('mode');
-    const password = interaction.options.getString('password') || 'None';
     const host = interaction.user;
 
     const guild = interaction.guild;
@@ -310,7 +310,11 @@ module.exports = {
       .setFooter({ text: `Lobbies time out automatically if unstarted after ${minutesToExpiry} minutes.` })
       .setTimestamp();
 
+    // Copyable match ID text outside the embed for quick mobile copying
+    const copyableMatchIdContent = `🎮 Match ID: \`${generatedMatchId}\``;
+
     const response = await interaction.reply({
+      content: copyableMatchIdContent,
       embeds: [embed],
       withResponse: true
     });
