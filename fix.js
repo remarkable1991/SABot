@@ -209,14 +209,42 @@ module.exports = {
     }
 
     const totalCount = players.length + guestPlayers.length;
+    let updatePayload = { 
+      player_ids: players, 
+      guest_players: guestPlayers, 
+      notify_user_ids: notifications 
+    };
+
+    let channelMsgToPost = null;
+
+    // --- AUTOMATED 15-MINUTE COUNTDOWN INITIALIZATION (4/4 FULL ROOM) ---
+    if (totalCount === 4 && !lobby.auto_start_at) {
+      const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
+      updatePayload.auto_start_at = startTargetDate.toISOString();
+
+      const timestampSeconds = Math.floor(startTargetDate.getTime() / 1000);
+      channelMsgToPost = `⏳ **Lobby full!** Match will automatically begin <t:${timestampSeconds}:R>. Set up your in-game rooms now!`;
+    }
+
+    // --- AUTOMATED COUNTDOWN ABORT (ROSTER DROPS BELOW 4) ---
+    if (totalCount < 4 && lobby.auto_start_at) {
+      updatePayload.auto_start_at = null;
+      channelMsgToPost = `⚠️ **Roster drop verified.** Automated match countdown for lobby ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} aborted.`;
+    }
+
     await supabase
       .from('active_async_matches')
-      .update({ player_ids: players, guest_players: guestPlayers, notify_user_ids: notifications })
+      .update(updatePayload)
       .eq('id', lobby.id);
 
     try {
       const channel = await interaction.guild.channels.fetch(lobby.channel_id).catch(() => null);
       if (channel) {
+        // Send auto-start alert or abort notice if state changed
+        if (channelMsgToPost) {
+          await channel.send({ content: channelMsgToPost }).catch(() => {});
+        }
+
         const targetMessage = await channel.messages.fetch(lobby.message_id).catch(() => null);
         if (targetMessage && targetMessage.embeds[0]) {
           const embed = EmbedBuilder.from(targetMessage.embeds[0]);
@@ -235,7 +263,7 @@ module.exports = {
         }
       }
     } catch (err) {
-      console.error(err);
+      console.error('Error updating lobby embed in fix.js:', err);
     }
 
     return interaction.reply({ content: `${logMessage} Lobby updated.`, ephemeral: true });
