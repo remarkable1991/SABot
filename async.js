@@ -9,9 +9,9 @@ module.exports = {
         .setDescription('Any extra details or notes for this match')
         .setRequired(false)
     )
-    .addIntegerOption(option =>
-      option.setName('hours')
-        .setDescription('How many hours before the lobby expires? (Defaults to 72 hours / 3 days)')
+    .addStringOption(option =>
+      option.setName('password')
+        .setDescription('Optional lobby password')
         .setRequired(false)
     )
     .addStringOption(option =>
@@ -49,20 +49,20 @@ module.exports = {
           { name: 'Base Leaders + CHOAM', value: 'Leaders_CHOAM' }
         )
     )
-    .addStringOption(option =>
-      option.setName('password')
-        .setDescription('Optional lobby password')
+    .addIntegerOption(option =>
+      option.setName('hours')
+        .setDescription('How many hours before the lobby expires? (Defaults to 15 hours)')
         .setRequired(false)
     ),
 
   async execute(interaction, { supabase }) {
     const notes = interaction.options.getString('text') || 'Looking for an async match!';
-    const customHours = interaction.options.getInteger('hours');
+    const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
     const board = interaction.options.getString('board');
     let expansion = interaction.options.getString('expansion');
     const selectedMode = interaction.options.getString('mode');
-    const password = interaction.options.getString('password') || 'None';
+    const customHours = interaction.options.getInteger('hours');
     const host = interaction.user;
 
     const guild = interaction.guild;
@@ -158,7 +158,7 @@ module.exports = {
 
     const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
     
-    const hoursToExpiry = customHours ? Math.max(customHours, 1) : 12;
+    const hoursToExpiry = customHours ? Math.max(customHours, 1) : 15;
     const expirationMs = hoursToExpiry * 60 * 60 * 1000;
     const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
@@ -311,7 +311,11 @@ module.exports = {
       .setFooter({ text: `Lobbies time out automatically if unstarted after ${hoursToExpiry} hours.` })
       .setTimestamp();
 
+    // Copyable match ID text outside the embed for quick mobile copying
+    const copyableMatchIdContent = `🎮 Match ID: \`${generatedMatchId}\``;
+
     const response = await interaction.reply({
+      content: copyableMatchIdContent,
       embeds: [embed],
       withResponse: true
     });
