@@ -16,7 +16,7 @@ const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
 const liveCommand = require('./live'); 
-const fixCommand = require('./fix'); // Registered the new fix command module
+const fixCommand = require('./fix');
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads'); 
 const spCommand = require('./sp'); 
@@ -32,7 +32,7 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 300;
-const GAME_ROWS_WAIT_MS = 5000; // Extended to 5 seconds to prevent race conditions
+const GAME_ROWS_WAIT_MS = 5000; // 5-second buffer allows web-app sandbox sync to finish
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
 const MEMBER_SEARCH_LIMIT = 10;
@@ -41,7 +41,6 @@ const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 
-// Your designated target tournament role ID
 const TOURNAMENT_ROLE_ID = '1525805277662679121';
 const TARGET_TOURNAMENT_NUM = 14;
 
@@ -73,7 +72,6 @@ const LEADER_EMOJI_MAP = {
   'Viscount Hundro Moritani': 'viscounthundromoritani'
 };
 
-// Automated SP Progression Tier Structure Array Configuration
 const SP_ROLES_CONFIG = [
   { name: 'Kwisatz Haderach', min: 10000, id: '152621467311616082' },
   { name: 'Swordmaster',      min: 5000,  id: '1526218389004226640' },
@@ -83,7 +81,6 @@ const SP_ROLES_CONFIG = [
   { name: 'Spiceworker',      min: 0,     id: '1526217296501276702' }
 ];
 
-// --- SP SYSTEM CONFIGURATION ---
 const SP_REWARDS_CONFIG = {
   DAILY_FIRST_MESSAGE: { amount: 10,  label: 'Daily First Message' },
   IMAGE_UPLOAD:        { amount: 50,  label: 'Recruitment Proof Posted' },
@@ -125,7 +122,6 @@ const discordClient = new Client({
   ]
 });
 
-// Registered fixCommand within the internal slashCommands Map
 const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
@@ -334,7 +330,7 @@ async function createDiscordImagePayload(storagePath) {
 async function buildGameResultPayload(gameId) {
   const { data: game, error: gameError } = await supabase
     .from('games')
-    .select('id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num')
+    .select('id, public_match_id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num')
     .eq('id', gameId)
     .single();
 
@@ -390,6 +386,8 @@ async function buildGameResultPayload(gameId) {
   }
 
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
+
+  // 1. Fetch Live Ratings
   const { data: ratings, error: ratingsError = null } = await supabase
     .from('player_ratings')
     .select('player_key, display_name, game_version, elo')
@@ -402,15 +400,49 @@ async function buildGameResultPayload(gameId) {
     if (!ratingsMap[row.player_key]) ratingsMap[row.player_key] = {};
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
+
+  // 2. Fetch Sandbox VP-Elo Deltas for this Match
+  const { data: sandboxResults, error: sandboxResultsError = null } = await supabase
+    .from('sandbox_game_results')
+    .select('player_name, elo_delta_overall')
+    .eq('game_id', gameId);
+
+  if (sandboxResultsError) { console.error('Failed to fetch sandbox results', sandboxResultsError); }
+  const sandboxDeltaMap = {};
+  for (const row of sandboxResults || []) {
+    const key = normalizeName(row.player_name);
+    sandboxDeltaMap[key] = row.elo_delta_overall;
+  }
+
+  // 3. Fetch Current Sandbox Ratings
+  const { data: sandboxRatings, error: sandboxRatingsError = null } = await supabase
+    .from('sandbox_player_ratings')
+    .select('player_key, overall_vp_elo')
+    .in('player_key', playerKeys)
+    .eq('game_version', 'overall');
+
+  if (sandboxRatingsError) { console.error('Failed to fetch sandbox ratings', sandboxRatingsError); }
+  const sandboxRatingsMap = {};
+  for (const row of sandboxRatings || []) {
+    sandboxRatingsMap[row.player_key] = row.overall_vp_elo;
+  }
+
   const screenshotMedia = game.image_url ? await createDiscordImagePayload(game.image_url) : null;
-  return { game, results, ratingsMap, screenshotMedia, tournamentDetails };
+  return { game, results, ratingsMap, sandboxDeltaMap, sandboxRatingsMap, screenshotMedia, tournamentDetails };
 }
 
 async function buildEmbed(payload, guild) {
-  const game = payload.game; const results = payload.results; const ratingsMap = payload.ratingsMap; const screenshotMedia = payload.screenshotMedia;
+  const game = payload.game; 
+  const results = payload.results; 
+  const ratingsMap = payload.ratingsMap; 
+  const sandboxDeltaMap = payload.sandboxDeltaMap || {};
+  const sandboxRatingsMap = payload.sandboxRatingsMap || {};
+  const screenshotMedia = payload.screenshotMedia;
   const tourney = payload.tournamentDetails;
   
-  const modeLabel = capitalize(game.game_version || 'unknown'); const tags = buildGameTags(game, guild); const lines = [];
+  const modeLabel = capitalize(game.game_version || 'unknown'); 
+  const tags = buildGameTags(game, guild); 
+  const lines = [];
   
   let titleString = `Game Finished - ${modeLabel}`;
   if (game.tournament_num) {
@@ -421,9 +453,23 @@ async function buildEmbed(payload, guild) {
     }
   }
 
+  // Clickable Match URL
+  const matchUrl = game.public_match_id 
+    ? `https://dunestats.cc/match/${game.public_match_id}` 
+    : `https://dunestats.cc/matches`;
+
   for (const row of results) {
-    const place = getPlacementEmoji(guild, row.placement); const playerKey = String(row.player_name || '').toLowerCase();
-    const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined; const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
+    const place = getPlacementEmoji(guild, row.placement); 
+    const playerKey = String(row.player_name || '').toLowerCase();
+    const normalizedKey = normalizeName(row.player_name);
+
+    const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined; 
+    const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
+    
+    // Sandbox VP-Elo values
+    const sandboxDelta = sandboxDeltaMap[normalizedKey];
+    const currentSandboxTotal = sandboxRatingsMap[playerKey];
+
     const mention = await resolveMentionForName(guild, row.player_name);
     const playerPart = mention ? '**' + row.player_name + '** ' + mention : '**' + row.player_name + '**';
     
@@ -435,10 +481,25 @@ async function buildEmbed(payload, guild) {
     if (currentOverall !== undefined) { text += ' (-> ' + Number(currentOverall).toFixed(1) + ')'; }
     text += ' | ' + modeLabel + ': ' + formatDelta(row.elo_delta);
     if (currentMode !== undefined) { text += ' (-> ' + Number(currentMode).toFixed(1) + ')'; }
+
+    // Append All VP (Sandbox) metric line
+    if (sandboxDelta !== undefined) {
+      text += ' | All VP: ' + formatDelta(sandboxDelta);
+      if (currentSandboxTotal !== undefined) { text += ' (-> ' + Number(currentSandboxTotal).toFixed(1) + ')'; }
+    }
+
     lines.push(text);
   }
+
   if (tags.length) { lines.push('Game modes played: ' + tags.join(' | ')); }
-  const embed = new EmbedBuilder().setTitle(titleString).setDescription(lines.join('\n\n')).setColor(game.tournament_num ? 0xd35400 : 0xC9A24B).setTimestamp(new Date());
+
+  const embed = new EmbedBuilder()
+    .setTitle(titleString)
+    .setURL(matchUrl)
+    .setDescription(lines.join('\n\n'))
+    .setColor(game.tournament_num ? 0xd35400 : 0xC9A24B)
+    .setTimestamp(new Date());
+
   if (screenshotMedia?.imageUrl) { embed.setImage(screenshotMedia.imageUrl); }
   return { embed, screenshotMedia };
 }
@@ -903,7 +964,6 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   }
 }
 
-// Procedural routine executing a standardized lobby boot/start payload sequence
 async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   let channel = targetChannel;
   if (!channel) {
@@ -1123,7 +1183,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     const embedTitle = message.embeds[0]?.title || '';
     const isLiveLobby = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
-    const joinEmojiString = getAsyncDuneEmoji(message.guild, isLiveLobby);
 
     const emoji = reaction.emoji.name || reaction.emoji;
     const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
@@ -1203,7 +1262,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
       const accurateEndEmoji = isLiveLobby ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
       
-      // Copyable match ID on a new line for mobile /fix usage
       const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
 
       const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
@@ -1255,14 +1313,12 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const finalTotal = players.length + guestPlayers.length;
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
       
-      // --- FIX: AUTOMATED 15-MINUTE COUNTDOWN INITIALIZATION TRIGGER ---
       if (finalTotal === 4 && !lobby.auto_start_at) {
         const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
         updatePayload.auto_start_at = startTargetDate.toISOString();
-        lobby.auto_start_at = startTargetDate.toISOString(); // Keep local memory in sync!
+        lobby.auto_start_at = startTargetDate.toISOString();
         
         const timestampSeconds = Math.floor(startTargetDate.getTime() / 1000);
-        
         const countdownAlert = `⏳ **Lobby full!** Match will automatically begin <t:${timestampSeconds}:R>. Set up your in-game rooms now!`;
         
         await message.channel.send({ content: countdownAlert }).catch(() => {});
@@ -1335,10 +1391,9 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
       const finalTotal = players.length + guestPlayers.length;
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
       
-      // Countdown reset when roster drops below 4
       if (finalTotal < 4 && lobby.auto_start_at) {
         updatePayload.auto_start_at = null;
-        lobby.auto_start_at = null; // Sync local memory
+        lobby.auto_start_at = null;
         await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} aborted.` }).catch(() => {});
       }
 
@@ -1373,7 +1428,6 @@ discordClient.once('clientReady', async () => {
     await executeGlobalSpAuditSweep();
   }, 24 * 60 * 60 * 1000);
 
-  // --- FIX: PERSISTENT CRON POLLING LOOP SWEEP FOR AUTO-START TIMESTAMPS ---
   setInterval(async () => {
     try {
       const nowISO = new Date().toISOString();
@@ -1381,7 +1435,7 @@ discordClient.once('clientReady', async () => {
         .from('active_async_matches')
         .select('*')
         .eq('status', 'searching')
-        .not('auto_start_at', 'is', null) // Strictly ignore NULL rows
+        .not('auto_start_at', 'is', null)
         .lte('auto_start_at', nowISO);
 
       if (expiredLobbies && expiredLobbies.length > 0) {
@@ -1393,7 +1447,7 @@ discordClient.once('clientReady', async () => {
     } catch (cronErr) {
       console.error('Error running automated countdown polling sweeps:', cronErr);
     }
-  }, 30 * 1000); // Check every 30 seconds
+  }, 30 * 1000);
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
