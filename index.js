@@ -32,7 +32,7 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 300;
-const GAME_ROWS_WAIT_MS = 5000; // 5-second buffer allows web-app sandbox sync to finish
+const GAME_ROWS_WAIT_MS = 5000; 
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
 const MEMBER_SEARCH_LIMIT = 10;
@@ -41,8 +41,11 @@ const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 
-const TOURNAMENT_ROLE_ID = '1525805277662679121';
-const TARGET_TOURNAMENT_NUM = 14;
+// --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION (T15 & T16) ---
+const TOURNAMENT_ROLE_MAP = {
+  15: '1525805277662679121', // T15 Registered Role
+  16: '1266076612424634571'  // T16 Registered Role
+};
 
 // --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
 const LEADER_EMOJI_MAP = {
@@ -387,7 +390,6 @@ async function buildGameResultPayload(gameId) {
 
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
 
-  // 1. Fetch Live Ratings
   const { data: ratings, error: ratingsError = null } = await supabase
     .from('player_ratings')
     .select('player_key, display_name, game_version, elo')
@@ -401,7 +403,6 @@ async function buildGameResultPayload(gameId) {
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
 
-  // 2. Fetch Sandbox VP-Elo Deltas for this Match
   const { data: sandboxResults, error: sandboxResultsError = null } = await supabase
     .from('sandbox_game_results')
     .select('player_name, elo_delta_overall')
@@ -414,7 +415,6 @@ async function buildGameResultPayload(gameId) {
     sandboxDeltaMap[key] = row.elo_delta_overall;
   }
 
-  // 3. Fetch Current Sandbox Ratings
   const { data: sandboxRatings, error: sandboxRatingsError = null } = await supabase
     .from('sandbox_player_ratings')
     .select('player_key, overall_vp_elo')
@@ -453,7 +453,6 @@ async function buildEmbed(payload, guild) {
     }
   }
 
-  // Clickable Match URL
   const matchUrl = game.public_match_id 
     ? `https://dunestats.cc/match/${game.public_match_id}` 
     : `https://dunestats.cc/matches`;
@@ -466,7 +465,6 @@ async function buildEmbed(payload, guild) {
     const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined; 
     const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
     
-    // Sandbox VP-Elo values
     const sandboxDelta = sandboxDeltaMap[normalizedKey];
     const currentSandboxTotal = sandboxRatingsMap[playerKey];
 
@@ -482,7 +480,6 @@ async function buildEmbed(payload, guild) {
     text += ' | ' + modeLabel + ': ' + formatDelta(row.elo_delta);
     if (currentMode !== undefined) { text += ' (-> ' + Number(currentMode).toFixed(1) + ')'; }
 
-    // Append All VP (Sandbox) metric line
     if (sandboxDelta !== undefined) {
       text += ' | All VP: ' + formatDelta(sandboxDelta);
       if (currentSandboxTotal !== undefined) { text += ' (-> ' + Number(currentSandboxTotal).toFixed(1) + ')'; }
@@ -634,11 +631,14 @@ function startGlobalDatabaseListener() {
         if (!newRecord) return;
         console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
 
+        // --- UPDATED FOR MULTI-TOURNAMENT ROLE MAPPING (T15 & T16) ---
         if (table === 'tournament_registrations') {
-          if (newRecord.active_on_discord === true && Number(newRecord.tournament_num) === TARGET_TOURNAMENT_NUM) {
-            await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, true);
-          } else if (newRecord.active_on_discord === false || Number(newRecord.tournament_num) !== TARGET_TOURNAMENT_NUM) {
-            await syncSingleUserRole(newRecord.discord_username, TOURNAMENT_ROLE_ID, false);
+          const tNum = Number(newRecord.tournament_num);
+          const targetRoleId = TOURNAMENT_ROLE_MAP[tNum];
+
+          if (targetRoleId) {
+            const shouldHaveRole = newRecord.active_on_discord === true;
+            await syncSingleUserRole(newRecord.discord_username, targetRoleId, shouldHaveRole);
           }
         }
 
@@ -814,16 +814,23 @@ async function executeGlobalSpAuditSweep() {
 async function runInitialDatabaseSync() {
   console.log('🔄 Running initial boot-time synchronization scan...');
   try {
+    const activeTournamentNums = Object.keys(TOURNAMENT_ROLE_MAP).map(Number);
+
     const { data: activeRegs, error } = await supabase
       .from('tournament_registrations')
-      .select('discord_username')
-      .eq('tournament_num', TARGET_TOURNAMENT_NUM)
+      .select('discord_username, tournament_num')
+      .in('tournament_num', activeTournamentNums)
       .eq('active_on_discord', true);
+
     if (error) throw error;
+
     if (activeRegs && activeRegs.length) {
-      console.log(`Found ${activeRegs.length} existing active registrations. Processing profiles...`);
+      console.log(`Found ${activeRegs.length} existing active registrations across Tournaments ${activeTournamentNums.join(', ')}.`);
       for (const reg of activeRegs) {
-        await syncSingleUserRole(reg.discord_username, TOURNAMENT_ROLE_ID, true);
+        const roleId = TOURNAMENT_ROLE_MAP[Number(reg.tournament_num)];
+        if (roleId) {
+          await syncSingleUserRole(reg.discord_username, roleId, true);
+        }
       }
     }
 
