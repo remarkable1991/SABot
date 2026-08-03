@@ -627,20 +627,26 @@ function startGlobalDatabaseListener() {
       'postgres_changes',
       { event: '*', schema: 'public' },
       async (payload) => {
-        const { table, eventType, new: newRecord } = payload;
-        if (!newRecord) return;
+        const { table, eventType, new: newRecord, old: oldRecord } = payload;
+        
         console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
 
-        // --- UPDATED FOR MULTI-TOURNAMENT ROLE MAPPING (T15 & T16) ---
+        // --- REAL-TIME TOURNAMENT REGISTRATION SYNC & UNREGISTER STRIPPING ---
         if (table === 'tournament_registrations') {
-          const tNum = Number(newRecord.tournament_num);
+          const rec = newRecord || oldRecord;
+          if (!rec) return;
+
+          const tNum = Number(rec.tournament_num);
           const targetRoleId = TOURNAMENT_ROLE_MAP[tNum];
 
           if (targetRoleId) {
-            const shouldHaveRole = newRecord.active_on_discord === true;
-            await syncSingleUserRole(newRecord.discord_username, targetRoleId, shouldHaveRole);
+            // Give role ONLY if record exists, is active on discord, and event isn't DELETE
+            const shouldHaveRole = (eventType !== 'DELETE') && (newRecord?.active_on_discord === true);
+            await syncSingleUserRole(rec.discord_username, targetRoleId, shouldHaveRole);
           }
         }
+
+        if (!newRecord) return;
 
         if (table === 'player_sp' && eventType === 'UPDATE') {
           if (newRecord.is_claimed === true) {
@@ -719,12 +725,13 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
     const member = await searchGuildMemberByNames(guild, [discordUsername]);
     if (!member) return;
     const hasRole = member.roles.cache.has(roleId);
+
     if (shouldHaveRole && !hasRole) {
       await member.roles.add(role);
       console.log(`✅ Automated Sync: Added ${role.name} to ${member.user.tag}`);
     } else if (!shouldHaveRole && hasRole) {
       await member.roles.remove(role);
-      console.log(`❌ Automated Sync: Removed ${role.name} from ${member.user.tag}`);
+      console.log(`❌ Automated Sync: Stripped/Removed ${role.name} from ${member.user.tag}`);
     }
   } catch (err) {
     console.error(`Error executing automated sync for ${discordUsername}:`, err);
@@ -815,7 +822,9 @@ async function runInitialDatabaseSync() {
   console.log('🔄 Running initial boot-time synchronization scan...');
   try {
     const activeTournamentNums = Object.keys(TOURNAMENT_ROLE_MAP).map(Number);
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
 
+    // 1. Fetch active registrations for configured tournaments
     const { data: activeRegs, error } = await supabase
       .from('tournament_registrations')
       .select('discord_username, tournament_num')
@@ -824,12 +833,39 @@ async function runInitialDatabaseSync() {
 
     if (error) throw error;
 
+    // 2. Sync roles for active registrations
+    const activeUserMap = new Map(); // Track who SHOULD have which role
     if (activeRegs && activeRegs.length) {
-      console.log(`Found ${activeRegs.length} existing active registrations across Tournaments ${activeTournamentNums.join(', ')}.`);
+      console.log(`Found ${activeRegs.length} active registrations across Tournaments ${activeTournamentNums.join(', ')}.`);
       for (const reg of activeRegs) {
-        const roleId = TOURNAMENT_ROLE_MAP[Number(reg.tournament_num)];
+        const tNum = Number(reg.tournament_num);
+        const roleId = TOURNAMENT_ROLE_MAP[tNum];
         if (roleId) {
+          if (!activeUserMap.has(roleId)) activeUserMap.set(roleId, new Set());
+          activeUserMap.get(roleId).add(reg.discord_username.toLowerCase());
+
           await syncSingleUserRole(reg.discord_username, roleId, true);
+        }
+      }
+    }
+
+    // 3. STRIP UNREGISTERED USERS: Audit current members with the roles and remove if not active in DB
+    if (guild) {
+      for (const tNum of activeTournamentNums) {
+        const roleId = TOURNAMENT_ROLE_MAP[tNum];
+        const role = guild.roles.cache.get(roleId);
+        const validUsersSet = activeUserMap.get(roleId) || new Set();
+
+        if (role && role.members) {
+          for (const member of role.members.values()) {
+            const memberNames = [member.user.username, member.nickname, member.displayName].filter(Boolean).map(n => n.toLowerCase());
+            const isStillRegistered = memberNames.some(name => validUsersSet.has(name));
+
+            if (!isStillRegistered) {
+              await member.roles.remove(roleId).catch(() => null);
+              console.log(`🧹 Unregistered Cleanup: Stripped role ${role.name} from ${member.user.tag} (No active registration)`);
+            }
+          }
         }
       }
     }
