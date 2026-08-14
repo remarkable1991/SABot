@@ -1204,8 +1204,15 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       const matched = (schedule.suggested_slots || []).find(s => s.label === winningSlot);
       if (matched) {
         confirmedTimeText = matched.time_text;
-        const parsed = Date.parse(matched.time_text);
-        if (!isNaN(parsed)) confirmedTimestamp = new Date(parsed).toISOString();
+        
+        // Extract unix timestamp safely from <t:1787814000:F> or ISO strings
+        const matchDiscord = String(matched.time_text).match(/<t:(\d+)/);
+        if (matchDiscord) {
+          confirmedTimestamp = new Date(parseInt(matchDiscord[1], 10) * 1000).toISOString();
+        } else {
+          const parsed = Date.parse(matched.time_text);
+          if (!isNaN(parsed)) confirmedTimestamp = new Date(parsed).toISOString();
+        }
       }
     } else {
       newStatus = 'conflict';
@@ -1232,15 +1239,18 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
 
   const playerMentions = schedule.player_discord_ids.map(id => `<@${id}>`).join(' ');
 
-  // Announcement on consensus
+  // Announcement on consensus (Rendered without backticks so Discord interprets localized dates)
   if (newStatus === 'confirmed') {
-    const unixSec = confirmedTimestamp ? Math.floor(new Date(confirmedTimestamp).getTime() / 1000) : null;
-    const timeDisplay = unixSec ? `<t:${unixSec}:F> (<t:${unixSec}:R>)` : `\`${confirmedTimeText}\``;
+    let timeDisplay = confirmedTimeText;
+    if (!timeDisplay && confirmedTimestamp) {
+      const unixSec = Math.floor(new Date(confirmedTimestamp).getTime() / 1000);
+      timeDisplay = `<t:${unixSec}:F> (<t:${unixSec}:R>)`;
+    }
 
     const confirmedEmbed = new EmbedBuilder()
       .setTitle(`📅 Match Time Confirmed: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
       .setColor(0x2ECC71)
-      .setDescription(`All 4 players agreed! Match locked in for **${timeDisplay}**.\n\nPlease let your opponents know on time if you need to reschedule.`)
+      .setDescription(`All 4 players agreed! Match locked in for ${timeDisplay || 'the agreed time'}.\n\nPlease let your opponents know on time if you need to reschedule.`)
       .setTimestamp();
 
     await message.channel.send({ content: `👥 ${playerMentions}`, embeds: [confirmedEmbed] }).catch(() => {});
@@ -1558,7 +1568,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     }
 
     if (emoji === '🔔') {
-      if (notifications.includes(user.id)) {
+      if (!notifications.includes(user.id)) {
         notifications = notifications.filter(id => id !== user.id);
         shouldUpdate = true;
       }
