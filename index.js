@@ -20,6 +20,8 @@ const fixCommand = require('./fix');
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads'); 
 const spCommand = require('./sp'); 
+const confirmCommand = require('./confirm');
+const tournamentStatusCommand = require('./tournament-status');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -40,6 +42,7 @@ const DB_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
+const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
 // --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION (T15 & T16) ---
 const TOURNAMENT_ROLE_MAP = {
@@ -132,7 +135,9 @@ const slashCommands = new Map([
   [fixCommand.data.name, fixCommand],
   [tournamentCommand.data.name, tournamentCommand],
   [massThreadsCommand.data.name, massThreadsCommand],
-  [spCommand.data.name, spCommand]
+  [spCommand.data.name, spCommand],
+  [confirmCommand.data.name, confirmCommand],
+  [tournamentStatusCommand.data.name, tournamentStatusCommand]
 ]);
 
 const pendingGames = new Set();
@@ -543,6 +548,25 @@ async function announceGame(gameId) {
   } else {
     console.log('Announced game and updated database flag:', gameId);
   }
+
+  // --- AUTO-UPDATE TOURNAMENT SCHEDULE STATUS TO 'PLAYED' ---
+  if (payload.game?.tournament_num && payload.tournamentDetails) {
+    try {
+      await supabase
+        .from('tournament_match_schedules')
+        .update({
+          status: 'played',
+          updated_at: new Date().toISOString()
+        })
+        .eq('tournament_num', payload.game.tournament_num)
+        .eq('round_type', payload.tournamentDetails.roundType)
+        .eq('table_identifier', payload.tournamentDetails.tableIdentifier);
+
+      console.log(`🏆 Auto-marked tournament match schedule as PLAYED: T${payload.game.tournament_num} ${payload.tournamentDetails.roundType} ${payload.tournamentDetails.tableIdentifier}`);
+    } catch (schedErr) {
+      console.error('Failed to update tournament_match_schedules to played:', schedErr);
+    }
+  }
 }
 
 function scheduleAnnouncement(gameId) {
@@ -640,7 +664,6 @@ function startGlobalDatabaseListener() {
           const targetRoleId = TOURNAMENT_ROLE_MAP[tNum];
 
           if (targetRoleId) {
-            // Give role ONLY if record exists, is active on discord, and event isn't DELETE
             const shouldHaveRole = (eventType !== 'DELETE') && (newRecord?.active_on_discord === true);
             await syncSingleUserRole(rec.discord_username, targetRoleId, shouldHaveRole);
           }
@@ -824,7 +847,6 @@ async function runInitialDatabaseSync() {
     const activeTournamentNums = Object.keys(TOURNAMENT_ROLE_MAP).map(Number);
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
 
-    // 1. Fetch active registrations for configured tournaments
     const { data: activeRegs, error } = await supabase
       .from('tournament_registrations')
       .select('discord_username, tournament_num')
@@ -833,8 +855,7 @@ async function runInitialDatabaseSync() {
 
     if (error) throw error;
 
-    // 2. Sync roles for active registrations
-    const activeUserMap = new Map(); // Track who SHOULD have which role
+    const activeUserMap = new Map();
     if (activeRegs && activeRegs.length) {
       console.log(`Found ${activeRegs.length} active registrations across Tournaments ${activeTournamentNums.join(', ')}.`);
       for (const reg of activeRegs) {
@@ -849,7 +870,6 @@ async function runInitialDatabaseSync() {
       }
     }
 
-    // 3. STRIP UNREGISTERED USERS: Audit current members with the roles and remove if not active in DB
     if (guild) {
       for (const tNum of activeTournamentNums) {
         const roleId = TOURNAMENT_ROLE_MAP[tNum];
@@ -875,13 +895,6 @@ async function runInitialDatabaseSync() {
   } catch (err) {
     console.error('Failed executing initial boot-time scan:', err);
   }
-}
-
-function getAsyncDuneEmoji(guild, isLive = false) {
-  if (!guild || !guild.emojis || !guild.emojis.cache) return isLive ? '⚔️' : '🎲';
-  const targetName = isLive ? 'LiveDune' : 'AsyncDune';
-  const emoji = guild.emojis.cache.find((e) => e.name === targetName);
-  return emoji ? emoji.toString() : (isLive ? '⚔️' : '🎲');
 }
 
 async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
@@ -1134,6 +1147,117 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   }
 }
 
+// Helper: Consensus and Vote Manager for Live Tournament Tables
+async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
+  const allowedEmojis = ['🇦', '🇧', '🇨'];
+  if (!allowedEmojis.includes(emojiName)) return;
+
+  const { data: schedule, error } = await supabase
+    .from('tournament_match_schedules')
+    .select('*')
+    .eq('message_id', message.id)
+    .single();
+
+  if (error || !schedule || schedule.mode !== 'live' || schedule.status === 'played' || schedule.status === 'confirmed') return;
+
+  // Validate player belongs to this table
+  if (!schedule.player_discord_ids || !schedule.player_discord_ids.includes(user.id)) return;
+
+  let currentVotes = schedule.votes || {};
+  let userSelected = currentVotes[user.id] || [];
+
+  if (isAdd) {
+    if (!userSelected.includes(emojiName)) userSelected.push(emojiName);
+  } else {
+    userSelected = userSelected.filter(e => e !== emojiName);
+  }
+
+  if (userSelected.length > 0) {
+    currentVotes[user.id] = userSelected;
+  } else {
+    delete currentVotes[user.id];
+  }
+
+  const votedUserIds = Object.keys(currentVotes);
+  const votesCount = votedUserIds.length;
+
+  let newStatus = 'pending_votes';
+  let confirmedSlot = null;
+  let confirmedTimeText = null;
+  let confirmedTimestamp = null;
+
+  // Check consensus if all 4 participants have voted
+  if (votesCount >= 4) {
+    const slotScores = { '🇦': 0, '🇧': 0, '🇨': 0 };
+    for (const uid of votedUserIds) {
+      for (const slot of currentVotes[uid]) {
+        if (slotScores[slot] !== undefined) slotScores[slot]++;
+      }
+    }
+
+    // Earliest slot agreed by all 4
+    const winningSlot = allowedEmojis.find(slot => slotScores[slot] >= 4);
+
+    if (winningSlot) {
+      newStatus = 'confirmed';
+      confirmedSlot = winningSlot;
+      const matched = (schedule.suggested_slots || []).find(s => s.label === winningSlot);
+      if (matched) {
+        confirmedTimeText = matched.time_text;
+        const parsed = Date.parse(matched.time_text);
+        if (!isNaN(parsed)) confirmedTimestamp = new Date(parsed).toISOString();
+      }
+    } else {
+      newStatus = 'conflict';
+    }
+  }
+
+  const updatePayload = {
+    votes: currentVotes,
+    votes_count: votesCount,
+    status: newStatus,
+    updated_at: new Date().toISOString()
+  };
+
+  if (confirmedSlot) {
+    updatePayload.confirmed_slot = confirmedSlot;
+    updatePayload.confirmed_time_text = confirmedTimeText;
+    if (confirmedTimestamp) updatePayload.confirmed_timestamp = confirmedTimestamp;
+  }
+
+  await supabase
+    .from('tournament_match_schedules')
+    .update(updatePayload)
+    .eq('id', schedule.id);
+
+  const playerMentions = schedule.player_discord_ids.map(id => `<@${id}>`).join(' ');
+
+  // Announcement on consensus
+  if (newStatus === 'confirmed') {
+    const unixSec = confirmedTimestamp ? Math.floor(new Date(confirmedTimestamp).getTime() / 1000) : null;
+    const timeDisplay = unixSec ? `<t:${unixSec}:F> (<t:${unixSec}:R>)` : `\`${confirmedTimeText}\``;
+
+    const confirmedEmbed = new EmbedBuilder()
+      .setTitle(`📅 Match Time Confirmed: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+      .setColor(0x2ECC71)
+      .setDescription(`All 4 players agreed! Match locked in for **${timeDisplay}**.\n\nPlease let your opponents know on time if you need to reschedule.`)
+      .setTimestamp();
+
+    await message.channel.send({ content: `👥 ${playerMentions}`, embeds: [confirmedEmbed] }).catch(() => {});
+  } else if (newStatus === 'conflict') {
+    const conflictEmbed = new EmbedBuilder()
+      .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+      .setColor(0xE74C3C)
+      .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\nPlease coordinate in this thread or use \`/confirm\` to lock in an agreed time.`)
+      .setTimestamp();
+
+    await message.channel.send({
+      content: `👥 ${playerMentions}\n🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}>`,
+      embeds: [conflictEmbed]
+    }).catch(() => {});
+  }
+}
+
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
@@ -1215,12 +1339,17 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       try {
         await reaction.fetch();
       } catch (err) {
-        console.error('Failed to resolve partial unreaction structure:', err);
+        console.error('Failed to resolve partial reaction structure:', err);
         return;
       }
     }
 
     const message = reaction.message;
+    const emojiName = reaction.emoji.name || reaction.emoji.toString();
+
+    // Check Live Tournament Voting Reactions
+    await handleTournamentVotingReaction(message, user, emojiName, true);
+
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
@@ -1402,6 +1531,11 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     }
 
     const message = reaction.message;
+    const emojiName = reaction.emoji.name || reaction.emoji.toString();
+
+    // Check Live Tournament Voting Reactions Removal
+    await handleTournamentVotingReaction(message, user, emojiName, false);
+
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
