@@ -1,7 +1,12 @@
 const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags } = require('discord.js');
 
-// True Dune Tournament Host / Admin role ID
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421'; 
+
+function extractMatchCode(tournamentNum, roundType, tableIdentifier) {
+  const roundNum = roundType.replace(/\D/g, '') || '1';
+  const tableNum = tableIdentifier.replace(/\D/g, '') || '1';
+  return `${tournamentNum}G${roundNum}T${tableNum}`;
+}
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,12 +19,10 @@ module.exports = {
         .setRequired(true)
     ),
 
-  async execute(interaction, { discordClient }) {
+  async execute(interaction, { supabase, discordClient }) {
     await interaction.deferReply({ flags: [MessageFlags.Ephemeral] });
 
     const member = interaction.member;
-
-    // Security Check
     const isHost = member.roles.cache.has(TOURNAMENT_HOST_ROLE_ID);
     const isAdmin = member.permissions.has('Administrator');
 
@@ -34,6 +37,16 @@ module.exports = {
       return await interaction.editReply({ content: '❌ Please upload a valid `.csv` file.' });
     }
 
+    // Infer tournament_num, round_num, and mode from filename: e.g. "t15_round_1_live_bot_ready.csv"
+    const fileName = attachment.name.toLowerCase();
+    const tNumMatch = fileName.match(/t(\d+)/i);
+    const roundMatch = fileName.match(/round_?(\d+)/i);
+    const isLiveFile = fileName.includes('live');
+    const mode = isLiveFile ? 'live' : 'async';
+
+    const defaultTournamentNum = tNumMatch ? parseInt(tNumMatch[1], 10) : 15;
+    const defaultRoundNum = roundMatch ? parseInt(roundMatch[1], 10) : 1;
+
     try {
       const response = await fetch(attachment.url);
       if (!response.ok) throw new Error('Failed to download file from Discord CDN');
@@ -44,7 +57,7 @@ module.exports = {
         return await interaction.editReply({ content: '❌ The CSV file appears to be empty or contains only headers.' });
       }
 
-      await interaction.editReply({ content: `⚙️ Parsing file and launching private threads. Please wait...` });
+      await interaction.editReply({ content: `⚙️ Parsing **${mode.toUpperCase()}** file and launching private threads for Tournament #${defaultTournamentNum}. Please wait...` });
 
       const parentChannel = interaction.channel;
       const guild = interaction.guild;
@@ -54,24 +67,35 @@ module.exports = {
         const columns = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim());
         if (columns.length < 2) continue;
 
-        const threadTitle = columns[0];
+        const threadTitle = columns[0]; // e.g. "Game 1 Table 6"
         const rawPings = columns[1];
-        const slots = [columns[2], columns[3], columns[4]].filter(s => s && s !== 'No Backup Slot Secured');
+        const slots = [columns[2], columns[3], columns[4]].filter(s => s && s !== 'No Backup Slot Secured' && s !== '');
+
+        // Extract clean round_type and table_identifier
+        const roundType = `Game ${defaultRoundNum}`;
+        const tableIdentifierMatch = threadTitle.match(/Table\s*\d+/i);
+        const tableIdentifier = tableIdentifierMatch ? tableIdentifierMatch[0] : threadTitle;
+        const matchCode = extractMatchCode(defaultTournamentNum, roundType, tableIdentifier);
 
         const resolvedPings = [];
+        const playerDiscordIds = [];
+        const playerNames = [];
         const items = rawPings.split(',').map(p => p.trim());
 
         for (const item of items) {
           if (item.startsWith('@')) {
             const parts = item.split(' ');
             const username = parts[0].slice(1);
-            const ign = parts.slice(1).join(' ');
+            const ign = parts.slice(1).join(' ').replace(/[()]/g, '');
+
+            playerNames.push(ign || username);
 
             try {
               const members = await guild.members.search({ query: username, limit: 1 });
               const matchedMember = members.first();
               if (matchedMember) {
                 resolvedPings.push(`${matchedMember.toString()} (${ign})`);
+                playerDiscordIds.push(matchedMember.id);
               } else {
                 resolvedPings.push(`\`@${username}\` (${ign})`);
               }
@@ -79,80 +103,89 @@ module.exports = {
               resolvedPings.push(`\`@${username}\` (${ign})`);
             }
           } else {
+            const rawName = item.replace(/\*\*/g, '').trim();
+            playerNames.push(rawName);
             resolvedPings.push(item);
           }
         }
 
+        const formattedThreadName = `🏆 [${matchCode}] ${threadTitle}`;
+
         const thread = await parentChannel.threads.create({
-          name: threadTitle,
+          name: formattedThreadName,
           autoArchiveDuration: 1440,
           type: ChannelType.PrivateThread,
-          reason: 'Mass Matchmaking Setup'
+          reason: `Matchmaking Setup ${matchCode}`
         });
 
         const rulesEmbed = new EmbedBuilder()
-          .setTitle(`🏆 Match Coordination: ${threadTitle}`)
+          .setTitle(`🏆 Match Coordination: ${threadTitle} [${matchCode}]`)
           .setColor(0xC9A24B)
           .setTimestamp();
 
-        // Branch text logic depending on whether 3 fields are detected (slots.length > 0)
+        const suggestedSlotsPayload = [];
+
         if (slots.length > 0) {
           // --- LIVE MODE BRANCH ---
           rulesEmbed.setDescription(`Welcome to your tournament matchup! Please read the rules below carefully:`);
-          
+
           const labels = ['🇦', '🇧', '🇨'];
-          const slotText = slots.map((s, idx) => `${labels[idx]} ${s}`).join('\n');
+          const slotText = slots.map((s, idx) => {
+            suggestedSlotsPayload.push({ label: labels[idx], time_text: s });
+            return `${labels[idx]} ${s}`;
+          }).join('\n');
+
           rulesEmbed.addFields({ name: '📅 Suggested Time Slots', value: slotText, inline: false });
 
           rulesEmbed.addFields(
             { 
               name: '⏳ First 24 hours after the tag!', 
-              value: 'Vote for which time slots suits you best. Once it is agreed by all 4 tag an admin to lock in the date. If multiple options are agreed by 4 choose the earliest.\n\nThese times are decided based on what you submitted before on the website, if you believe this to be wrong contact an admin ASAP!\n\nIf you selected the times but now cannot play on any of them try to find a new date through checking people availability. If not we will have to replace you based on giving wrong information.', 
+              value: 'Vote for which time slots suits you best. Once it is agreed by all 4, the bot will automatically lock in the earliest date.\n\nThese times are decided based on what you submitted on the website. If you believe this to be wrong, contact an admin ASAP!\n\nIf you selected times but now cannot play on any of them, use `/confirm` to submit an agreed alternative time.', 
               inline: false 
             },
             { 
-              name: '🔄 Changing your mind', 
-              value: 'If you agreed to a time but something happens try to let your opponent and admin know ASAP preferably at least 24 hours before the time. Same rules as above apply.', 
+              name: '🔄 Rescheduling', 
+              value: 'If you agreed to a time but need to change, let your opponents and an admin know ASAP at least 24 hours before.', 
               inline: false 
             },
             { 
               name: '💤 Player Non-Responsiveness', 
-              value: 'Tag your opponents if they do not respond. If a player fails to respond for over 24 hours, tag our tournament support team listed in the pin above.', 
+              value: 'Tag your opponents if they do not respond. If a player fails to respond for over 24 hours, tag our tournament support team.', 
               inline: false 
             },
             { 
               name: '🎮 Table Setup', 
-              value: 'Any player can host this table. Please coordinate who will host, create the match in-game, and share the lobby password directly in this thread.', 
+              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.', 
               inline: false 
             },
             { 
               name: '📸 Reporting Results', 
-              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**\n\n*(Note: The bot should automatically post the screenshot result in <#1233029532785573918>. Please monitor that channel; if it does not post within a few minutes, please manually upload the screenshot to <#1225554306808287248>.)*', 
+              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**', 
               inline: false 
             }
           );
         } else {
-          // --- ASYNC MODE BRANCH (Matches original script layout entirely) ---
+          // --- ASYNC MODE BRANCH ---
           rulesEmbed.setDescription(`Welcome to your tournament matchup! Please read the rules below carefully:`);
           rulesEmbed.addFields(
             { 
+              name: '🚀 Starting the Match', 
+              value: 'When you are ready to begin, run `/confirm` directly in this thread to mark the game as **Ongoing**.', 
+              inline: false 
+            },
+            { 
               name: '🎮 Table Setup', 
-              value: 'Any player can host this table. Please coordinate who will host, create the match in-game, and share the lobby password directly in this thread.', 
+              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.', 
               inline: false 
             },
             { 
-              name: '💤 Player Non-Responsiveness', 
-              value: 'Tag your opponents if they do not respond. If a player fails to respond or make a move for **over 24 hours**—tag our tournament support team listed in the pin above.', 
-              inline: false 
-            },
-            { 
-              name: '⏳ Turn Pings', 
-              value: 'Tag the next player when it is their turn to keep the match moving.', 
+              name: '💤 Turn Pings & Timers', 
+              value: 'Tag the next player when it is their turn. If a player takes over 24 hours without notice, tag Tournament Support.', 
               inline: false 
             },
             { 
               name: '📸 Reporting Results', 
-              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**\n\n*(Note: The bot should automatically post the screenshot result in <#1233029532785573918>. Please monitor that channel; if it does not post within a few minutes, please manually upload the screenshot to <#1225554306808287248>.)*', 
+              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**', 
               inline: false 
             }
           );
@@ -170,11 +203,29 @@ module.exports = {
           }
         }
 
+        // Insert / Upsert schedule entry into Supabase
+        await supabase
+          .from('tournament_match_schedules')
+          .upsert({
+            tournament_num: defaultTournamentNum,
+            round_type: roundType,
+            table_identifier: tableIdentifier,
+            match_code: matchCode,
+            mode: mode,
+            thread_id: thread.id,
+            message_id: message.id,
+            player_discord_ids: playerDiscordIds,
+            player_names: playerNames,
+            suggested_slots: suggestedSlotsPayload,
+            status: isLiveFile ? 'pending_votes' : 'published',
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'tournament_num,round_type,table_identifier' });
+
         createdCount++;
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
-      await interaction.followUp({ content: `✅ Successfully created **${createdCount}** private threads and posted the match guidelines!`, flags: [MessageFlags.Ephemeral] });
+      await interaction.followUp({ content: `✅ Successfully created **${createdCount}** ${mode.toUpperCase()} private threads and recorded match schedules in the database!`, flags: [MessageFlags.Ephemeral] });
 
     } catch (error) {
       console.error('Failed processing the CSV or creating threads:', error);
