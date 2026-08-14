@@ -1,5 +1,30 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
+function extractUnixSec(value) {
+  if (!value) return null;
+  const str = String(value).trim();
+  const matchDiscord = str.match(/<t:(\d+)/);
+  if (matchDiscord) return parseInt(matchDiscord[1], 10);
+  if (/^\d{10}$/.test(str)) return parseInt(str, 10);
+  if (/^\d{13}$/.test(str)) return Math.floor(parseInt(str, 10) / 1000);
+  const parsed = Date.parse(str);
+  if (!isNaN(parsed)) return Math.floor(parsed / 1000);
+  return null;
+}
+
+function formatDiscordTimestamp(value) {
+  if (!value) return 'Date Confirmed';
+  const str = String(value).trim();
+  // If it's already a Discord timestamp string, return directly without backticks
+  if (str.startsWith('<t:')) return str;
+
+  const unixSec = extractUnixSec(str);
+  if (unixSec) {
+    return `<t:${unixSec}:F> (<t:${unixSec}:R>)`;
+  }
+  return str;
+}
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('tournament-status')
@@ -7,7 +32,7 @@ module.exports = {
     .addIntegerOption((option) =>
       option
         .setName('tournament_num')
-        .setDescription('The tournament number to inspect (e.g. 15)')
+        .setDescription('The tournament number to inspect (e.g. 18)')
         .setRequired(true)
     ),
 
@@ -17,7 +42,6 @@ module.exports = {
     const tNum = interaction.options.getInteger('tournament_num');
 
     try {
-      // 1. Fetch all match schedules for this tournament
       const { data: schedules, error } = await supabase
         .from('tournament_match_schedules')
         .select('*')
@@ -31,9 +55,8 @@ module.exports = {
         });
       }
 
-      const now = new Date();
+      const nowSec = Math.floor(Date.now() / 1000);
 
-      // Categorize matches
       const playedMatches = [];
       const overdueMatches = [];
       const upcomingMatches = [];
@@ -50,33 +73,27 @@ module.exports = {
         } else if (match.status === 'conflict') {
           conflictMatches.push(`• ⚠️ ${threadLink} — **All voted, no mutual slot!**`);
         } else if (match.status === 'ongoing' && match.mode === 'async') {
-          const startedAt = match.confirmed_timestamp ? `<t:${Math.floor(new Date(match.confirmed_timestamp).getTime() / 1000)}:R>` : 'Active';
+          const startedSec = extractUnixSec(match.confirmed_timestamp);
+          const startedAt = startedSec ? `<t:${startedSec}:R>` : 'Active';
           ongoingAsyncMatches.push(`• 🎲 ${threadLink} — Started ${startedAt}`);
         } else if (match.status === 'confirmed') {
-          const startTimestamp = match.confirmed_timestamp ? new Date(match.confirmed_timestamp) : null;
-          const unixSec = startTimestamp ? Math.floor(startTimestamp.getTime() / 1000) : null;
+          const rawTime = match.confirmed_time_text || match.confirmed_timestamp;
+          const unixSec = extractUnixSec(rawTime);
 
-          if (startTimestamp && startTimestamp < now) {
+          if (unixSec && unixSec < nowSec) {
             overdueMatches.push(`• 🔴 ${threadLink} — Started <t:${unixSec}:R> (Awaiting Result)`);
-          } else if (unixSec) {
-            upcomingMatches.push({
-              text: `• 📅 ${threadLink} — <t:${unixSec}:F> (<t:${unixSec}:R>)`,
-              timestamp: startTimestamp.getTime()
-            });
           } else {
             upcomingMatches.push({
-              text: `• 📅 ${threadLink} — \`${match.confirmed_time_text || 'Date Confirmed'}\``,
-              timestamp: 9999999999999
+              text: `• 📅 ${threadLink} — ${formatDiscordTimestamp(rawTime)}`,
+              timestamp: unixSec || 9999999999
             });
           }
         } else {
-          // pending_votes or published
           const count = match.votes_count || 0;
           pendingMatches.push(`• ⏳ ${threadLink} — **${count}/4 Voted**`);
         }
       }
 
-      // Sort upcoming matches chronologically (soonest first)
       upcomingMatches.sort((a, b) => a.timestamp - b.timestamp);
 
       const embed = new EmbedBuilder()
