@@ -113,7 +113,7 @@ module.exports = {
 
         const thread = await parentChannel.threads.create({
           name: formattedThreadName,
-          autoArchiveDuration: 1440,
+          autoArchiveDuration: 10080,
           type: ChannelType.PrivateThread,
           reason: `Matchmaking Setup ${matchCode}`
         });
