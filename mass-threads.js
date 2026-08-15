@@ -37,7 +37,6 @@ module.exports = {
       return await interaction.editReply({ content: '❌ Please upload a valid `.csv` file.' });
     }
 
-    // Infer tournament_num, round_num, and mode from filename: e.g. "t15_round_1_live_bot_ready.csv"
     const fileName = attachment.name.toLowerCase();
     const tNumMatch = fileName.match(/t(\d+)/i);
     const roundMatch = fileName.match(/round_?(\d+)/i);
@@ -67,11 +66,10 @@ module.exports = {
         const columns = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim());
         if (columns.length < 2) continue;
 
-        const threadTitle = columns[0]; // e.g. "Game 1 Table 6"
+        const threadTitle = columns[0];
         const rawPings = columns[1];
         const slots = [columns[2], columns[3], columns[4]].filter(s => s && s !== 'No Backup Slot Secured' && s !== '');
 
-        // Extract clean round_type and table_identifier
         const roundType = `Game ${defaultRoundNum}`;
         const tableIdentifierMatch = threadTitle.match(/Table\s*\d+/i);
         const tableIdentifier = tableIdentifierMatch ? tableIdentifierMatch[0] : threadTitle;
@@ -130,13 +128,11 @@ module.exports = {
           rulesEmbed.setDescription(`Welcome to your tournament matchup! Please read the rules below carefully:`);
 
           const labels = ['🇦', '🇧', '🇨'];
-          const slotText = slots.map((s, idx) => {
+          slots.forEach((s, idx) => {
             suggestedSlotsPayload.push({ label: labels[idx], time_text: s });
-            return `${labels[idx]} ${s}`;
-          }).join('\n');
+          });
 
-          rulesEmbed.addFields({ name: '📅 Suggested Time Slots', value: slotText, inline: false });
-
+          // Rules fields first
           rulesEmbed.addFields(
             { 
               name: '⏳ First 24 hours after the tag!', 
@@ -164,6 +160,19 @@ module.exports = {
               inline: false 
             }
           );
+
+          // Suggested Slots placed at the bottom
+          const slotText = suggestedSlotsPayload.map(s => `${s.label} ${s.time_text}`).join('\n');
+          const nonVoterTags = playerDiscordIds.length > 0
+            ? playerDiscordIds.map(id => `<@${id}>`).join(', ')
+            : 'All Players';
+
+          rulesEmbed.addFields({
+            name: '📅 Suggested Time Slots & Votes',
+            value: `${slotText}\n\n**⏳ Did not vote yet (0/4):**\n${nonVoterTags}`,
+            inline: false
+          });
+
         } else {
           // --- ASYNC MODE BRANCH ---
           rulesEmbed.setDescription(`Welcome to your tournament matchup! Please read the rules below carefully:`);
@@ -203,7 +212,7 @@ module.exports = {
           }
         }
 
-        // Insert / Upsert schedule entry into Supabase
+        // Insert schedule record
         await supabase
           .from('tournament_match_schedules')
           .upsert({
@@ -225,7 +234,7 @@ module.exports = {
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
-      await interaction.followUp({ content: `✅ Successfully created **${createdCount}** ${mode.toUpperCase()} private threads and recorded match schedules in the database!`, flags: [MessageFlags.Ephemeral] });
+      await interaction.followUp({ content: `✅ Successfully created **${createdCount}** ${mode.toUpperCase()} private threads!`, flags: [MessageFlags.Ephemeral] });
 
     } catch (error) {
       console.error('Failed processing the CSV or creating threads:', error);
