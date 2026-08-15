@@ -1327,6 +1327,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
           confirmed_slot: finalWinSlot,
           confirmed_time_text: confirmedTimeText,
           confirmed_timestamp: confirmedTimestamp,
+          reminders_sent: [], // Reset reminder alerts on newly confirmed time
           updated_at: new Date().toISOString()
         })
         .eq('id', fresh.id);
@@ -1376,6 +1377,85 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       content: `👥 ${playerMentions}\n🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}>`,
       embeds: [conflictEmbed]
     }).catch(() => {});
+  }
+}
+
+// -------------------------------------------------------------
+// ⏰ AUTOMATED MATCH REMINDER DISPATCHER (36h, 1h, 5m)
+// -------------------------------------------------------------
+async function checkAndSendMatchReminders() {
+  try {
+    const now = new Date();
+    
+    // Fetch all confirmed live matches that have not yet concluded
+    const { data: matches, error } = await supabase
+      .from('tournament_match_schedules')
+      .select('*')
+      .eq('status', 'confirmed')
+      .not('confirmed_timestamp', 'is', null);
+
+    if (error || !matches || matches.length === 0) return;
+
+    for (const match of matches) {
+      const matchTime = new Date(match.confirmed_timestamp);
+      const diffMs = matchTime.getTime() - now.getTime();
+      const diffMinutes = Math.floor(diffMs / (1000 * 60));
+
+      if (diffMinutes < -60) continue; // Match passed over an hour ago
+
+      const sent = match.reminders_sent || [];
+      let alertStage = null;
+      let alertTitle = '';
+      let alertDesc = '';
+
+      // 1. 36-Hour Reminder (Between 1h and 36h)
+      if (diffMinutes <= 36 * 60 && diffMinutes > 60 && !sent.includes('36h')) {
+        alertStage = '36h';
+        alertTitle = '⏳ 36-Hour Match Reminder';
+        alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
+      }
+      // 2. 1-Hour Reminder (Between 5m and 60m)
+      else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
+        alertStage = '1h';
+        alertTitle = '⏰ 1-Hour Match Reminder';
+        alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\nPlease begin getting ready and coordinate room host details.`;
+      }
+      // 3. 5-Minute Final Call (Between 0m and 5m)
+      else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
+        alertStage = '5m';
+        alertTitle = '🚨 5-Minute Final Call!';
+        alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\nHost, please launch the lobby and share the room password here.`;
+      }
+
+      if (alertStage) {
+        const thread = await discordClient.channels.fetch(match.thread_id).catch(() => null);
+        if (thread) {
+          const playerMentions = (match.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
+
+          const reminderEmbed = new EmbedBuilder()
+            .setTitle(alertTitle)
+            .setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12))
+            .setDescription(alertDesc)
+            .setTimestamp();
+
+          await thread.send({
+            content: `👥 ${playerMentions}`,
+            embeds: [reminderEmbed]
+          }).catch(() => {});
+        }
+
+        // Record reminder alert stage in database
+        await supabase
+          .from('tournament_match_schedules')
+          .update({
+            reminders_sent: [...sent, alertStage],
+            updated_at: new Date().toISOString()
+          })
+          .eq('id', match.id);
+      }
+    }
+  } catch (err) {
+    console.error('Error running match reminder dispatcher:', err);
   }
 }
 
@@ -1724,10 +1804,12 @@ discordClient.once('clientReady', async () => {
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
 
+  // Daily global SP audit sweep
   setInterval(async () => {
     await executeGlobalSpAuditSweep();
   }, 24 * 60 * 60 * 1000);
 
+  // Background lobby countdown polling check (every 30 seconds)
   setInterval(async () => {
     try {
       const nowISO = new Date().toISOString();
@@ -1748,6 +1830,11 @@ discordClient.once('clientReady', async () => {
       console.error('Error running automated countdown polling sweeps:', cronErr);
     }
   }, 30 * 1000);
+
+  // Background Match Reminder Poller (every 60 seconds for 36h, 1h, 5m alerts)
+  setInterval(async () => {
+    await checkAndSendMatchReminders();
+  }, 60 * 1000);
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
