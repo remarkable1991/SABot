@@ -219,14 +219,11 @@ function normalizeDiscordId(value) {
 function generateGoogleCalendarUrl(title, startDate, durationHours = 2) {
   if (!startDate || isNaN(startDate.getTime())) return null;
   const endDate = new Date(startDate.getTime() + durationHours * 60 * 60 * 1000);
-  
   const pad = (n) => String(n).padStart(2, '0');
   const formatUtc = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
-  
   const dates = `${formatUtc(startDate)}/${formatUtc(endDate)}`;
   const text = encodeURIComponent(title);
   const details = encodeURIComponent('Strategy Arena Tournament Match. Coordinate with your tablemates on Discord!');
-  
   return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&dates=${dates}&details=${details}`;
 }
 
@@ -509,10 +506,8 @@ async function announceGame(gameId) {
   }
 
   await channel.send(messagePayload);
-
   await supabase.from('games').update({ announced_to_discord: true }).eq('id', gameId);
 
-  // Auto-mark schedule row as played
   if (payload.game?.tournament_num && payload.tournamentDetails) {
     try {
       await supabase
@@ -573,12 +568,9 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
 }
 
 // -------------------------------------------------------------
-// 🔄 LIVE TOURNAMENT VOTING & SOURCE-OF-TRUTH SYNC
+// 🔄 LIVE TOURNAMENT VOTING & DYNAMIC SLOT CONSENSUS ENGINE
 // -------------------------------------------------------------
 async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
-  const allowedEmojis = ['🇦', '🇧', '🇨'];
-  if (!allowedEmojis.includes(emojiName)) return;
-
   const { data: schedule, error } = await supabase
     .from('tournament_match_schedules')
     .select('*')
@@ -588,7 +580,10 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   if (error || !schedule || schedule.mode !== 'live' || schedule.status === 'played') return;
   if (!schedule.player_discord_ids || !schedule.player_discord_ids.includes(user.id)) return;
 
-  // 1. REBUILD VOTES DIRECTLY FROM DISCORD (Source of Truth - No Race Conditions)
+  // Dynamically extract all available slot labels (🇦, 🇧, 🇨, 🇩, etc.)
+  const availableSlotLabels = (schedule.suggested_slots || []).map(s => s.label);
+  if (!availableSlotLabels.includes(emojiName)) return;
+
   let fetchedMsg = message;
   try {
     fetchedMsg = await message.channel.messages.fetch(schedule.message_id);
@@ -596,10 +591,11 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     console.error('Failed to fetch message for reactions:', err);
   }
 
+  // Rebuild active votes from Discord reaction cache
   const currentVotes = {};
-  for (const emoji of allowedEmojis) {
+  for (const slot of availableSlotLabels) {
     const r = fetchedMsg.reactions.cache.find(
-      react => react.emoji.name === emoji || react.emoji.toString() === emoji
+      react => react.emoji.name === slot || react.emoji.toString() === slot
     );
     if (r) {
       try {
@@ -608,10 +604,10 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
           if (u.bot) continue;
           if (!schedule.player_discord_ids.includes(uid)) continue;
           if (!currentVotes[uid]) currentVotes[uid] = [];
-          if (!currentVotes[uid].includes(emoji)) currentVotes[uid].push(emoji);
+          if (!currentVotes[uid].includes(slot)) currentVotes[uid].push(slot);
         }
       } catch (fErr) {
-        console.error(`Failed to fetch users for reaction ${emoji}:`, fErr);
+        console.error(`Failed fetching voters for ${slot}:`, fErr);
       }
     }
   }
@@ -619,7 +615,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   const votedUserIds = Object.keys(currentVotes);
   const votesCount = votedUserIds.length;
 
-  // 2. UPDATE THE GUIDELINES EMBED IN THE MESSAGE
+  // Update guidelines embed
   try {
     if (fetchedMsg && fetchedMsg.embeds.length > 0) {
       const originalEmbed = fetchedMsg.embeds[0];
@@ -651,18 +647,21 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       await fetchedMsg.edit({ embeds: [updatedEmbed] }).catch(() => {});
     }
   } catch (embedUpdateErr) {
-    console.error('Failed to update live guidelines embed with votes:', embedUpdateErr);
+    console.error('Failed updating guidelines embed:', embedUpdateErr);
   }
 
-  // 3. CHECK CONSENSUS STATUS
-  const slotScores = { '🇦': 0, '🇧': 0, '🇨': 0 };
+  // Count votes per slot
+  const slotScores = {};
+  for (const slot of availableSlotLabels) slotScores[slot] = 0;
+
   for (const uid of votedUserIds) {
     for (const slot of currentVotes[uid]) {
       if (slotScores[slot] !== undefined) slotScores[slot]++;
     }
   }
 
-  const winningSlot = allowedEmojis.find(slot => slotScores[slot] >= 4);
+  // Preferred earliest unanimous slot (4 votes)
+  const winningSlot = availableSlotLabels.find(slot => slotScores[slot] >= 4);
 
   let newStatus = schedule.status;
   if (winningSlot) {
@@ -683,9 +682,8 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     })
     .eq('id', schedule.id);
 
-  // 4. 60-SECOND DEBOUNCE TIMER FOR CONFIRMATION
+  // Debounce lock-in timer
   const debounceKey = `schedule_${schedule.id}`;
-
   if (scheduleDebounceTimers.has(debounceKey)) {
     clearTimeout(scheduleDebounceTimers.get(debounceKey));
     scheduleDebounceTimers.delete(debounceKey);
@@ -704,13 +702,16 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       if (!fresh || fresh.status !== 'confirmed') return;
 
       const freshVotes = fresh.votes || {};
-      const freshScores = { '🇦': 0, '🇧': 0, '🇨': 0 };
+      const freshSlots = (fresh.suggested_slots || []).map(s => s.label);
+      const freshScores = {};
+      for (const slot of freshSlots) freshScores[slot] = 0;
+
       for (const uid of Object.keys(freshVotes)) {
         for (const slot of freshVotes[uid]) {
           if (freshScores[slot] !== undefined) freshScores[slot]++;
         }
       }
-      const finalWinSlot = allowedEmojis.find(s => freshScores[s] >= 4);
+      const finalWinSlot = freshSlots.find(s => freshScores[s] >= 4);
       if (!finalWinSlot) return;
 
       const matchedSlot = (fresh.suggested_slots || []).find(s => s.label === finalWinSlot);
@@ -778,7 +779,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     const conflictEmbed = new EmbedBuilder()
       .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
       .setColor(0xE74C3C)
-      .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\nPlease coordinate in this thread or use \`/confirm\` to lock in an agreed time.`)
+      .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\nPlease coordinate in this thread or use \`/confirm\` to propose or lock in an agreed time.`)
       .setTimestamp();
 
     await fetchedMsg.channel.send({
