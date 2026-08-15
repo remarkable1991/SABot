@@ -138,7 +138,7 @@ const slashCommands = new Map([
 ]);
 
 const pendingGames = new Set();
-const scheduleDebounceTimers = new Map(); // Debounce map for voting updates
+const scheduleDebounceTimers = new Map();
 
 function capitalize(word) {
   if (!word) return '';
@@ -573,7 +573,7 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
 }
 
 // -------------------------------------------------------------
-// 🔄 LIVE TOURNAMENT VOTING & AUTOMATIC SELF-UPDATING EMBED
+// 🔄 LIVE TOURNAMENT VOTING & SOURCE-OF-TRUTH SYNC
 // -------------------------------------------------------------
 async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   const allowedEmojis = ['🇦', '🇧', '🇨'];
@@ -588,27 +588,39 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   if (error || !schedule || schedule.mode !== 'live' || schedule.status === 'played') return;
   if (!schedule.player_discord_ids || !schedule.player_discord_ids.includes(user.id)) return;
 
-  let currentVotes = schedule.votes || {};
-  let userSelected = currentVotes[user.id] || [];
-
-  if (isAdd) {
-    if (!userSelected.includes(emojiName)) userSelected.push(emojiName);
-  } else {
-    userSelected = userSelected.filter(e => e !== emojiName);
+  // 1. REBUILD VOTES DIRECTLY FROM DISCORD (Source of Truth - No Race Conditions)
+  let fetchedMsg = message;
+  try {
+    fetchedMsg = await message.channel.messages.fetch(schedule.message_id);
+  } catch (err) {
+    console.error('Failed to fetch message for reactions:', err);
   }
 
-  if (userSelected.length > 0) {
-    currentVotes[user.id] = userSelected;
-  } else {
-    delete currentVotes[user.id];
+  const currentVotes = {};
+  for (const emoji of allowedEmojis) {
+    const r = fetchedMsg.reactions.cache.find(
+      react => react.emoji.name === emoji || react.emoji.toString() === emoji
+    );
+    if (r) {
+      try {
+        const users = await r.users.fetch();
+        for (const [uid, u] of users) {
+          if (u.bot) continue;
+          if (!schedule.player_discord_ids.includes(uid)) continue;
+          if (!currentVotes[uid]) currentVotes[uid] = [];
+          if (!currentVotes[uid].includes(emoji)) currentVotes[uid].push(emoji);
+        }
+      } catch (fErr) {
+        console.error(`Failed to fetch users for reaction ${emoji}:`, fErr);
+      }
+    }
   }
 
   const votedUserIds = Object.keys(currentVotes);
   const votesCount = votedUserIds.length;
 
-  // 1. UPDATE THE EMBED IN THE PINNED THREAD MESSAGE
+  // 2. UPDATE THE GUIDELINES EMBED IN THE MESSAGE
   try {
-    const fetchedMsg = await message.channel.messages.fetch(schedule.message_id).catch(() => null);
     if (fetchedMsg && fetchedMsg.embeds.length > 0) {
       const originalEmbed = fetchedMsg.embeds[0];
       const updatedEmbed = EmbedBuilder.from(originalEmbed);
@@ -642,7 +654,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     console.error('Failed to update live guidelines embed with votes:', embedUpdateErr);
   }
 
-  // 2. CHECK CONSENSUS STATUS
+  // 3. CHECK CONSENSUS STATUS
   const slotScores = { '🇦': 0, '🇧': 0, '🇨': 0 };
   for (const uid of votedUserIds) {
     for (const slot of currentVotes[uid]) {
@@ -650,7 +662,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     }
   }
 
-  // Pick earliest slot that received 4 votes
   const winningSlot = allowedEmojis.find(slot => slotScores[slot] >= 4);
 
   let newStatus = schedule.status;
@@ -672,7 +683,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     })
     .eq('id', schedule.id);
 
-  // 3. 60-SECOND DEBOUNCE TIMER FOR CONFIRMATION
+  // 4. 60-SECOND DEBOUNCE TIMER FOR CONFIRMATION
   const debounceKey = `schedule_${schedule.id}`;
 
   if (scheduleDebounceTimers.has(debounceKey)) {
@@ -684,7 +695,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     const timer = setTimeout(async () => {
       scheduleDebounceTimers.delete(debounceKey);
 
-      // Re-query database to ensure consensus still holds after 60s
       const { data: fresh } = await supabase
         .from('tournament_match_schedules')
         .select('*')
@@ -753,13 +763,13 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
         );
       }
 
-      await message.channel.send({
+      await fetchedMsg.channel.send({
         content: `👥 ${playerMentions}`,
         embeds: [confirmEmbed],
         components: components
       }).catch(() => {});
 
-    }, 60 * 1000); // 60-second debounce
+    }, 60 * 1000);
 
     scheduleDebounceTimers.set(debounceKey, timer);
 
@@ -771,7 +781,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\nPlease coordinate in this thread or use \`/confirm\` to lock in an agreed time.`)
       .setTimestamp();
 
-    await message.channel.send({
+    await fetchedMsg.channel.send({
       content: `👥 ${playerMentions}\n🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}>`,
       embeds: [conflictEmbed]
     }).catch(() => {});
