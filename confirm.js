@@ -17,6 +17,16 @@ function extractUnixSec(value) {
   return null;
 }
 
+function normalizeSlotInput(input) {
+  if (!input) return '';
+  const clean = input.trim().toUpperCase();
+  const letterMap = {
+    'A': '🇦', 'B': '🇧', 'C': '🇨', 'D': '🇩', 'E': '🇪',
+    'F': '🇫', 'G': '🇬', 'H': '🇭', 'I': '🇮', 'J': '🇯'
+  };
+  return letterMap[clean] || clean;
+}
+
 function generateGoogleCalendarUrl(title, startDate, durationHours = 2) {
   if (!startDate || isNaN(startDate.getTime())) return null;
   const endDate = new Date(startDate.getTime() + durationHours * 60 * 60 * 1000);
@@ -41,7 +51,7 @@ module.exports = {
     .addStringOption((option) =>
       option
         .setName('slot')
-        .setDescription('Select an existing suggested slot')
+        .setDescription('Select an existing suggested slot (e.g. A, B, C, or 🇦, 🇧)')
         .setRequired(false)
     )
     .addIntegerOption((option) =>
@@ -69,7 +79,7 @@ module.exports = {
     const member = interaction.member;
     const channelId = interaction.channelId;
     const inputMatchCode = interaction.options.getString('match_code')?.trim().toUpperCase();
-    const chosenSlotInput = interaction.options.getString('slot')?.trim().toUpperCase();
+    const rawSlotInput = interaction.options.getString('slot');
     const offsetMinutes = interaction.options.getInteger('offset_minutes');
     const customTime = interaction.options.getString('custom_time')?.trim();
     const forceLock = interaction.options.getBoolean('force_lock') || false;
@@ -141,10 +151,15 @@ module.exports = {
       let calculatedTimestamp = null;
       let baseSlotFound = null;
 
-      // Find matching slot if provided
-      if (chosenSlotInput) {
+      // Normalize slot search (supports 'B' matching '🇧')
+      if (rawSlotInput) {
+        const normalizedInput = normalizeSlotInput(rawSlotInput);
+        const upperRaw = rawSlotInput.trim().toUpperCase();
+
         baseSlotFound = existingSlots.find(s => 
-          s.label.includes(chosenSlotInput) || chosenSlotInput.includes(s.label)
+          s.label === normalizedInput ||
+          s.label.toUpperCase().includes(upperRaw) ||
+          normalizeSlotInput(s.label) === normalizedInput
         );
       }
 
@@ -218,7 +233,7 @@ module.exports = {
         return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [forceEmbed], components });
       }
 
-      // 2. PROPOSE NEW OPTION BRANCH (Adds D, E, F... and opens voting)
+      // 2. PROPOSE NEW OPTION (Adds D, E, F... and opens voting)
       const nextEmojiIndex = existingSlots.length;
       const nextEmoji = REGIONAL_EMOJIS[nextEmojiIndex] || `Option ${nextEmojiIndex + 1}`;
 
@@ -278,7 +293,7 @@ module.exports = {
       const proposalEmbed = new EmbedBuilder()
         .setTitle(`💡 New Time Slot Proposed: ${nextEmoji}`)
         .setColor(0xF1C40F)
-        .setDescription(`<@${interaction.user.id}> proposed a new time slot:\n\n**${nextEmoji} ${calculatedTimeText}**\n\nPlease react with ${nextEmoji} on the pinned table post above if you can play at this time!`)
+        .setDescription(`<@${interaction.user.id}> proposed a new time slot:\n\n**${nextEmoji} ${calculatedTimeText}**\n\nPlease react with ${nextEmoji} on the table post above if you can play at this time!`)
         .setTimestamp();
 
       if (threadChannel.id !== interaction.channelId) {
