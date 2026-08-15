@@ -1,6 +1,7 @@
 require('dotenv').config();
 
 const http = require('http');
+// 1. Instantly spin up health check to satisfy Railway web service requirements
 const PORT = process.env.PORT || 3000;
 http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/plain' });
@@ -40,14 +41,16 @@ const MEMBER_SEARCH_LIMIT = 10;
 const DB_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
-const TAG_COOLDOWN_MS = 45 * 60 * 1000;
+const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
+// --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION (T15 & T16) ---
 const TOURNAMENT_ROLE_MAP = {
-  15: '1533819999699865751',
-  16: '1266076612424634571'
+  15: '1533819999699865751', // T15 Registered Role
+  16: '1266076612424634571'  // T16 Registered Role
 };
 
+// --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
 const LEADER_EMOJI_MAP = {
   '"Princess" Yuna Moritani': 'princessyunamoritani',
   'Archduke Armand Ecaz': 'archdukearmandecaz',
@@ -139,6 +142,9 @@ const slashCommands = new Map([
 
 const pendingGames = new Set();
 const scheduleDebounceTimers = new Map();
+let realtimeRetryCount = 0;
+let realtimeChannel = null;
+let reconnectTimer = null;
 
 function capitalize(word) {
   if (!word) return '';
@@ -238,7 +244,10 @@ async function getDatabasePlayerMap(playerName) {
     .select('id, player_key, display_name, username, discord_username, claimed_by, discord_user_id')
     .or(`player_key.eq.${normalized},display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`)
     .limit(10);
-  if (error) return null;
+  if (error) {
+    console.error('Failed player_discord_map lookup for', playerName, error);
+    return null;
+  }
   if (!data || !data.length) return null;
   let best = null;
   let bestScore = 0;
@@ -264,7 +273,7 @@ async function searchGuildMemberByNames(guild, names) {
         const existing = seen.get(member.id);
         if (!existing || score > existing.score) { seen.set(member.id, { member, score }); }
       }
-    } catch (err) {}
+    } catch (err) { console.error('Guild search failed for', query, err); }
   }
   const ranked = Array.from(seen.values()).sort((a, b) => b.score - a.score);
   if (!ranked.length) return null;
@@ -277,7 +286,8 @@ async function persistDiscordUserId(dbMatch, discordUserId) {
   const normalizedId = normalizeDiscordId(discordUserId);
   if (!dbMatch || !dbMatch.id || !normalizedId) return;
   if (normalizeDiscordId(dbMatch.discord_user_id) === normalizedId) return;
-  await supabase.from('player_discord_map').update({ discord_user_id: normalizedId, updated_at: new Date().toISOString() }).eq('id', dbMatch.id);
+  const { error } = await supabase.from('player_discord_map').update({ discord_user_id: normalizedId, updated_at: new Date().toISOString() }).eq('id', dbMatch.id);
+  if (error) { console.error('Failed to persist discord_user_id for', dbMatch.player_key || dbMatch.display_name, error); }
 }
 
 async function resolveMentionForName(guild, playerName) {
@@ -293,9 +303,11 @@ async function resolveMentionForName(guild, playerName) {
 
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
+  
   let attempts = 3;
   let response = null;
   let data = null;
+  
   while (attempts > 0) {
     try {
       const signedUrlResult = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
@@ -304,12 +316,19 @@ async function createDiscordImagePayload(storagePath) {
         response = await fetch(data.signedUrl);
         if (response.ok) break;
       }
-    } catch (fetchErr) {}
+    } catch (fetchErr) {
+      console.error(`Storage asset fetch attempt failed (${attempts} remaining):`, fetchErr);
+    }
     attempts -= 1;
-    if (attempts > 0) await new Promise(resolve => setTimeout(resolve, 2500));
+    if (attempts > 0) {
+      await new Promise(resolve => setTimeout(resolve, 2500));
+    }
   }
 
-  if (!response || !response.ok || !data) return null;
+  if (!response || !response.ok || !data) { 
+    console.error('Failed to retrieve verified asset buffer payload for path:', storagePath); 
+    return null; 
+  }
 
   try {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
@@ -323,9 +342,9 @@ async function createDiscordImagePayload(storagePath) {
       if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false }; }
       buffer = await sharp(buffer).resize({ width: 1280, withoutEnlargement: true }).jpeg({ quality: 62, mozjpeg: true }).toBuffer();
       if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false }; }
-    } catch (compressionError) {}
+    } catch (compressionError) { console.error('Failed to compress screenshot', compressionError); }
     return { attachment: null, imageUrl: data.signedUrl, tooLarge: true };
-  } catch (err) { return { attachment: null, imageUrl: null, tooLarge: false }; }
+  } catch (err) { console.error('Failed to build attachment from screenshot', err); return { attachment: null, imageUrl: null, tooLarge: false }; }
 }
 
 async function buildGameResultPayload(gameId) {
@@ -335,7 +354,7 @@ async function buildGameResultPayload(gameId) {
     .eq('id', gameId)
     .single();
 
-  if (gameError || !game) return null;
+  if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
   
   const { data: results, error: resultsError = null } = await supabase
     .from('game_results')
@@ -343,12 +362,13 @@ async function buildGameResultPayload(gameId) {
     .eq('game_id', gameId)
     .order('placement', { ascending: true });
 
-  if (resultsError || !results || !results.length) return null;
+  if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
   
   let tournamentDetails = null;
   if (game.tournament_num) {
     try {
       const currentPlayers = results.map(r => normalizeName(r.player_name));
+
       const { data: matchRows, error: tourneyError } = await supabase
         .from('tournament_matches')
         .select('round_type, table_identifier, player_name')
@@ -356,10 +376,15 @@ async function buildGameResultPayload(gameId) {
 
       if (!tourneyError && matchRows && matchRows.length > 0) {
         const tablesMap = new Map();
+        
         matchRows.forEach(row => {
           const groupKey = `${row.round_type}||${row.table_identifier}`;
           if (!tablesMap.has(groupKey)) {
-            tablesMap.set(groupKey, { roundType: row.round_type, tableIdentifier: row.table_identifier, players: [] });
+            tablesMap.set(groupKey, {
+              roundType: row.round_type,
+              tableIdentifier: row.table_identifier,
+              players: []
+            });
           }
           tablesMap.get(groupKey).players.push(normalizeName(row.player_name));
         });
@@ -369,41 +394,51 @@ async function buildGameResultPayload(gameId) {
         });
 
         if (matchedTable) {
-          tournamentDetails = { roundType: matchedTable.roundType, tableIdentifier: matchedTable.tableIdentifier };
+          tournamentDetails = {
+            roundType: matchedTable.roundType,
+            tableIdentifier: matchedTable.tableIdentifier
+          };
         }
       }
-    } catch (err) {}
+    } catch (err) {
+      console.error('Error cross-referencing tournament match metadata pairings:', err);
+    }
   }
 
   const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
-  const { data: ratings } = await supabase
+
+  const { data: ratings, error: ratingsError = null } = await supabase
     .from('player_ratings')
     .select('player_key, display_name, game_version, elo')
     .in('player_key', playerKeys)
     .in('game_version', ['overall', game.game_version]);
 
+  if (ratingsError) { console.error('Failed to fetch ratings', ratingsError); }
   const ratingsMap = {};
   for (const row of ratings || []) {
     if (!ratingsMap[row.player_key]) ratingsMap[row.player_key] = {};
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
 
-  const { data: sandboxResults } = await supabase
+  const { data: sandboxResults, error: sandboxResultsError = null } = await supabase
     .from('sandbox_game_results')
     .select('player_name, elo_delta_overall')
     .eq('game_id', gameId);
 
+  if (sandboxResultsError) { console.error('Failed to fetch sandbox results', sandboxResultsError); }
   const sandboxDeltaMap = {};
   for (const row of sandboxResults || []) {
-    sandboxDeltaMap[normalizeName(row.player_name)] = row.elo_delta_overall;
+    const key = normalizeName(row.player_name);
+    sandboxDeltaMap[key] = row.elo_delta_overall;
   }
 
-  const { data: sandboxRatings } = await supabase
+  const { data: sandboxRatings, error: sandboxRatingsError = null } = await supabase
     .from('sandbox_player_ratings')
     .select('player_key, overall_vp_elo')
     .in('player_key', playerKeys)
     .eq('game_version', 'overall');
 
+  if (sandboxRatingsError) { console.error('Failed to fetch sandbox ratings', sandboxRatingsError); }
   const sandboxRatingsMap = {};
   for (const row of sandboxRatings || []) {
     sandboxRatingsMap[row.player_key] = row.overall_vp_elo;
@@ -428,9 +463,11 @@ async function buildEmbed(payload, guild) {
   
   let titleString = `Game Finished - ${modeLabel}`;
   if (game.tournament_num) {
-    titleString = tourney 
-      ? `🏆 Tournament ${game.tournament_num} | ${tourney.roundType} ${tourney.tableIdentifier}`
-      : `🏆 Tournament ${game.tournament_num} Match Finished!`;
+    if (tourney) {
+      titleString = `🏆 Tournament ${game.tournament_num} | ${tourney.roundType} ${tourney.tableIdentifier}`;
+    } else {
+      titleString = `🏆 Tournament ${game.tournament_num} Match Finished!`;
+    }
   }
 
   const matchUrl = game.public_match_id 
@@ -488,13 +525,19 @@ async function announceGame(gameId) {
     .eq('id', gameId)
     .single();
 
-  if (checkGame && checkGame.announced_to_discord === true) return;
+  if (checkGame && checkGame.announced_to_discord === true) {
+    console.log(`Game ${gameId} was already announced. Skipping duplicate.`);
+    return;
+  }
 
   const payload = await buildGameResultPayload(gameId); 
   if (!payload) return;
 
   const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); 
-  if (!channel) return;
+  if (!channel) { 
+    console.error('Could not find target channel', DISCORD_CHANNEL_ID); 
+    return; 
+  }
 
   const built = await buildEmbed(payload, channel.guild); 
   const messagePayload = { embeds: [built.embed] };
@@ -506,8 +549,19 @@ async function announceGame(gameId) {
   }
 
   await channel.send(messagePayload);
-  await supabase.from('games').update({ announced_to_discord: true }).eq('id', gameId);
 
+  const { error: updateErr } = await supabase
+    .from('games')
+    .update({ announced_to_discord: true })
+    .eq('id', gameId);
+
+  if (updateErr) {
+    console.error(`Failed to update announced_to_discord flag for game ${gameId}:`, updateErr);
+  } else {
+    console.log('Announced game and updated database flag:', gameId);
+  }
+
+  // --- AUTO-UPDATE TOURNAMENT SCHEDULE STATUS TO 'PLAYED' ---
   if (payload.game?.tournament_num && payload.tournamentDetails) {
     try {
       await supabase
@@ -519,7 +573,11 @@ async function announceGame(gameId) {
         .eq('tournament_num', payload.game.tournament_num)
         .eq('round_type', payload.tournamentDetails.roundType)
         .eq('table_identifier', payload.tournamentDetails.tableIdentifier);
-    } catch (schedErr) {}
+
+      console.log(`🏆 Auto-marked tournament match schedule as PLAYED: T${payload.game.tournament_num} ${payload.tournamentDetails.roundType} ${payload.tournamentDetails.tableIdentifier}`);
+    } catch (schedErr) {
+      console.error('Failed to update tournament_match_schedules to played:', schedErr);
+    }
   }
 }
 
@@ -528,29 +586,169 @@ function scheduleAnnouncement(gameId) {
   pendingGames.add(gameId);
   setTimeout(async () => {
     pendingGames.delete(gameId);
-    try { await announceGame(gameId); } catch (err) {}
+    try { await announceGame(gameId); } catch (err) { console.error('Error announcing game', gameId, err); }
   }, GAME_ROWS_WAIT_MS);
 }
 
 function startRealtimeListener() {
-  supabase.channel('game_results_inserts').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
-    const gameId = payload?.new?.game_id;
-    if (gameId) scheduleAnnouncement(gameId);
-  }).subscribe();
+  if (reconnectTimer) {
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+  }
+
+  if (realtimeChannel) {
+    console.log('Cleaning up stale Realtime channel...');
+    supabase.removeChannel(realtimeChannel);
+    realtimeChannel = null;
+  }
+
+  realtimeChannel = supabase.channel('game_results_inserts').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
+    const gameId = payload && payload.new ? payload.new.game_id : null; if (gameId) scheduleAnnouncement(gameId);
+  }).subscribe(async (status, err) => {
+    console.log('Supabase realtime subscription status:', status);
+    
+    if (status === 'SUBSCRIBED') { 
+      realtimeRetryCount = 0; 
+
+      try {
+        const tenSecondsAgo = new Date(Date.now() - 10000).toISOString();
+        const { data: unannouncedGames } = await supabase
+          .from('games')
+          .select('id')
+          .eq('announced_to_discord', false)
+          .lt('created_at', tenSecondsAgo)
+          .order('created_at', { ascending: true });
+
+        if (unannouncedGames && unannouncedGames.length > 0) {
+          console.log(`Found ${unannouncedGames.length} missed unannounced games in DB. Processing queue...`);
+          for (const g of unannouncedGames) {
+            scheduleAnnouncement(g.id);
+          }
+        }
+      } catch (catchUpErr) {
+        console.error('Error running reconnect catch-up scan:', catchUpErr);
+      }
+
+      return; 
+    }
+
+    if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+      if (err) { console.error('Realtime error caught:', err); }
+      
+      supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
+      
+      if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
+        console.error('Realtime failed after max retries. Resetting count for fresh attempt...'); 
+        realtimeRetryCount = 0; 
+      }
+      
+      realtimeRetryCount += 1; 
+      const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000);
+      console.log(`Scheduling reconnection in ${delay / 1000}s (Attempt ${realtimeRetryCount})...`);
+
+      if (!reconnectTimer) {
+        reconnectTimer = setTimeout(() => {
+          reconnectTimer = null;
+          startRealtimeListener();
+        }, delay);
+      }
+    }
+  });
 }
 
 function startGlobalDatabaseListener() {
-  supabase.channel('global_db_sync').on('postgres_changes', { event: '*', schema: 'public' }, async (payload) => {
-    const { table, eventType, new: newRecord, old: oldRecord } = payload;
-    if (table === 'tournament_registrations') {
-      const rec = newRecord || oldRecord;
-      if (!rec) return;
-      const targetRoleId = TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)];
-      if (targetRoleId) {
-        await syncSingleUserRole(rec.discord_username, targetRoleId, (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
+  supabase
+    .channel('global_db_sync')
+    .on(
+      'postgres_changes',
+      { event: '*', schema: 'public' },
+      async (payload) => {
+        const { table, eventType, new: newRecord, old: oldRecord } = payload;
+        
+        console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
+
+        // --- REAL-TIME TOURNAMENT REGISTRATION SYNC & UNREGISTER STRIPPING ---
+        if (table === 'tournament_registrations') {
+          const rec = newRecord || oldRecord;
+          if (!rec) return;
+
+          const tNum = Number(rec.tournament_num);
+          const targetRoleId = TOURNAMENT_ROLE_MAP[tNum];
+
+          if (targetRoleId) {
+            const shouldHaveRole = (eventType !== 'DELETE') && (newRecord?.active_on_discord === true);
+            await syncSingleUserRole(rec.discord_username, targetRoleId, shouldHaveRole);
+          }
+        }
+
+        if (!newRecord) return;
+
+        if (table === 'player_sp' && eventType === 'UPDATE') {
+          if (newRecord.is_claimed === true) {
+            const { data: mapRecord } = await supabase
+              .from('player_discord_map')
+              .select('discord_user_id')
+              .eq('player_key', newRecord.player_key)
+              .single();
+
+            const targetDiscordId = mapRecord?.discord_user_id;
+            if (targetDiscordId) {
+              await syncPlayerSpRole(targetDiscordId, Number(newRecord.lifetime_sp));
+            }
+          }
+        }
+
+        if (table === 'sp_events' && eventType === 'INSERT') {
+          try {
+            const event = newRecord;
+            const { data: mapRecord } = await supabase
+              .from('player_discord_map')
+              .select('discord_user_id')
+              .eq('player_key', event.player_key)
+              .single();
+
+            const targetDiscordId = mapRecord?.discord_user_id;
+            const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
+
+            if (notificationChannel && targetDiscordId) {
+              let displayAction = formatActionType(event.action_type);
+              let rewardClarity = 'Standard Reward';
+              if (event.action_type === 'daily_first_message') {
+                rewardClarity = 'Daily Bonus (First message of the day)';
+              } else if (event.action_type === 'first_live_game') {
+                rewardClarity = 'Daily Bonus (First live game of the day)';
+              } else if (event.action_type === 'first_weekly_async') {
+                rewardClarity = 'Weekly Bonus (First async game of the week)';
+              } else if (event.action_type === 'image_upload') {
+                rewardClarity = 'Standard Reward';
+                displayAction = 'Recruitment Proof Posted';
+              } else if (event.action_type === 'match_start_base') {
+                rewardClarity = 'Standard Reward';
+              }
+
+              const alertEmbed = new EmbedBuilder()
+                .setTitle('🪙 Strategy Points Earned!')
+                .setDescription(`Congratulations <@${targetDiscordId}>!\nYou've earned a **${rewardClarity}**!`)
+                .setColor(0xf1c40f)
+                .addFields(
+                  { name: '✨ Action', value: `\`${displayAction}\``, inline: true },
+                  { name: '💰 Reward', value: `**+${event.amount} SP**`, inline: true }
+                )
+                .setTimestamp();
+
+              await notificationChannel.send({ content: `<@${targetDiscordId}>`, embeds: [alertEmbed] });
+            }
+          } catch (err) {
+            console.error('Failed to dispatch real-time SP notification alert:', err);
+          }
+        }
       }
-    }
-  }).subscribe();
+    )
+    .subscribe((status, err) => {
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
+      }
+    });
 }
 
 async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
@@ -562,9 +760,403 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
     const member = await searchGuildMemberByNames(guild, [discordUsername]);
     if (!member) return;
     const hasRole = member.roles.cache.has(roleId);
-    if (shouldHaveRole && !hasRole) await member.roles.add(role);
-    else if (!shouldHaveRole && hasRole) await member.roles.remove(role);
-  } catch (err) {}
+
+    if (shouldHaveRole && !hasRole) {
+      await member.roles.add(role);
+      console.log(`✅ Automated Sync: Added ${role.name} to ${member.user.tag}`);
+    } else if (!shouldHaveRole && hasRole) {
+      await member.roles.remove(role);
+      console.log(`❌ Automated Sync: Stripped/Removed ${role.name} from ${member.user.tag}`);
+    }
+  } catch (err) {
+    console.error(`Error executing automated sync for ${discordUsername}:`, err);
+  }
+}
+
+async function syncPlayerSpRole(discordUserId, lifetimeSp) {
+  if (!discordUserId) return;
+  try {
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    const member = await guild.members.fetch(discordUserId).catch(() => null);
+    if (!member) return;
+
+    const targetRoleConfig = SP_ROLES_CONFIG.find(role => lifetimeSp >= role.min);
+    if (!targetRoleConfig) return;
+
+    const allRoleIds = SP_ROLES_CONFIG.map(r => r.id);
+    const rolesToRemove = allRoleIds.filter(id => id !== targetRoleConfig.id && member.roles.cache.has(id));
+    const shouldAddTarget = !member.roles.cache.has(targetRoleConfig.id);
+
+    if (rolesToRemove.length > 0) {
+      for (const roleId of rolesToRemove) {
+        await member.roles.remove(roleId).catch(() => null);
+      }
+    }
+
+    if (shouldAddTarget) {
+      const targetRole = guild.roles.cache.get(targetRoleConfig.id);
+      if (targetRole) {
+        await member.roles.add(targetRole).catch(() => null);
+        console.log(`🎖️ SP Promotion: Assigned ${targetRole.name} to ${member.user.tag} (${lifetimeSp} SP)`);
+      }
+    }
+  } catch (err) {
+    console.error(`Failed executing unified SP tier validation loops for user ID ${discordUserId}:`, err);
+  }
+}
+
+async function executeGlobalSpAuditSweep() {
+  console.log('🧼 Starting comprehensive background SP role synchronization sweep...');
+  try {
+    const { data: claimedSpRecords, error: spError } = await supabase
+      .from('player_sp')
+      .select('player_key, lifetime_sp')
+      .eq('is_claimed', true);
+
+    if (spError || !claimedSpRecords || !claimedSpRecords.length) return;
+
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+    if (!guild) return;
+
+    for (const record of claimedSpRecords) {
+      let { data: mapRecord } = await supabase
+        .from('player_discord_map')
+        .select('id, discord_user_id, discord_username, display_name, username')
+        .eq('player_key', record.player_key)
+        .maybeSingle();
+
+      let discordId = mapRecord?.discord_user_id;
+
+      if (!discordId && mapRecord) {
+        const searchNames = [
+          mapRecord.discord_username,
+          mapRecord.display_name,
+          mapRecord.username,
+          record.player_key
+        ].filter(Boolean);
+
+        const member = await searchGuildMemberByNames(guild, searchNames);
+        if (member) {
+          discordId = member.id;
+          console.log(`🔗 Sweep Auto-Link: Mapped unclaimed ID for "${record.player_key}" -> ${member.user.tag}`);
+          await persistDiscordUserId(mapRecord, member.id);
+        }
+      }
+
+      if (discordId) {
+        await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
+      }
+    }
+    console.log('🏁 Global background validation check complete.');
+  } catch (err) {
+    console.error('Critical failure running background validation sweeps:', err);
+  }
+}
+
+async function runInitialDatabaseSync() {
+  console.log('🔄 Running initial boot-time synchronization scan...');
+  try {
+    const activeTournamentNums = Object.keys(TOURNAMENT_ROLE_MAP).map(Number);
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+
+    const { data: activeRegs, error } = await supabase
+      .from('tournament_registrations')
+      .select('discord_username, tournament_num')
+      .in('tournament_num', activeTournamentNums)
+      .eq('active_on_discord', true);
+
+    if (error) throw error;
+
+    const activeUserMap = new Map();
+    if (activeRegs && activeRegs.length) {
+      console.log(`Found ${activeRegs.length} active registrations across Tournaments ${activeTournamentNums.join(', ')}.`);
+      for (const reg of activeRegs) {
+        const tNum = Number(reg.tournament_num);
+        const roleId = TOURNAMENT_ROLE_MAP[tNum];
+        if (roleId) {
+          if (!activeUserMap.has(roleId)) activeUserMap.set(roleId, new Set());
+          activeUserMap.get(roleId).add(reg.discord_username.toLowerCase());
+
+          await syncSingleUserRole(reg.discord_username, roleId, true);
+        }
+      }
+    }
+
+    if (guild) {
+      for (const tNum of activeTournamentNums) {
+        const roleId = TOURNAMENT_ROLE_MAP[tNum];
+        const role = guild.roles.cache.get(roleId);
+        const validUsersSet = activeUserMap.get(roleId) || new Set();
+
+        if (role && role.members) {
+          for (const member of role.members.values()) {
+            const memberNames = [member.user.username, member.nickname, member.displayName].filter(Boolean).map(n => n.toLowerCase());
+            const isStillRegistered = memberNames.some(name => validUsersSet.has(name));
+
+            if (!isStillRegistered) {
+              await member.roles.remove(roleId).catch(() => null);
+              console.log(`🧹 Unregistered Cleanup: Stripped role ${role.name} from ${member.user.tag} (No active registration)`);
+            }
+          }
+        }
+      }
+    }
+
+    await executeGlobalSpAuditSweep();
+    console.log('🏁 Boot-time verification sweep complete.');
+  } catch (err) {
+    console.error('Failed executing initial boot-time scan:', err);
+  }
+}
+
+async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
+  if (!discordUserId) return null;
+
+  let { data, error } = await supabase
+    .from('player_discord_map')
+    .select('player_key, claimed_by, id, discord_user_id')
+    .eq('discord_user_id', discordUserId)
+    .maybeSingle();
+
+  if (data) {
+    return { playerKey: data.player_key, userId: data.claimed_by };
+  }
+
+  let member = memberObject;
+  if (!member) {
+    try {
+      const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
+      member = await guild.members.fetch(discordUserId).catch(() => null);
+    } catch (err) {
+      console.error(`Failed to fetch guild member metadata for fallback mapping on ID ${discordUserId}:`, err);
+    }
+  }
+
+  if (!member) return null;
+
+  const candidates = [
+    member.user?.username,
+    member.user?.globalName,
+    member.displayName,
+    member.nickname
+  ].filter(Boolean);
+
+  const orFilters = [
+    ...candidates.map((value) => `discord_username.ilike.${value}`),
+    ...candidates.map((value) => `username.ilike.${value}`),
+    ...candidates.map((value) => `display_name.ilike.${value}`)
+  ];
+
+  const { data: searchData, error: searchError } = await supabase
+    .from('player_discord_map')
+    .select('player_key, claimed_by, id, username, discord_username, display_name, discord_user_id')
+    .or(orFilters.join(','))
+    .limit(10);
+
+  if (searchError || !searchData || !searchData.length) return null;
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const row of searchData) {
+    const score = Math.max(
+      ...candidates.flatMap((candidate) => [
+        similarity(candidate, row.player_key),
+        similarity(candidate, row.display_name),
+        similarity(candidate, row.username),
+        similarity(candidate, row.discord_username)
+      ])
+    );
+
+    if (score > bestScore) {
+      bestMatch = row;
+      bestScore = score;
+    }
+  }
+
+  if (bestMatch && bestScore >= DB_MATCH_THRESHOLD) {
+    console.log(`🔗 Auto-Linking Map: Resolved ${member.user.tag} to database player "${bestMatch.player_key}" (Score: ${bestScore.toFixed(2)})`);
+    await persistDiscordUserId(bestMatch, discordUserId);
+    return { playerKey: bestMatch.player_key, userId: bestMatch.claimed_by };
+  }
+
+  return null;
+}
+
+function formatActionType(action) {
+  return action
+    .split('_')
+    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(' ');
+}
+
+async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
+  try {
+    const { error: eventError } = await supabase
+      .from('sp_events')
+      .insert({
+        player_key: playerKey,
+        user_id: userId || null,
+        action_type: actionType,
+        amount: amount,
+        metadata: metadata
+      });
+
+    if (eventError) throw eventError;
+
+    const { data: currentSp, error: selectError } = await supabase
+      .from('player_sp')
+      .select('lifetime_sp, seasonal_sp')
+      .eq('player_key', playerKey)
+      .single();
+
+    if (selectError) throw selectError;
+
+    const newLifetime = (currentSp?.lifetime_sp || 0) + amount;
+    const newSeasonal = (currentSp?.seasonal_sp || 0) + amount;
+
+    const { error: updateError } = await supabase
+      .from('player_sp')
+      .update({
+        lifetime_sp: newLifetime,
+        seasonal_sp: newSeasonal,
+        updated_at: new Date().toISOString()
+      })
+      .eq('player_key', playerKey);
+
+    if (updateError) throw updateError;
+
+    console.log(`🪙 Awarded +${amount} SP to ${playerKey} for ${actionType}`);
+  } catch (err) {
+    console.error(`Failed to award SP to ${playerKey}:`, err);
+  }
+}
+
+async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
+  let channel = targetChannel;
+  if (!channel) {
+    channel = await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
+  }
+  if (!channel) return;
+
+  const targetMsg = await channel.messages.fetch(lobbyRecord.message_id).catch(() => null);
+  if (!targetMsg || !targetMsg.embeds[0]) return;
+
+  const embedTitle = targetMsg.embeds[0].title || '';
+  const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
+
+  await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
+
+  let players = [...(lobbyRecord.player_ids || [])];
+  let notifications = [...(lobbyRecord.notify_user_ids || [])];
+  const guestPlayers = [...(lobbyRecord.guest_players || [])];
+  const totalCount = players.length + guestPlayers.length;
+
+  const embed = EmbedBuilder.from(targetMsg.embeds[0]);
+  const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+  const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+  const finalRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+
+  const originalDetailsSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0];
+  const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
+  const matchTypeTitle = representsLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+
+  embed.setTitle(matchTypeTitle)
+       .setColor(0x2ecc71)
+       .setFooter(null) 
+       .setFields(
+         { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
+         { name: '🔑 Password', value: lobbyRecord.lobby_password ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
+         { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
+       );
+
+  const labelMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
+  await targetMsg.edit({ content: `🚀 **The match${labelMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+
+  const now = new Date();
+  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+  const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+  const currentUtcDay = now.getUTCDay(); 
+  const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
+  const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
+
+  const unlinkedPlayers = [];
+
+  for (const playerId of players) {
+    const profile = await getPlayerProfileFromDiscord(playerId);
+    if (!profile) {
+      let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; 
+      if (representsLive) {
+        potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; 
+      } else {
+        potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; 
+      }
+      unlinkedPlayers.push({ id: playerId, points: potentialSp });
+      continue;
+    }
+
+    const { data: hourlyMatchEvents } = await supabase
+      .from('sp_events')
+      .select('id')
+      .eq('player_key', profile.playerKey)
+      .eq('action_type', 'match_start_base')
+      .gte('created_at', oneHourAgo);
+
+    if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
+      await awardSP(
+        profile.playerKey,
+        profile.userId,
+        'match_start_base',
+        SP_REWARDS_CONFIG.MATCH_START_BASE.amount,
+        { discord_user_id: playerId, match_id: lobbyRecord.id }
+      );
+    }
+
+    if (representsLive) {
+      const { data: dailyLiveEvents } = await supabase
+        .from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'first_live_game')
+        .gte('created_at', startOfToday);
+
+      if (!dailyLiveEvents || dailyLiveEvents.length === 0) {
+        await awardSP(
+          profile.playerKey,
+          profile.userId,
+          'first_live_game',
+          SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount,
+          { discord_user_id: playerId, match_id: lobbyRecord.id }
+        );
+      }
+    } else {
+      const { data: weeklyAsyncEvents } = await supabase
+        .from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'first_weekly_async')
+        .gte('created_at', startOfThisWeek);
+
+      if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) {
+        await awardSP(
+          profile.playerKey,
+          profile.userId,
+          'first_weekly_async',
+          SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount,
+          { discord_user_id: playerId, match_id: lobbyRecord.id }
+        );
+      }
+    }
+  }
+
+  if (unlinkedPlayers.length > 0) {
+    const warningLines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`);
+    const warningEmbed = new EmbedBuilder()
+      .setTitle('⚠️ Missed Strategy Points!')
+      .setDescription(`${warningLines.join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`)
+      .setColor(0xe74c3c); 
+    await channel.send({ embeds: [warningEmbed] }).catch(() => {});
+  }
 }
 
 // -------------------------------------------------------------
@@ -580,7 +1172,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   if (error || !schedule || schedule.mode !== 'live' || schedule.status === 'played') return;
   if (!schedule.player_discord_ids || !schedule.player_discord_ids.includes(user.id)) return;
 
-  // Dynamically extract all available slot labels (🇦, 🇧, 🇨, 🇩, etc.)
   const availableSlotLabels = (schedule.suggested_slots || []).map(s => s.label);
   if (!availableSlotLabels.includes(emojiName)) return;
 
@@ -591,7 +1182,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     console.error('Failed to fetch message for reactions:', err);
   }
 
-  // Rebuild active votes from Discord reaction cache
+  // Rebuild active votes directly from Discord reaction cache (Source of Truth)
   const currentVotes = {};
   for (const slot of availableSlotLabels) {
     const r = fetchedMsg.reactions.cache.find(
@@ -615,7 +1206,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   const votedUserIds = Object.keys(currentVotes);
   const votesCount = votedUserIds.length;
 
-  // Update guidelines embed
+  // Live-update guidelines embed in the message
   try {
     if (fetchedMsg && fetchedMsg.embeds.length > 0) {
       const originalEmbed = fetchedMsg.embeds[0];
@@ -660,7 +1251,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     }
   }
 
-  // Preferred earliest unanimous slot (4 votes)
   const winningSlot = availableSlotLabels.find(slot => slotScores[slot] >= 4);
 
   let newStatus = schedule.status;
@@ -682,7 +1272,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     })
     .eq('id', schedule.id);
 
-  // Debounce lock-in timer
+  // 60-Second Debounce Lock-in Timer
   const debounceKey = `schedule_${schedule.id}`;
   if (scheduleDebounceTimers.has(debounceKey)) {
     clearTimeout(scheduleDebounceTimers.get(debounceKey));
@@ -796,31 +1386,335 @@ discordClient.on('interactionCreate', async (interaction) => {
       await command.execute(interaction, { supabase, discordClient });
     } catch (error) {
       console.error(`Error running /${interaction.commandName}:`, error);
-      if (interaction.deferred || interaction.replied) await interaction.editReply({ content: 'Something went wrong.' }).catch(() => {});
-      else await interaction.reply({ content: 'Something went wrong.', ephemeral: true }).catch(() => {});
+      const message = 'Something went wrong while processing the command.';
+      if (interaction.deferred || interaction.replied) { await interaction.editReply({ content: message }).catch(() => {}); }
+      else { await interaction.reply({ content: message, ephemeral: true }).catch(() => {}); }
     }
+    return;
+  }
+});
+
+discordClient.on('messageCreate', async (message) => {
+  try {
+    if (message.author.bot || !message.guild) return;
+
+    const profile = await getPlayerProfileFromDiscord(message.author.id);
+    if (!profile) return; 
+
+    const now = new Date();
+    const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+
+    // 1. Daily First Message (10 SP)
+    const { data: dailyTextEvents, error: textErr } = await supabase
+      .from('sp_events')
+      .select('id')
+      .eq('player_key', profile.playerKey)
+      .eq('action_type', 'daily_first_message')
+      .gte('created_at', startOfToday);
+
+    if (!textErr && (!dailyTextEvents || dailyTextEvents.length === 0)) {
+      await awardSP(
+        profile.playerKey,
+        profile.userId,
+        'daily_first_message',
+        SP_REWARDS_CONFIG.DAILY_FIRST_MESSAGE.amount,
+        { discord_user_id: message.author.id, channel_id: message.channel.id }
+      );
+    }
+
+    // 2. Recruitment Proof Image Upload (50 SP)
+    const attachments = Array.from(message.attachments.values());
+    const hasImage = attachments.some(attachment => 
+      (attachment.contentType && attachment.contentType.startsWith('image/')) || 
+      /\.(jpg|jpeg|png|gif|webp)$/i.test(attachment.url)
+    );
+
+    if (message.channel.id === IMAGE_UPLOADS_CHANNEL_ID && hasImage) {
+      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
+
+      const { data: recentImageEvents, error: imgErr } = await supabase
+        .from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'image_upload')
+        .gte('created_at', oneHourAgo);
+
+      if (!imgErr && (!recentImageEvents || recentImageEvents.length === 0)) {
+        await awardSP(
+          profile.playerKey,
+          profile.userId,
+          'image_upload',
+          SP_REWARDS_CONFIG.IMAGE_UPLOAD.amount,
+          { discord_user_id: message.author.id, message_id: message.id }
+        );
+      }
+    }
+  } catch (err) {
+    console.error('Error processing message for SP triggers:', err);
   }
 });
 
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
-    if (reaction.partial) await reaction.fetch();
+
+    if (reaction.partial) {
+      try {
+        await reaction.fetch();
+      } catch (err) {
+        console.error('Failed to resolve partial reaction structure:', err);
+        return;
+      }
+    }
+
+    const message = reaction.message;
     const emojiName = reaction.emoji.name || reaction.emoji.toString();
-    await handleTournamentVotingReaction(reaction.message, user, emojiName, true);
+
+    // Check Live Tournament Voting Reactions
+    await handleTournamentVotingReaction(message, user, emojiName, true);
+
+    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (fetchErr || !lobby || lobby.status !== 'searching') return;
+
+    const embedTitle = message.embeds[0]?.title || '';
+    const isLiveLobby = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
+
+    const emoji = reaction.emoji.name || reaction.emoji;
+    const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
+                        reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
+                        emoji === '🎲' || emoji === '⚔️';
+
+    let players = [...(lobby.player_ids || [])];
+    let notifications = [...(lobby.notify_user_ids || [])];
+    const guestPlayers = [...(lobby.guest_players || [])];
+    let shouldUpdate = false;
+
+    if (isJoinEmoji) {
+      if (!players.includes(user.id)) {
+        const totalCount = players.length + guestPlayers.length;
+        if (totalCount < 4) {
+          players.push(user.id);
+          shouldUpdate = true;
+          if (notifications.length > 0) {
+            await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+          }
+        } else {
+          await reaction.users.remove(user.id).catch(() => {});
+        }
+      }
+    }
+
+    if (emoji === '🎮') {
+      const totalCount = players.length + guestPlayers.length;
+      if (players.includes(user.id) && totalCount >= 2) {
+        await executeLobbyStartSequence(lobby, message.channel);
+        return;
+      }
+    }
+
+    if (emoji === '❌' && user.id === lobby.host_id) {
+      await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      embed.setTitle('❌ Lobby Cancelled')
+           .setColor(0xff0000)
+           .setDescription(`This lobby was cancelled by ${user.username}`);
+      await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [embed] }).catch(() => {});
+      return;
+    }
+
+    if (emoji === '🔔') {
+      if (!notifications.includes(user.id)) {
+        notifications.push(user.id);
+        shouldUpdate = true;
+      }
+    }
+
+    if (emoji === '📢') {
+      const now = new Date();
+      const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
+
+      if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
+        const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
+        await reaction.users.remove(user.id).catch(() => {});
+
+        const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>` }).catch(() => {});
+        setTimeout(() => {
+          cooldownMsg.delete().catch(() => {});
+        }, 5000);
+        return;
+      }
+
+      await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+      lobby.last_prompted_at = now.toISOString();
+
+      let roleMention = isLiveLobby ? `<@&1219666679764877424>` : `<@&1219666516644204554>`;
+
+      const detailsBlock = message.embeds[0]?.fields[0]?.value || '';
+      const modeInformation = detailsBlock.split('\n')[0].replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '').replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '');
+
+      const totalCount = players.length + guestPlayers.length;
+      const hostMentionString = `<@${lobby.host_id}>`;
+      const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
+      const accurateEndEmoji = isLiveLobby ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
+      
+      const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
+
+      const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
+      
+      const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: ['1219666516644204554'] };
+
+      let historyCountMet = false;
+      try {
+        const fetchedHistory = await message.channel.messages.fetch({ after: message.id, limit: 12 }).catch(() => null);
+        if (fetchedHistory && fetchedHistory.size >= 5) {
+          historyCountMet = true;
+        }
+      } catch (err) { console.error(err); }
+
+      if (historyCountMet) {
+        const activeEmbed = EmbedBuilder.from(message.embeds[0]);
+        const newLobbyMsg = await message.channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
+
+        try {
+          const joinEmojiObj = message.guild.emojis.cache.find(e => e.name === (isLiveLobby ? 'LiveDune' : 'AsyncDune'));
+          if (joinEmojiObj) {
+            await newLobbyMsg.react(joinEmojiObj).catch(() => {});
+          } else {
+            await newLobbyMsg.react(isLiveLobby ? '⚔️' : '🎲').catch(() => {});
+          }
+          await newLobbyMsg.react('🎮').catch(() => {});
+          await newLobbyMsg.react('❌').catch(() => {});
+          await newLobbyMsg.react('🔔').catch(() => {});
+          await newLobbyMsg.react('📢').catch(() => {});
+        } catch (rErr) { console.error(rErr); }
+
+        await supabase.from('active_async_matches').update({ message_id: newLobbyMsg.id }).eq('id', lobby.id);
+
+        message.reactions.cache.forEach(async (r) => {
+          await r.users.remove(discordClient.user.id).catch(() => {});
+        });
+
+        const moveRefLink = `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${newLobbyMsg.id}`;
+        await message.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
+      } else {
+        await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
+      }
+
+      await reaction.users.remove(user.id).catch(() => {});
+      return;
+    }
+
+    if (shouldUpdate) {
+      const finalTotal = players.length + guestPlayers.length;
+      let updatePayload = { player_ids: players, notify_user_ids: notifications };
+      
+      if (finalTotal === 4 && !lobby.auto_start_at) {
+        const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
+        updatePayload.auto_start_at = startTargetDate.toISOString();
+        lobby.auto_start_at = startTargetDate.toISOString();
+        
+        const timestampSeconds = Math.floor(startTargetDate.getTime() / 1000);
+        const countdownAlert = `⏳ **Lobby full!** Match will automatically begin <t:${timestampSeconds}:R>. Set up your in-game rooms now!`;
+        
+        await message.channel.send({ content: countdownAlert }).catch(() => {});
+      }
+
+      await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
+
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+      const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+      const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+
+      embed.setFields(
+        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Players (${finalTotal}/4)`, value: fullRosterDisplay, inline: false },
+        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
+      );
+
+      await message.edit({ embeds: [embed] }).catch(() => {});
+    }
   } catch (err) {
-    console.error('Reaction Add Error:', err);
+    console.error('Error handling reaction:', err);
   }
 });
 
 discordClient.on('messageReactionRemove', async (reaction, user) => {
   try {
     if (user.bot) return;
-    if (reaction.partial) await reaction.fetch();
+
+    if (reaction.partial) {
+      try {
+        await reaction.fetch();
+      } catch (err) {
+        console.error('Failed to resolve partial unreaction structure:', err);
+        return;
+      }
+    }
+
+    const message = reaction.message;
     const emojiName = reaction.emoji.name || reaction.emoji.toString();
-    await handleTournamentVotingReaction(reaction.message, user, emojiName, false);
+
+    // Check Live Tournament Voting Reactions Removal
+    await handleTournamentVotingReaction(message, user, emojiName, false);
+
+    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (fetchErr || !lobby || lobby.status !== 'searching') return;
+
+    const emoji = reaction.emoji.name || reaction.emoji;
+    const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
+                        reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
+                        emoji === '🎲' || emoji === '⚔️';
+
+    let players = [...(lobby.player_ids || [])];
+    let notifications = [...(lobby.notify_user_ids || [])];
+    const guestPlayers = [...(lobby.guest_players || [])];
+    let shouldUpdate = false;
+
+    if (isJoinEmoji) {
+      if (players.includes(user.id)) {
+        players = players.filter(id => id !== user.id);
+        notifications = notifications.filter(id => id !== user.id);
+        shouldUpdate = true;
+      }
+    }
+
+    if (emoji === '🔔') {
+      if (!notifications.includes(user.id)) {
+        notifications = notifications.filter(id => id !== user.id);
+        shouldUpdate = true;
+      }
+    }
+
+    if (shouldUpdate) {
+      const finalTotal = players.length + guestPlayers.length;
+      let updatePayload = { player_ids: players, notify_user_ids: notifications };
+      
+      if (finalTotal < 4 && lobby.auto_start_at) {
+        updatePayload.auto_start_at = null;
+        lobby.auto_start_at = null;
+        await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} aborted.` }).catch(() => {});
+      }
+
+      await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
+
+      const embed = EmbedBuilder.from(message.embeds[0]);
+      const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
+      const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+      const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+
+      embed.setFields(
+        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
+        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Players (${finalTotal}/4)`, value: fullRosterDisplay, inline: false },
+        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
+      );
+
+      await message.edit({ embeds: [embed] }).catch(() => {});
+    }
   } catch (err) {
-    console.error('Reaction Remove Error:', err);
+    console.error('Error handling reaction remove:', err);
   }
 });
 
@@ -828,14 +1722,40 @@ discordClient.once('clientReady', async () => {
   console.log('Logged in as', discordClient.user.tag);
   startRealtimeListener();
   startGlobalDatabaseListener();
+  await runInitialDatabaseSync();
+
+  setInterval(async () => {
+    await executeGlobalSpAuditSweep();
+  }, 24 * 60 * 60 * 1000);
+
+  setInterval(async () => {
+    try {
+      const nowISO = new Date().toISOString();
+      const { data: expiredLobbies } = await supabase
+        .from('active_async_matches')
+        .select('*')
+        .eq('status', 'searching')
+        .not('auto_start_at', 'is', null)
+        .lte('auto_start_at', nowISO);
+
+      if (expiredLobbies && expiredLobbies.length > 0) {
+        for (const targetLobby of expiredLobbies) {
+          console.log(`⏱️ Auto-Start triggered for lobby: ${targetLobby.match_id}`);
+          await executeLobbyStartSequence(targetLobby).catch(err => console.error(err));
+        }
+      }
+    } catch (cronErr) {
+      console.error('Error running automated countdown polling sweeps:', cronErr);
+    }
+  }, 30 * 1000);
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
       const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
       const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
       await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), { body: commands });
-      console.log('Successfully registered all commands.');
-    } catch (error) { console.error('Failed to register commands:', error); }
+      console.log('Successfully registered all commands internally.');
+    } catch (error) { console.error('Failed to register commands internally:', error); }
   }
 });
 
