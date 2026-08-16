@@ -1253,6 +1253,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
 
   const winningSlot = availableSlotLabels.find(slot => slotScores[slot] >= 4);
 
+  const previousStatus = schedule.status;
   let newStatus = schedule.status;
   if (winningSlot) {
     newStatus = 'confirmed';
@@ -1336,10 +1337,15 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
       const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
 
+      const tableSlugCode = fresh.match_code && fresh.match_code.includes('G') 
+        ? fresh.match_code.slice(fresh.match_code.indexOf('G')) 
+        : 'table';
+      const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${tableSlugCode}`;
+
       const confirmEmbed = new EmbedBuilder()
         .setTitle(`📅 Match Time Confirmed: ${matchTitle}`)
         .setColor(0x2ECC71)
-        .setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\nPlease let your opponents know on time if you need to reschedule.`)
+        .setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[View Table Details & Availability Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`)
         .setTimestamp();
 
       const components = [];
@@ -1365,12 +1371,75 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
 
     scheduleDebounceTimers.set(debounceKey, timer);
 
-  } else if (newStatus === 'conflict') {
+  } else if (newStatus === 'conflict' && previousStatus !== 'conflict') {
+    // Only send the detailed breakdown on the INITIAL transition into conflict
     const playerMentions = schedule.player_discord_ids.map(id => `<@${id}>`).join(' ');
+    const tableSlugCode = schedule.match_code && schedule.match_code.includes('G') 
+      ? schedule.match_code.slice(schedule.match_code.indexOf('G')) 
+      : 'table';
+    const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${tableSlugCode}`;
+
+    // Rank options by vote count
+    const rankedSlots = (schedule.suggested_slots || []).map((slot) => {
+      const backers = schedule.player_discord_ids.filter(
+        id => currentVotes[id] && currentVotes[id].includes(slot.label)
+      );
+      const missing = schedule.player_discord_ids.filter(id => !backers.includes(id));
+      return {
+        ...slot,
+        count: backers.length,
+        backers,
+        missing
+      };
+    }).sort((a, b) => b.count - a.count);
+
+    const breakdownLines = [];
+
+    const threeVoterSlots = rankedSlots.filter(s => s.count === 3);
+    const twoVoterSlots = rankedSlots.filter(s => s.count === 2);
+    const lowerVoterSlots = rankedSlots.filter(s => s.count < 2);
+
+    if (threeVoterSlots.length > 0) {
+      breakdownLines.push('**🔥 Closest Options (3/4 Players Agreed):**');
+      for (const s of threeVoterSlots) {
+        const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
+        const missingTags = s.missing.map(id => `<@${id}>`).join(', ');
+        breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${agreedTags}\n  ↳ **Needs:** ${missingTags} — *Are you available, or could you play slightly earlier/later?*`);
+      }
+      breakdownLines.push('');
+    }
+
+    if (twoVoterSlots.length > 0) {
+      breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
+      for (const s of twoVoterSlots) {
+        const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
+        breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${agreedTags})`);
+      }
+      breakdownLines.push('');
+    }
+
+    if (threeVoterSlots.length === 0 && twoVoterSlots.length === 0 && lowerVoterSlots.length > 0) {
+      breakdownLines.push('**Current Votes:**');
+      for (const s of lowerVoterSlots) {
+        breakdownLines.push(`• **${s.label} ${s.time_text}** (${s.count}/4 votes)`);
+      }
+      breakdownLines.push('');
+    }
+
+    const howToResolve = [
+      '**💡 How to Resolve & Propose Solutions:**',
+      '1. Check mutual 2-hour free windows on the live map:',
+      `   👉 **[Availability Map for Table ${schedule.table_identifier}](${webUrl})** *(Click any slot to copy its Discord timestamp)*`,
+      '2. Use `/confirm` to propose an adjustment:',
+      '   • **Shift by minutes:** `/confirm slot: B offset_minutes: 60` *(Creates a new option **🇩** shifted +1h)*',
+      '   • **Custom time code:** `/confirm custom_time: <t:1787814000:F>`',
+      '3. Once proposed, everyone can vote on the new option above!'
+    ].join('\n');
+
     const conflictEmbed = new EmbedBuilder()
       .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
       .setColor(0xE74C3C)
-      .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\nPlease coordinate in this thread or use \`/confirm\` to propose or lock in an agreed time.`)
+      .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}${howToResolve}`)
       .setTimestamp();
 
     await fetchedMsg.channel.send({
@@ -1408,13 +1477,13 @@ async function checkAndSendMatchReminders() {
       let alertTitle = '';
       let alertDesc = '';
 
-      // 1. 36-Hour Reminder (Between 1h and 36h)
-      if (diffMinutes <= 36 * 60 && diffMinutes > 60 && !sent.includes('36h')) {
+      // 1. 36-Hour Reminder (Must be within 35h - 36h window to prevent firing on later agreements)
+      if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) {
         alertStage = '36h';
         alertTitle = '⏳ 36-Hour Match Reminder';
         alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
       }
-      // 2. 1-Hour Reminder (Between 5m and 60m)
+      // 2. 1-Hour Reminder (Between 55m and 60m)
       else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
         alertStage = '1h';
         alertTitle = '⏰ 1-Hour Match Reminder';
