@@ -1,5 +1,6 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 
+const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
 // Regional indicator emojis map
@@ -120,6 +121,8 @@ module.exports = {
         ? schedule.player_discord_ids.map(id => `<@${id}>`).join(' ')
         : (schedule.player_names || []).map(name => `**${name}**`).join(', ');
 
+      const topPostLink = `https://discord.com/channels/${DISCORD_GUILD_ID || interaction.guildId}/${schedule.thread_id}/${schedule.message_id}`;
+
       // --- ASYNC MATCH HANDLING ---
       if (schedule.mode === 'async') {
         const nowISO = new Date().toISOString();
@@ -135,7 +138,7 @@ module.exports = {
         const asyncEmbed = new EmbedBuilder()
           .setTitle(`🚀 Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
           .setColor(0x2ECC71)
-          .setDescription(`The game is now **Ongoing**! Turn timers are active. Good luck!`)
+          .setDescription(`The game is now **Ongoing**! Turn timers are active. Good luck!\n\n🔗 **[Jump to Top Post](${topPostLink})**`)
           .setTimestamp();
 
         if (threadChannel.id !== interaction.channelId) {
@@ -200,6 +203,7 @@ module.exports = {
             confirmed_slot: baseSlotFound?.label || 'Manual',
             confirmed_time_text: calculatedTimeText,
             confirmed_timestamp: calculatedTimestamp,
+            reminders_sent: [],
             updated_at: new Date().toISOString()
           })
           .eq('id', schedule.id);
@@ -210,7 +214,7 @@ module.exports = {
         const forceEmbed = new EmbedBuilder()
           .setTitle(`📅 Match Time Confirmed by Host: ${matchTitle}`)
           .setColor(0x2ECC71)
-          .setDescription(`Tournament Host locked in the match for **${calculatedTimeText}**.\n\nPlease let your opponents know on time if you need to reschedule.`)
+          .setDescription(`Tournament Host locked in the match for **${calculatedTimeText}**.\n\n🔗 **[Jump to Top Post](${topPostLink})**\n\nPlease let your opponents know on time if you need to reschedule.`)
           .setTimestamp();
 
         const components = [];
@@ -233,7 +237,7 @@ module.exports = {
         return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [forceEmbed], components });
       }
 
-      // 2. PROPOSE NEW OPTION (Adds D, E, F... and opens voting)
+      // 2. PROPOSE NEW OPTION BRANCH
       const nextEmojiIndex = existingSlots.length;
       const nextEmoji = REGIONAL_EMOJIS[nextEmojiIndex] || `Option ${nextEmojiIndex + 1}`;
 
@@ -244,17 +248,32 @@ module.exports = {
 
       const updatedSlots = [...existingSlots, newSlotEntry];
 
-      // Reset confirmation if already confirmed so table votes on new option
+      // Auto-cast proposer's vote for their own suggestion
+      const currentVotes = schedule.votes || {};
+      if (isParticipant) {
+        const userVotes = currentVotes[interaction.user.id] || [];
+        if (!userVotes.includes(nextEmoji)) {
+          userVotes.push(nextEmoji);
+        }
+        currentVotes[interaction.user.id] = userVotes;
+      }
+
+      const votesCount = Object.keys(currentVotes).length;
+
+      // Update schedule status
       await supabase
         .from('tournament_match_schedules')
         .update({
           suggested_slots: updatedSlots,
+          votes: currentVotes,
+          votes_count: votesCount,
           status: 'pending_votes',
+          reminders_sent: [],
           updated_at: new Date().toISOString()
         })
         .eq('id', schedule.id);
 
-      // 3. UPDATE THE PINNED EMBED IN THREAD & ADD REACTION
+      // 3. UPDATE PINNED MESSAGE EMBED AND ADD REACTIONS
       let fetchedMsg = null;
       try {
         fetchedMsg = await threadChannel.messages.fetch(schedule.message_id);
@@ -264,15 +283,15 @@ module.exports = {
 
           const slotLines = updatedSlots.map(s => {
             const votersForSlot = (schedule.player_discord_ids || []).filter(
-              id => schedule.votes && schedule.votes[id] && schedule.votes[id].includes(s.label)
+              id => currentVotes[id] && currentVotes[id].includes(s.label)
             );
             const voterMentions = votersForSlot.length > 0 ? ` — ${votersForSlot.map(id => `<@${id}>`).join(' ')}` : '';
             return `${s.label} ${s.time_text}${voterMentions}`;
           });
 
-          const nonVoterCount = (schedule.player_discord_ids || []).filter(id => !schedule.votes || !schedule.votes[id] || schedule.votes[id].length === 0);
-          const nonVoterDisplay = nonVoterCount.length > 0
-            ? `\n\n**⏳ Did not vote yet (${(schedule.player_discord_ids?.length || 4) - nonVoterCount.length}/4):**\n${nonVoterCount.map(id => `<@${id}>`).join(', ')}`
+          const nonVoterIds = (schedule.player_discord_ids || []).filter(id => !currentVotes[id] || currentVotes[id].length === 0);
+          const nonVoterDisplay = nonVoterIds.length > 0
+            ? `\n\n**⏳ Did not vote yet (${(schedule.player_discord_ids?.length || 4) - nonVoterIds.length}/4):**\n${nonVoterIds.map(id => `<@${id}>`).join(', ')}`
             : `\n\n**✅ All players voted!**`;
 
           const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
@@ -293,7 +312,7 @@ module.exports = {
       const proposalEmbed = new EmbedBuilder()
         .setTitle(`💡 New Time Slot Proposed: ${nextEmoji}`)
         .setColor(0xF1C40F)
-        .setDescription(`<@${interaction.user.id}> proposed a new time slot:\n\n**${nextEmoji} ${calculatedTimeText}**\n\nPlease react with ${nextEmoji} on the table post above if you can play at this time!`)
+        .setDescription(`<@${interaction.user.id}> proposed a new time slot and voted for it:\n\n**${nextEmoji} ${calculatedTimeText}**\n\n👉 **[Jump to Voting Post to React](${topPostLink})**`)
         .setTimestamp();
 
       if (threadChannel.id !== interaction.channelId) {
