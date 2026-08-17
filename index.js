@@ -32,6 +32,9 @@ const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '123302953278557391
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
+const LIVE_SETTINGS_CHANNEL_ID = '1534192105533083648';
+const ASYNC_SETTINGS_CHANNEL_ID = '1084215554841264169';
+
 const STORAGE_BUCKET = 'match-screenshots';
 const SIGNED_URL_EXPIRY_SECONDS = 300;
 const GAME_ROWS_WAIT_MS = 5000; 
@@ -1341,11 +1344,12 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
         ? fresh.match_code.slice(fresh.match_code.indexOf('G')) 
         : 'table';
       const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${tableSlugCode}`;
+      const firstMessageLink = `https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id}`;
 
       const confirmEmbed = new EmbedBuilder()
         .setTitle(`📅 Match Time Confirmed: ${matchTitle}`)
         .setColor(0x2ECC71)
-        .setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[View Table Details & Availability Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`)
+        .setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](${firstMessageLink})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`)
         .setTimestamp();
 
       const components = [];
@@ -1378,6 +1382,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       ? schedule.match_code.slice(schedule.match_code.indexOf('G')) 
       : 'table';
     const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${tableSlugCode}`;
+    const firstMessageLink = `https://discord.com/channels/${DISCORD_GUILD_ID}/${schedule.thread_id}/${schedule.message_id}`;
 
     // Rank options by vote count
     const rankedSlots = (schedule.suggested_slots || []).map((slot) => {
@@ -1428,12 +1433,13 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
 
     const howToResolve = [
       '**💡 How to Resolve & Propose Solutions:**',
-      '1. Check mutual 2-hour free windows on the live map:',
+      `1. [Jump to the pinned voting post](${firstMessageLink}) to check or update your votes.`,
+      `2. Check mutual 2-hour free windows on the live map:`,
       `   👉 **[Availability Map for Table ${schedule.table_identifier}](${webUrl})** *(Click any slot to copy its Discord timestamp)*`,
-      '2. Use `/confirm` to propose an adjustment:',
+      '3. Use `/confirm` to propose an adjustment:',
       '   • **Shift by minutes:** `/confirm slot: B offset_minutes: 60` *(Creates a new option **🇩** shifted +1h)*',
       '   • **Custom time code:** `/confirm custom_time: <t:1787814000:F>`',
-      '3. Once proposed, everyone can vote on the new option above!'
+      '4. Once proposed, everyone can vote on the new option above!'
     ].join('\n');
 
     const conflictEmbed = new EmbedBuilder()
@@ -1450,77 +1456,124 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
 }
 
 // -------------------------------------------------------------
-// ⏰ AUTOMATED MATCH REMINDER DISPATCHER (36h, 1h, 5m)
+// ⏰ AUTOMATED MATCH REMINDER DISPATCHER (36h, 1h, 5m & Async 24h)
 // -------------------------------------------------------------
 async function checkAndSendMatchReminders() {
   try {
     const now = new Date();
     
-    // Fetch all confirmed live matches that have not yet concluded
+    // --- 1. LIVE MATCH REMINDERS ---
     const { data: matches, error } = await supabase
       .from('tournament_match_schedules')
       .select('*')
+      .eq('mode', 'live')
       .eq('status', 'confirmed')
       .not('confirmed_timestamp', 'is', null);
 
-    if (error || !matches || matches.length === 0) return;
+    if (!error && matches && matches.length > 0) {
+      for (const match of matches) {
+        const matchTime = new Date(match.confirmed_timestamp);
+        const diffMs = matchTime.getTime() - now.getTime();
+        const diffMinutes = Math.floor(diffMs / (1000 * 60));
 
-    for (const match of matches) {
-      const matchTime = new Date(match.confirmed_timestamp);
-      const diffMs = matchTime.getTime() - now.getTime();
-      const diffMinutes = Math.floor(diffMs / (1000 * 60));
+        if (diffMinutes < -60) continue; // Match passed over an hour ago
 
-      if (diffMinutes < -60) continue; // Match passed over an hour ago
+        const sent = match.reminders_sent || [];
+        let alertStage = null;
+        let alertTitle = '';
+        let alertDesc = '';
 
-      const sent = match.reminders_sent || [];
-      let alertStage = null;
-      let alertTitle = '';
-      let alertDesc = '';
-
-      // 1. 36-Hour Reminder (Must be within 35h - 36h window to prevent firing on later agreements)
-      if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) {
-        alertStage = '36h';
-        alertTitle = '⏳ 36-Hour Match Reminder';
-        alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
-      }
-      // 2. 1-Hour Reminder (Between 55m and 60m)
-      else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
-        alertStage = '1h';
-        alertTitle = '⏰ 1-Hour Match Reminder';
-        alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\nPlease begin getting ready and coordinate room host details.`;
-      }
-      // 3. 5-Minute Final Call (Between 0m and 5m)
-      else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
-        alertStage = '5m';
-        alertTitle = '🚨 5-Minute Final Call!';
-        alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\nHost, please launch the lobby and share the room password here.`;
-      }
-
-      if (alertStage) {
-        const thread = await discordClient.channels.fetch(match.thread_id).catch(() => null);
-        if (thread) {
-          const playerMentions = (match.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
-
-          const reminderEmbed = new EmbedBuilder()
-            .setTitle(alertTitle)
-            .setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12))
-            .setDescription(alertDesc)
-            .setTimestamp();
-
-          await thread.send({
-            content: `👥 ${playerMentions}`,
-            embeds: [reminderEmbed]
-          }).catch(() => {});
+        // 36-Hour Reminder (Between 35h and 36h)
+        if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) {
+          alertStage = '36h';
+          alertTitle = '⏳ 36-Hour Match Reminder';
+          alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
+        }
+        // 1-Hour Reminder (Between 5m and 60m)
+        else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
+          alertStage = '1h';
+          alertTitle = '⏰ 1-Hour Match Reminder';
+          alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\nPlease start getting ready and say anything in this chat to let everyone know you will be there.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`;
+        }
+        // 5-Minute Final Call (Between 0m and 5m)
+        else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
+          alertStage = '5m';
+          alertTitle = '🚨 5-Minute Final Call!';
+          alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`;
         }
 
-        // Record reminder alert stage in database
-        await supabase
-          .from('tournament_match_schedules')
-          .update({
-            reminders_sent: [...sent, alertStage],
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', match.id);
+        if (alertStage) {
+          const thread = await discordClient.channels.fetch(match.thread_id).catch(() => null);
+          if (thread) {
+            const playerMentions = (match.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
+
+            const reminderEmbed = new EmbedBuilder()
+              .setTitle(alertTitle)
+              .setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12))
+              .setDescription(alertDesc)
+              .setTimestamp();
+
+            await thread.send({
+              content: `👥 ${playerMentions}`,
+              embeds: [reminderEmbed]
+            }).catch(() => {});
+          }
+
+          await supabase
+            .from('tournament_match_schedules')
+            .update({
+              reminders_sent: [...sent, alertStage],
+              updated_at: new Date().toISOString()
+            })
+            .eq('id', match.id);
+        }
+      }
+    }
+
+    // --- 2. ASYNC 24-HOUR MATCH START REMINDERS ---
+    const { data: asyncMatches, error: asyncErr } = await supabase
+      .from('tournament_match_schedules')
+      .select('*')
+      .eq('mode', 'async')
+      .in('status', ['pending_votes', 'published'])
+      .is('confirmed_timestamp', null);
+
+    if (!asyncErr && asyncMatches && asyncMatches.length > 0) {
+      for (const asyncMatch of asyncMatches) {
+        const lastUpdated = new Date(asyncMatch.updated_at || asyncMatch.created_at);
+        const hoursSinceUpdate = (now.getTime() - lastUpdated.getTime()) / (1000 * 60 * 60);
+
+        // Run reminder every 24 hours until started
+        if (hoursSinceUpdate >= 24) {
+          const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch(() => null);
+          if (thread) {
+            const playerMentions = (asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
+            
+            const startBtn = new ActionRowBuilder().addComponents(
+              new ButtonBuilder()
+                .setCustomId(`async_start_${asyncMatch.id}`)
+                .setLabel('🚀 Mark Game Started')
+                .setStyle(ButtonStyle.Success)
+            );
+
+            const asyncReminderEmbed = new EmbedBuilder()
+              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`)
+              .setColor(0x3498DB)
+              .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>`)
+              .setTimestamp();
+
+            await thread.send({
+              content: `👥 ${playerMentions}`,
+              embeds: [asyncReminderEmbed],
+              components: [startBtn]
+            }).catch(() => {});
+
+            await supabase
+              .from('tournament_match_schedules')
+              .update({ updated_at: now.toISOString() })
+              .eq('id', asyncMatch.id);
+          }
+        }
       }
     }
   } catch (err) {
@@ -1540,6 +1593,48 @@ discordClient.on('interactionCreate', async (interaction) => {
       else { await interaction.reply({ content: message, ephemeral: true }).catch(() => {}); }
     }
     return;
+  }
+
+  // --- BUTTON INTERACTION: ONE-CLICK ASYNC GAME START ---
+  if (interaction.isButton() && interaction.customId.startsWith('async_start_')) {
+    const matchId = interaction.customId.replace('async_start_', '');
+    const { data: schedule, error } = await supabase
+      .from('tournament_match_schedules')
+      .select('*')
+      .eq('id', matchId)
+      .single();
+
+    if (error || !schedule) {
+      return await interaction.reply({ content: '❌ Match schedule not found.', ephemeral: true });
+    }
+
+    const isParticipant = schedule.player_discord_ids && schedule.player_discord_ids.includes(interaction.user.id);
+    const isHost = interaction.member.roles.cache.has(TOURNAMENT_HOST_ROLE_ID);
+    const isAdmin = interaction.member.permissions.has('Administrator');
+
+    if (!isParticipant && !isHost && !isAdmin) {
+      return await interaction.reply({ content: '❌ You must be a player in this match or tournament host to mark it as started.', ephemeral: true });
+    }
+
+    const nowISO = new Date().toISOString();
+    await supabase
+      .from('tournament_match_schedules')
+      .update({
+        status: 'ongoing',
+        confirmed_timestamp: nowISO,
+        updated_at: nowISO
+      })
+      .eq('id', schedule.id);
+
+    const playerMentions = (schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
+    const startEmbed = new EmbedBuilder()
+      .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+      .setColor(0x2ECC71)
+      .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>`)
+      .setTimestamp();
+
+    await interaction.update({ components: [] }).catch(() => {});
+    await interaction.channel.send({ content: `👥 ${playerMentions}`, embeds: [startEmbed] });
   }
 });
 
@@ -1900,7 +1995,7 @@ discordClient.once('clientReady', async () => {
     }
   }, 30 * 1000);
 
-  // Background Match Reminder Poller (every 60 seconds for 36h, 1h, 5m alerts)
+  // Background Match Reminder Poller (every 60 seconds for 36h, 1h, 5m & Async 24h)
   setInterval(async () => {
     await checkAndSendMatchReminders();
   }, 60 * 1000);
