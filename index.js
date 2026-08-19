@@ -225,6 +225,18 @@ function normalizeDiscordId(value) {
   return /^\d{17,20}$/.test(id) ? id : null;
 }
 
+function extractUnixSec(value) {
+  if (!value) return null;
+  const str = String(value).trim();
+  const matchDiscord = str.match(/<t:(\d+)/);
+  if (matchDiscord) return parseInt(matchDiscord[1], 10);
+  if (/^\d{10}$/.test(str)) return parseInt(str, 10);
+  if (/^\d{13}$/.test(str)) return Math.floor(parseInt(str, 10) / 1000);
+  const parsed = Date.parse(str);
+  if (!isNaN(parsed)) return Math.floor(parsed / 1000);
+  return null;
+}
+
 function generateGoogleCalendarUrl(title, startDate, durationHours = 2) {
   if (!startDate || isNaN(startDate.getTime())) return null;
   const endDate = new Date(startDate.getTime() + durationHours * 60 * 60 * 1000);
@@ -1499,7 +1511,7 @@ async function checkAndSendMatchReminders() {
         else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
           alertStage = '5m';
           alertTitle = '🚨 5-Minute Final Call!';
-          alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`;
+          alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`;
         }
 
         if (alertStage) {
@@ -1559,7 +1571,7 @@ async function checkAndSendMatchReminders() {
             const asyncReminderEmbed = new EmbedBuilder()
               .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`)
               .setColor(0x3498DB)
-              .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>`)
+              .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
               .setTimestamp();
 
             await thread.send({
@@ -1630,7 +1642,7 @@ discordClient.on('interactionCreate', async (interaction) => {
     const startEmbed = new EmbedBuilder()
       .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
       .setColor(0x2ECC71)
-      .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>`)
+      .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
       .setTimestamp();
 
     await interaction.update({ components: [] }).catch(() => {});
