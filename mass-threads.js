@@ -1,8 +1,51 @@
 const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags } = require('discord.js');
 
-const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421'; 
+const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
+
+function parseRoundAndTable(threadTitle, fileName, defaultRoundNum) {
+  const cleanTitle = threadTitle.trim();
+  const lowerTitle = cleanTitle.toLowerCase();
+  const lowerFile = fileName.toLowerCase();
+
+  const isFinals = lowerTitle.includes('semi') || lowerTitle.includes('grand') || lowerTitle.includes('final') ||
+                  lowerFile.includes('semi') || lowerFile.includes('grand') || lowerFile.includes('final') || lowerFile.includes('playoff');
+
+  if (isFinals) {
+    const roundType = 'Finals';
+    let tableIdentifier = cleanTitle;
+
+    if (/grand/i.test(cleanTitle)) {
+      tableIdentifier = 'Grand Final!';
+    } else if (/semi\s*final\s*1/i.test(cleanTitle) || /sf\s*1/i.test(cleanTitle) || /semi\s*1/i.test(cleanTitle)) {
+      tableIdentifier = 'Semi Final 1';
+    } else if (/semi\s*final\s*2/i.test(cleanTitle) || /sf\s*2/i.test(cleanTitle) || /semi\s*2/i.test(cleanTitle)) {
+      tableIdentifier = 'Semi Final 2';
+    } else if (/semi\s*final\s*(\d+)/i.test(cleanTitle)) {
+      const num = cleanTitle.match(/semi\s*final\s*(\d+)/i)[1];
+      tableIdentifier = `Semi Final ${num}`;
+    }
+
+    return { roundType, tableIdentifier, isFinals: true };
+  }
+
+  // Swiss Game Rounds (Game 1, Game 2, Game 3...)
+  const roundMatch = cleanTitle.match(/game\s*(\d+)|round\s*(\d+)/i);
+  const roundNum = roundMatch ? (roundMatch[1] || roundMatch[2]) : defaultRoundNum;
+  const roundType = `Game ${roundNum}`;
+
+  const tableMatch = cleanTitle.match(/table\s*(\d+)/i);
+  const tableIdentifier = tableMatch ? `Table ${tableMatch[1]}` : cleanTitle;
+
+  return { roundType, tableIdentifier, isFinals: false };
+}
 
 function extractMatchCode(tournamentNum, roundType, tableIdentifier) {
+  if (roundType === 'Finals') {
+    if (/grand/i.test(tableIdentifier)) return `${tournamentNum}GT`;
+    const sfNum = tableIdentifier.replace(/\D/g, '') || '1';
+    return `${tournamentNum}GT${sfNum}`;
+  }
+
   const roundNum = roundType.replace(/\D/g, '') || '1';
   const tableNum = tableIdentifier.replace(/\D/g, '') || '1';
   return `${tournamentNum}G${roundNum}T${tableNum}`;
@@ -39,12 +82,12 @@ module.exports = {
 
     const fileName = attachment.name.toLowerCase();
     const tNumMatch = fileName.match(/t(\d+)/i);
-    const roundMatch = fileName.match(/round_?(\d+)/i);
+    const roundMatch = fileName.match(/round_?(\d+)|game_?(\d+)/i);
     const isLiveFile = fileName.includes('live');
     const mode = isLiveFile ? 'live' : 'async';
 
-    const defaultTournamentNum = tNumMatch ? parseInt(tNumMatch[1], 10) : 15;
-    const defaultRoundNum = roundMatch ? parseInt(roundMatch[1], 10) : 1;
+    const defaultTournamentNum = tNumMatch ? parseInt(tNumMatch[1], 10) : 16;
+    const defaultRoundNum = roundMatch ? parseInt(roundMatch[1] || roundMatch[2], 10) : 1;
 
     try {
       const response = await fetch(attachment.url);
@@ -56,7 +99,7 @@ module.exports = {
         return await interaction.editReply({ content: '❌ The CSV file appears to be empty or contains only headers.' });
       }
 
-      await interaction.editReply({ content: `⚙️ Parsing **${mode.toUpperCase()}** file and launching private threads for Tournament #${defaultTournamentNum}. Please wait...` });
+      await interaction.editReply({ content: `⚙️ Parsing **${mode.toUpperCase()}** file and launching private threads for Tournament #${defaultTournamentNum}...` });
 
       const parentChannel = interaction.channel;
       const guild = interaction.guild;
@@ -66,13 +109,11 @@ module.exports = {
         const columns = lines[i].split(/,(?=(?:(?:[^"]*"){2})*[^"]*$)/).map(c => c.replace(/^"|"$/g, '').trim());
         if (columns.length < 2) continue;
 
-        const threadTitle = columns[0];
+        const rawThreadTitle = columns[0];
         const rawPings = columns[1];
         const slots = [columns[2], columns[3], columns[4]].filter(s => s && s !== 'No Backup Slot Secured' && s !== '');
 
-        const roundType = `Game ${defaultRoundNum}`;
-        const tableIdentifierMatch = threadTitle.match(/Table\s*\d+/i);
-        const tableIdentifier = tableIdentifierMatch ? tableIdentifierMatch[0] : threadTitle;
+        const { roundType, tableIdentifier, isFinals } = parseRoundAndTable(rawThreadTitle, fileName, defaultRoundNum);
         const matchCode = extractMatchCode(defaultTournamentNum, roundType, tableIdentifier);
 
         const resolvedPings = [];
@@ -107,7 +148,8 @@ module.exports = {
           }
         }
 
-        const formattedThreadName = `🏆 [${matchCode}] ${threadTitle}`;
+        const displayThreadTitle = isFinals ? `${roundType} · ${tableIdentifier}` : `${roundType} · ${tableIdentifier}`;
+        const formattedThreadName = `🏆 [${matchCode}] ${displayThreadTitle}`;
 
         const thread = await parentChannel.threads.create({
           name: formattedThreadName,
@@ -117,14 +159,13 @@ module.exports = {
         });
 
         const rulesEmbed = new EmbedBuilder()
-          .setTitle(`🏆 Match Coordination: ${threadTitle} [${matchCode}]`)
+          .setTitle(`🏆 Match Coordination: ${displayThreadTitle} [${matchCode}]`)
           .setColor(0xC9A24B)
           .setTimestamp();
 
         const suggestedSlotsPayload = [];
 
         if (slots.length > 0) {
-          // --- LIVE MODE BRANCH ---
           rulesEmbed.setDescription(`Welcome to your tournament matchup! Please read the rules below carefully:`);
 
           const labels = ['🇦', '🇧', '🇨'];
@@ -132,36 +173,34 @@ module.exports = {
             suggestedSlotsPayload.push({ label: labels[idx], time_text: s });
           });
 
-          // Rules fields first
           rulesEmbed.addFields(
-            { 
-              name: '⏳ First 24 hours after the tag!', 
-              value: 'Vote for which time slots suits you best. Once it is agreed by all 4, the bot will automatically lock in the earliest date.\n\nThese times are decided based on what you submitted on the website. If you believe this to be wrong, contact an admin ASAP!\n\nIf you selected times but now cannot play on any of them, use `/confirm` to submit an agreed alternative time.', 
-              inline: false 
+            {
+              name: '⏳ First 24 hours after the tag!',
+              value: 'Vote for which time slot suits you best. Once agreed by all 4, the bot will automatically lock in the earliest date.\n\nThese times are decided based on what you submitted on the website. If you believe this to be wrong, contact an admin ASAP!\n\nIf you selected times but now cannot play on any of them, use `/confirm` to submit an agreed alternative time.',
+              inline: false
             },
-            { 
-              name: '🔄 Rescheduling', 
-              value: 'If you agreed to a time but need to change, let your opponents and an admin know ASAP at least 24 hours before.', 
-              inline: false 
+            {
+              name: '🔄 Rescheduling',
+              value: 'If you agreed to a time but need to change, let your opponents and an admin know ASAP at least 24 hours before.',
+              inline: false
             },
-            { 
-              name: '💤 Player Non-Responsiveness', 
-              value: 'Tag your opponents if they do not respond. If a player fails to respond for over 24 hours, tag our tournament support team.', 
-              inline: false 
+            {
+              name: '💤 Player Non-Responsiveness',
+              value: 'Tag your opponents if they do not respond. If a player fails to respond for over 24 hours, tag our tournament support team.',
+              inline: false
             },
-            { 
-              name: '🎮 Table Setup', 
-              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.', 
-              inline: false 
+            {
+              name: '🎮 Table Setup',
+              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.',
+              inline: false
             },
-            { 
-              name: '📸 Reporting Results', 
-              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**', 
-              inline: false 
+            {
+              name: '📸 Reporting Results',
+              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**',
+              inline: false
             }
           );
 
-          // Suggested Slots placed at the bottom
           const slotText = suggestedSlotsPayload.map(s => `${s.label} ${s.time_text}`).join('\n');
           const nonVoterTags = playerDiscordIds.length > 0
             ? playerDiscordIds.map(id => `<@${id}>`).join(', ')
@@ -174,28 +213,27 @@ module.exports = {
           });
 
         } else {
-          // --- ASYNC MODE BRANCH ---
           rulesEmbed.setDescription(`Welcome to your tournament matchup! Please read the rules below carefully:`);
           rulesEmbed.addFields(
-            { 
-              name: '🚀 Starting the Match', 
-              value: 'When you are ready to begin, run `/confirm` directly in this thread to mark the game as **Ongoing**.', 
-              inline: false 
+            {
+              name: '🚀 Starting the Match',
+              value: 'When you are ready to begin, run `/confirm` directly in this thread or click **Mark Game Started** to mark the game as **Ongoing**.',
+              inline: false
             },
-            { 
-              name: '🎮 Table Setup', 
-              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.', 
-              inline: false 
+            {
+              name: '🎮 Table Setup',
+              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.',
+              inline: false
             },
-            { 
-              name: '💤 Turn Pings & Timers', 
-              value: 'Tag the next player when it is their turn. If a player takes over 24 hours without notice, tag Tournament Support.', 
-              inline: false 
+            {
+              name: '💤 Turn Pings & Timers',
+              value: 'Tag the next player when it is their turn. If a player takes over 24 hours without notice, tag Tournament Support.',
+              inline: false
             },
-            { 
-              name: '📸 Reporting Results', 
-              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**', 
-              inline: false 
+            {
+              name: '📸 Reporting Results',
+              value: 'Once the game concludes, upload your final screenshot to:\n🔗 **[dunestats.cc/tournament](https://dunestats.cc/tournament)**',
+              inline: false
             }
           );
         }
@@ -212,7 +250,7 @@ module.exports = {
           }
         }
 
-        // Insert schedule record
+        // Insert or update schedule record with clean round_type & table_identifier
         await supabase
           .from('tournament_match_schedules')
           .upsert({
