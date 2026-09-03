@@ -31,6 +31,7 @@ const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '1233029532785573918';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE_URL || 'https://pub-6fb62f34a2e3491fa0c7c71cc9a969fd.r2.dev';
 
 const LIVE_SETTINGS_CHANNEL_ID = '1534192105533083648';
 const ASYNC_SETTINGS_CHANNEL_ID = '1084215554841264169';
@@ -318,21 +319,18 @@ async function resolveMentionForName(guild, playerName) {
 
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
-  
+
+  const publicUrl = `${R2_PUBLIC_BASE}/${storagePath}`;
+
   let attempts = 3;
   let response = null;
-  let data = null;
-  
+
   while (attempts > 0) {
     try {
-      const signedUrlResult = await supabase.storage.from(STORAGE_BUCKET).createSignedUrl(storagePath, SIGNED_URL_EXPIRY_SECONDS);
-      if (!signedUrlResult.error && signedUrlResult.data?.signedUrl) {
-        data = signedUrlResult.data;
-        response = await fetch(data.signedUrl);
-        if (response.ok) break;
-      }
+      response = await fetch(publicUrl);
+      if (response.ok) break;
     } catch (fetchErr) {
-      console.error(`Storage asset fetch attempt failed (${attempts} remaining):`, fetchErr);
+      console.error(`R2 asset fetch attempt failed (${attempts} remaining):`, fetchErr);
     }
     attempts -= 1;
     if (attempts > 0) {
@@ -340,15 +338,15 @@ async function createDiscordImagePayload(storagePath) {
     }
   }
 
-  if (!response || !response.ok || !data) { 
-    console.error('Failed to retrieve verified asset buffer payload for path:', storagePath); 
-    return null; 
+  if (!response || !response.ok) {
+    console.error('Failed to retrieve verified asset buffer payload for path:', storagePath);
+    return null;
   }
 
   try {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     const maxBytes = Math.floor(7.5 * 1024 * 1024);
-    if (!contentType.startsWith('image/')) { return { attachment: null, imageUrl: data.signedUrl, tooLarge: false }; }
+    if (!contentType.startsWith('image/')) { return { attachment: null, imageUrl: publicUrl, tooLarge: false }; }
     const arrayBuffer = await response.arrayBuffer();
     let buffer = Buffer.from(arrayBuffer);
     if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }), imageUrl: null, tooLarge: false }; }
@@ -358,7 +356,7 @@ async function createDiscordImagePayload(storagePath) {
       buffer = await sharp(buffer).resize({ width: 1280, withoutEnlargement: true }).jpeg({ quality: 62, mozjpeg: true }).toBuffer();
       if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false }; }
     } catch (compressionError) { console.error('Failed to compress screenshot', compressionError); }
-    return { attachment: null, imageUrl: data.signedUrl, tooLarge: true };
+    return { attachment: null, imageUrl: publicUrl, tooLarge: true };
   } catch (err) { console.error('Failed to build attachment from screenshot', err); return { attachment: null, imageUrl: null, tooLarge: false }; }
 }
 
