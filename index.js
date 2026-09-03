@@ -162,6 +162,7 @@ const slashCommands = new Map([
 ]);
 
 const pendingGames = new Set();
+const pendingScanRefresh = new Set();
 const scheduleDebounceTimers = new Map();
 let realtimeRetryCount = 0;
 let realtimeChannel = null;
@@ -727,6 +728,31 @@ async function announceOrUpdateScanResult(gameId) {
   else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
 }
 
+// Debounced refresh triggered by game_results INSERT/UPDATE (e.g. a corrected score,
+// or the 4 initial rows landing in quick succession). Only refreshes a game that has
+// ALREADY been scanned (ai_scan_status !== 'No') — never posts a brand new message here,
+// that's still exclusively driven by the ai_scan_status change handler.
+function scheduleScanRefresh(gameId) {
+  if (!gameId || pendingScanRefresh.has(gameId)) return;
+  pendingScanRefresh.add(gameId);
+  setTimeout(async () => {
+    pendingScanRefresh.delete(gameId);
+    try {
+      const { data: game, error } = await supabase
+        .from('games')
+        .select('ai_scan_status')
+        .eq('id', gameId)
+        .single();
+
+      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+
+      await announceOrUpdateScanResult(gameId);
+    } catch (err) {
+      console.error('Error refreshing scan result after game_results change', gameId, err);
+    }
+  }, GAME_ROWS_WAIT_MS);
+}
+
 function startRealtimeListener() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -830,6 +856,12 @@ function startGlobalDatabaseListener() {
               console.error('Error announcing/updating scan result for game', newRecord.id, scanErr);
             }
           }
+        }
+
+        // --- GAME_RESULTS CHANGED -> REFRESH AN ALREADY-POSTED SCAN RESULT MESSAGE ---
+        // (e.g. an admin correction to points/elo/faction data after the scan already posted)
+        if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) {
+          scheduleScanRefresh(newRecord.game_id);
         }
 
         if (!newRecord) return;
