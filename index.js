@@ -31,13 +31,16 @@ const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '1233029532785573918';
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
-const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE_URL || 'https://pub-f1cf1291e80f47448517d28bc5cb51b3.r2.dev';
 
 const LIVE_SETTINGS_CHANNEL_ID = '1534192105533083648';
 const ASYNC_SETTINGS_CHANNEL_ID = '1084215554841264169';
 
-const STORAGE_BUCKET = 'match-screenshots';
-const SIGNED_URL_EXPIRY_SECONDS = 300;
+// --- R2 PUBLIC BUCKET CONFIG ---
+// Match-screenshots bucket (regular per-game screenshot attached to the finished-game embed)
+const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE_URL || 'https://pub-f1cf1291e80f47448517d28bc5cb51b3.r2.dev';
+// Matches bucket (AI-scanned full-board "content area" screenshot, keyed by public_match_id)
+const R2_MATCHES_BASE = process.env.R2_MATCHES_BASE_URL || 'https://pub-6fb62f34a2e3491fa0c7c71cc9a969fd.r2.dev';
+
 const GAME_ROWS_WAIT_MS = 5000; 
 const REALTIME_RETRY_DELAY_MS = 5000;
 const REALTIME_MAX_RETRIES = 10;
@@ -47,6 +50,20 @@ const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
+
+// --- AI SCAN STATUS ANNOUNCEMENT CONFIG ---
+const SCAN_RESULTS_CHANNEL_ID = '1519019834011160576';
+const AI_SCAN_IGNORED_STATUS = 'No'; // default value on submission, never announced
+const SCAN_STATUS_TITLES = {
+  'Yes': '✅ Match Verified',
+  'Issue detected': '⚠️ Issue Detected',
+  'Manually reviewed': '🔍 Manually Reviewed'
+};
+const SCAN_STATUS_COLORS = {
+  'Yes': 0x2ECC71,
+  'Issue detected': 0xE74C3C,
+  'Manually reviewed': 0x9B59B6
+};
 
 // --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION (T15 & T16) ---
 const TOURNAMENT_ROLE_MAP = {
@@ -317,6 +334,7 @@ async function resolveMentionForName(guild, playerName) {
   return null;
 }
 
+// --- R2 IMAGE FETCH (match-screenshots bucket, used by the finished-game embed) ---
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
 
@@ -603,6 +621,112 @@ function scheduleAnnouncement(gameId) {
   }, GAME_ROWS_WAIT_MS);
 }
 
+// -------------------------------------------------------------
+// 🔍 AI SCAN STATUS ANNOUNCEMENT (post + live-edit as status changes)
+// -------------------------------------------------------------
+function buildFactionLine(row) {
+  const factions = [
+    ['Emperor', row.emperor_level, row.emperor_alliance],
+    ['Guild', row.spacing_guild_level, row.spacing_guild_alliance],
+    ['Bene Gesserit', row.bene_gesserit_level, row.bene_gesserit_alliance],
+    ['Fremen', row.fremen_level, row.fremen_alliance]
+  ];
+  const parts = factions
+    .filter(([, level]) => level > 0)
+    .map(([name, level, alliance]) => `${name} Lv${level}${alliance ? ' 👑' : ''}`);
+  return parts.length ? parts.join(' · ') : null;
+}
+
+function buildScanResultEmbed(game, results) {
+  // Ordered by table slot, not placement
+  const sorted = [...results].sort((a, b) => (a.player_slot ?? 0) - (b.player_slot ?? 0));
+
+  const lines = sorted.map((row) => {
+    const medal = getPlacementEmoji ? null : null; // placeholder to avoid confusion with guild-emoji version below
+    const placementLabel = { 1: '🥇', 2: '🥈', 3: '🥉', 4: '4️⃣' }[row.placement] || row.placement;
+
+    const badges = [
+      row.has_first_player ? '✅' : '',
+      row.has_high_council ? '🏛️ High Council' : '',
+      row.has_swordmaster ? '⚔️ Swordmaster' : ''
+    ].filter(Boolean).join('  ');
+
+    let block = `${placementLabel} **${row.player_name}** — ${row.leader_name || 'Unknown Leader'}\n`;
+    block += `${row.points ?? '?'} pts · Slot ${row.player_slot ?? '?'} · Turn ${row.turn_order ?? '?'}\n`;
+    block += `🌶️ ${row.spice ?? 0}  💰 ${row.solaris ?? 0}  💧 ${row.water ?? 0}`;
+    if (badges) block += `   ${badges}`;
+
+    const factionLine = buildFactionLine(row);
+    if (factionLine) block += `\n${factionLine}`;
+
+    return block;
+  });
+
+  const matchUrl = game.public_match_id ? `https://dunestats.cc/match/${game.public_match_id}` : null;
+  const imageUrl = game.public_match_id
+    ? `${R2_MATCHES_BASE}/matches/${game.public_match_id}/${game.public_match_id}-content-area.png`
+    : null;
+
+  const titleBase = SCAN_STATUS_TITLES[game.ai_scan_status] || 'Match Scan Result';
+  const color = SCAN_STATUS_COLORS[game.ai_scan_status] || 0x95A5A6;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${titleBase}${game.public_match_id ? ` — #${game.public_match_id}` : ''}`)
+    .setDescription(lines.join('\n\n'))
+    .setColor(color)
+    .setFooter({ text: `Status: ${game.ai_scan_status}` })
+    .setTimestamp(new Date());
+
+  if (matchUrl) embed.setURL(matchUrl);
+  if (imageUrl) embed.setImage(imageUrl);
+
+  return embed;
+}
+
+async function announceOrUpdateScanResult(gameId) {
+  const { data: game, error: gameError } = await supabase
+    .from('games')
+    .select('id, public_match_id, ai_scan_status, ai_scan_discord_message_id')
+    .eq('id', gameId)
+    .single();
+
+  if (gameError || !game) { console.error('Failed to fetch game for scan announcement', gameId, gameError); return; }
+  if (!game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+
+  const { data: results, error: resultsError } = await supabase
+    .from('game_results')
+    .select('*')
+    .eq('game_id', gameId)
+    .order('player_slot', { ascending: true });
+
+  if (resultsError || !results || !results.length) { console.error('Failed to fetch results for scan announcement', gameId, resultsError); return; }
+
+  const channel = await discordClient.channels.fetch(SCAN_RESULTS_CHANNEL_ID).catch(() => null);
+  if (!channel) { console.error('Could not find scan results channel', SCAN_RESULTS_CHANNEL_ID); return; }
+
+  const embed = buildScanResultEmbed(game, results);
+
+  if (game.ai_scan_discord_message_id) {
+    const existingMsg = await channel.messages.fetch(game.ai_scan_discord_message_id).catch(() => null);
+    if (existingMsg) {
+      await existingMsg.edit({ embeds: [embed] }).catch((err) => console.error('Failed to edit scan result message for game', gameId, err));
+      console.log('Edited existing scan result message for game:', gameId, '-> status:', game.ai_scan_status);
+      return;
+    }
+    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game ${gameId} no longer exists. Posting a new one.`);
+  }
+
+  const sentMessage = await channel.send({ embeds: [embed] });
+
+  const { error: updateErr } = await supabase
+    .from('games')
+    .update({ ai_scan_discord_message_id: sentMessage.id })
+    .eq('id', gameId);
+
+  if (updateErr) console.error(`Failed to store ai_scan_discord_message_id for game ${gameId}:`, updateErr);
+  else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
+}
+
 function startRealtimeListener() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -691,6 +815,20 @@ function startGlobalDatabaseListener() {
           if (targetRoleId) {
             const shouldHaveRole = (eventType !== 'DELETE') && (newRecord?.active_on_discord === true);
             await syncSingleUserRole(rec.discord_username, targetRoleId, shouldHaveRole);
+          }
+        }
+
+        // --- AI SCAN STATUS CHANGE -> ANNOUNCE OR EDIT IN DISCORD ---
+        if (table === 'games' && eventType === 'UPDATE' && newRecord) {
+          const oldStatus = oldRecord ? oldRecord.ai_scan_status : undefined;
+          const newStatus = newRecord.ai_scan_status;
+
+          if (newStatus && newStatus !== AI_SCAN_IGNORED_STATUS && newStatus !== oldStatus) {
+            try {
+              await announceOrUpdateScanResult(newRecord.id);
+            } catch (scanErr) {
+              console.error('Error announcing/updating scan result for game', newRecord.id, scanErr);
+            }
           }
         }
 
@@ -1182,7 +1320,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     .eq('message_id', message.id)
     .single();
 
-  if (error || !schedule || schedule.mode !== 'live' || schedule.status === 'played') return;
+  if (error || !schedule || schedule.mode?.trim() !== 'live' || schedule.status === 'played') return;
   if (!schedule.player_discord_ids || !schedule.player_discord_ids.includes(user.id)) return;
 
   const availableSlotLabels = (schedule.suggested_slots || []).map(s => s.label);
@@ -1473,14 +1611,17 @@ async function checkAndSendMatchReminders() {
     const now = new Date();
     
     // --- 1. LIVE MATCH REMINDERS ---
-    const { data: matches, error } = await supabase
+    const { data: liveConfirmedMatches, error } = await supabase
       .from('tournament_match_schedules')
       .select('*')
-      .eq('mode', 'live')
       .eq('status', 'confirmed')
       .not('confirmed_timestamp', 'is', null);
 
-    if (!error && matches && matches.length > 0) {
+    // .eq('mode', 'live') can't be trusted server-side if a row has stray whitespace
+    // (e.g. 'live ' from a manual edit), so filter defensively in JS instead.
+    const matches = (liveConfirmedMatches || []).filter(m => m.mode?.trim() === 'live');
+
+    if (!error && matches.length > 0) {
       for (const match of matches) {
         const matchTime = new Date(match.confirmed_timestamp);
         const diffMs = matchTime.getTime() - now.getTime();
