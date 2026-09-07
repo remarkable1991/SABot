@@ -4,11 +4,11 @@ const LOOKUP_THRESHOLD = 0.72;
 
 // --- CONFIGURATION PER TOURNAMENT ---
 const TOURNAMENTS_CONFIG = {
-  16: {
-    registeredRoleId: '1266076612424634571',
-    checkInRoleId: '1533798669923647588',
-    checkInStartTimestamp: 1786698000,   // Aug 14, 2026 11:00 CEST
-    tournamentStartTimestamp: 1786784400 // Aug 15, 2026 11:00 CEST
+  17: {
+    registeredRoleId: '1546458221928124426',
+    checkInRoleId: '1546458821231116349',
+    checkInStartTimestamp: 1788775200,
+    tournamentStartTimestamp: 1788861600
   }
 };
 
