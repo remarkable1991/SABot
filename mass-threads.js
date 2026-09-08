@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
@@ -251,7 +251,7 @@ module.exports = {
         }
 
         // Insert or update schedule record with clean round_type & table_identifier
-        await supabase
+        const { data: scheduleRow, error: scheduleError } = await supabase
           .from('tournament_match_schedules')
           .upsert({
             tournament_num: defaultTournamentNum,
@@ -266,7 +266,26 @@ module.exports = {
             suggested_slots: suggestedSlotsPayload,
             status: isLiveFile ? 'pending_votes' : 'published',
             updated_at: new Date().toISOString()
-          }, { onConflict: 'tournament_num,round_type,table_identifier' });
+          }, { onConflict: 'tournament_num,round_type,table_identifier' })
+          .select('id')
+          .single();
+
+        if (scheduleError) {
+          console.error('Failed to upsert tournament_match_schedules row:', scheduleError);
+        }
+
+        // For matches with no time-slot voting (no live suggested slots), attach a real
+        // "Mark Game Started" button immediately instead of leaving players with only
+        // instructional text until the 24h auto check-in reminder posts one.
+        if (slots.length === 0 && scheduleRow?.id) {
+          const startBtn = new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+              .setCustomId(`async_start_${scheduleRow.id}`)
+              .setLabel('🚀 Mark Game Started')
+              .setStyle(ButtonStyle.Success)
+          );
+          await message.edit({ components: [startBtn] }).catch((err) => console.error('Failed to attach start button:', err));
+        }
 
         createdCount++;
         await new Promise((resolve) => setTimeout(resolve, 1000));
