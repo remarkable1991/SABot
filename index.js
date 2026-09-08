@@ -67,8 +67,8 @@ const SCAN_STATUS_COLORS = {
 
 // --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION (T15 & T16) ---
 const TOURNAMENT_ROLE_MAP = {
-  17: '1546458221928124426', // T17 Registered Role
-  18: '1546458472554569728'  // T18 Registered Role
+  15: '1533819999699865751', // T15 Registered Role
+  16: '1266076612424634571'  // T16 Registered Role
 };
 
 // --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
@@ -1721,14 +1721,25 @@ async function checkAndSendMatchReminders() {
       .in('status', ['pending_votes', 'published'])
       .is('confirmed_timestamp', null);
 
+    if (asyncErr) {
+      console.error('Failed to query async matches for reminder dispatch:', asyncErr);
+    }
+
     if (!asyncErr && asyncMatches && asyncMatches.length > 0) {
+      console.log(`⏰ Reminder sweep: ${asyncMatches.length} async match(es) eligible (mode=async, unconfirmed, pending_votes/published).`);
+
       for (const asyncMatch of asyncMatches) {
         const lastUpdated = new Date(asyncMatch.updated_at || asyncMatch.created_at);
         const hoursSinceUpdate = (now.getTime() - lastUpdated.getTime()) / (1000 * 60 * 60);
 
         // Run reminder every 24 hours until started
         if (hoursSinceUpdate >= 24) {
-          const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch(() => null);
+          console.log(`⏰ Async match ${asyncMatch.id} (${asyncMatch.match_code}) is ${hoursSinceUpdate.toFixed(1)}h stale — attempting reminder.`);
+
+          const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch((fetchErr) => {
+            console.error(`⏰ Failed to fetch thread ${asyncMatch.thread_id} for match ${asyncMatch.id}:`, fetchErr?.message || fetchErr);
+            return null;
+          });
           if (thread) {
             const playerMentions = (asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
             
