@@ -626,10 +626,10 @@ async function announceGame(gameId) {
       .select('id')
       .eq('status', 'started')
       .order('created_at', { ascending: false })
-      .limit(1); // This is a loose match for now, could be tightened if match_id was stored in games table.
+      .limit(1); 
     
     if (possibleLobby && possibleLobby.length > 0) {
-      // Future implementation: We can cross-ref players here to automatically close the matching LFG lobby.
+      // Future implementation: automatic LFG closure
     }
   } catch (err) {}
 }
@@ -644,7 +644,7 @@ function scheduleAnnouncement(gameId) {
 }
 
 // -------------------------------------------------------------
-// 🔍 AI SCAN STATUS ANNOUNCEMENT (post + live-edit as status changes)
+// 🔍 AI SCAN STATUS ANNOUNCEMENT
 // -------------------------------------------------------------
 function buildFactionLine(row) {
   const factions = [
@@ -816,7 +816,6 @@ async function handleWebLobbyCreation(lobby) {
       if (pRatings && pRatings.length > 0) hostName = capitalize(pRatings[0].player_key);
     }
 
-    // Match ID Generation
     const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
     const prefixPattern = `${cleanHostName}-${isLive ? 'L' : 'A'}`;
     let generatedMatchId = `${prefixPattern}1`;
@@ -837,11 +836,19 @@ async function handleWebLobbyCreation(lobby) {
 
     const emojiTarget = isLive ? '⚔️' : '🎲';
     const embedColor = isLive ? 0xe74c3c : 0xC9A24B;
+    const roleId = isLive ? '1219666679764877424' : '1219666516644204554';
+    const roleMention = `<@&${roleId}>`;
     
-    // Convert expansions stored to text format
     const expStrings = lobby.expansions || [];
     const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
-  const statusSentence = `**${hostName} 🌐** created a lobby for ${lobby.board_type || 'Base Game'}${expText}.`;
+    const statusSentence = `**${hostName} 🌐** created a lobby for ${lobby.board_type \vert{}\vert{} 'Base Game'}${expText}.`;
+
+    // Ghost ping sentence logic
+    let customPingSentence = `**${hostName} 🌐** is looking for ${isLive ? 'live' : 'async'} players ${roleMention}`;
+    if (lobby.board_type && lobby.board_type !== 'Base Game') customPingSentence += ` for ${lobby.board_type}`;
+    else if (lobby.board_type === 'Base Game') customPingSentence += ` for Base Game`;
+    if (expText) customPingSentence += expText;
+    customPingSentence += '.';
 
     const embed = new EmbedBuilder()
       .setTitle(`${emojiTarget} New Match Open! [ID:${generatedMatchId}]`)
@@ -880,20 +887,119 @@ async function handleWebLobbyCreation(lobby) {
       await message.react('📢').catch(() => {});
     } catch (reactErr) { console.error(reactErr); }
 
-    // Update Supabase
+    // Send and delete ghost ping
+    const pingMessage = await channel.send({
+      content: customPingSentence,
+      allowedMentions: { roles: [roleId] }
+    });
+    setTimeout(() => {
+      pingMessage.delete().catch(() => {});
+    }, 1500);
+
     await supabase.from('active_async_matches').update({
       status: 'searching',
       match_id: generatedMatchId,
       message_id: message.id,
       channel_id: channel.id,
       guild_id: channel.guild.id,
-      web_player_names: [hostName] // Insert host as first web player
+      web_player_names: [hostName]
     }).eq('id', lobby.id);
 
-    console.log(`🌐 Web Lobby successfully pushed to Discord: ${generatedMatchId}`);
   } catch (err) {
     console.error('Error creating Discord Lobby from Web Event:', err);
   }
+}
+
+// -------------------------------------------------------------
+// 📢 UNIVERSAL LOBBY PING NOTIFICATION ENGINE
+// -------------------------------------------------------------
+async function executeLobbyPing(lobby, channel) {
+  const now = new Date();
+  const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
+
+  // 45-minute cooldown check
+  if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
+    return false; // Returns false if on cooldown
+  }
+
+  // Update cooldown state
+  await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+  lobby.last_prompted_at = now.toISOString();
+
+  const isLiveLobby = lobby.mode === 'live';
+  let roleId = isLiveLobby ? '1219666679764877424' : '1219666516644204554';
+  let roleMention = `<@&${roleId}>`;
+
+  const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
+  if (!msg || !msg.embeds || !msg.embeds[0]) return true;
+
+  // Extract the game mode config cleanly (Supports both Discord and Web text formats)
+  const detailsBlock = msg.embeds[0].fields[0]?.value || '';
+  const modeInformation = detailsBlock.split('\n')[0]
+    .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '')
+    .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '')
+    .replace(/\*\*.+?\*\*\s+created\s+a\s+lobby\s+for\s+/i, '')
+    .replace(/\*\*.+?\*\*\s+created\s+a\s+lobby\s+/i, '');
+
+  const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
+
+  // Determine host string representation
+  let hostMentionString = '';
+  if (lobby.host_id) {
+    hostMentionString = `<@${lobby.host_id}>`;
+  } else if (lobby.web_player_names && lobby.web_player_names.length > 0) {
+    hostMentionString = `**${lobby.web_player_names[0]} 🌐**`;
+  } else {
+    hostMentionString = `**Web Player 🌐**`;
+  }
+
+  const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
+  const accurateEndEmoji = isLiveLobby ? (getEmoji(channel.guild, 'LiveDune', '⚔️')) : (getEmoji(channel.guild, 'AsyncDune', '🎲'));
+  const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
+
+  // The universal tag message string
+  const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
+  const allowedMentionsOptions = { roles: [roleId] };
+
+  // Check if message got buried
+  let historyCountMet = false;
+  try {
+    const fetchedHistory = await channel.messages.fetch({ after: msg.id, limit: 12 }).catch(() => null);
+    if (fetchedHistory && fetchedHistory.size >= 5) {
+      historyCountMet = true;
+    }
+  } catch (err) { console.error(err); }
+
+  if (historyCountMet) {
+    // Repost at the bottom
+    const activeEmbed = EmbedBuilder.from(msg.embeds[0]);
+    const newLobbyMsg = await channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
+
+    try {
+      const joinEmojiObj = channel.guild.emojis.cache.find(e => e.name === (isLiveLobby ? 'LiveDune' : 'AsyncDune'));
+      if (joinEmojiObj) await newLobbyMsg.react(joinEmojiObj).catch(() => {});
+      else await newLobbyMsg.react(isLiveLobby ? '⚔️' : '🎲').catch(() => {});
+      
+      await newLobbyMsg.react('🎮').catch(() => {});
+      await newLobbyMsg.react('❌').catch(() => {});
+      await newLobbyMsg.react('🔔').catch(() => {});
+      await newLobbyMsg.react('📢').catch(() => {});
+    } catch (rErr) { console.error(rErr); }
+
+    await supabase.from('active_async_matches').update({ message_id: newLobbyMsg.id }).eq('id', lobby.id);
+
+    msg.reactions.cache.forEach(async (r) => {
+      await r.users.remove(discordClient.user.id).catch(() => {});
+    });
+
+    const moveRefLink = `https://discord.com/channels/${channel.guild.id}/${channel.id}/${newLobbyMsg.id}`;
+    await msg.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
+  } else {
+    // Just post the tag above
+    await channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
+  }
+
+  return true; // Success
 }
 
 async function handleWebQuickChat(chatRow) {
@@ -912,20 +1018,7 @@ async function handleWebQuickChat(chatRow) {
   } else if (message_code === 'need_5') {
     await channel.send(`💬 **[🌐 ${sender_name}]**: ⏳ Stepping away for 5 minutes, be right back!`);
   } else if (message_code === 'ping') {
-    const now = new Date();
-    const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
-
-    if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) return;
-
-    await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-
-    let roleMention = lobby.mode === 'live' ? `<@&1219666679764877424>` : `<@&1219666516644204554>`;
-    const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
-
-    await channel.send({
-      content: `📢 **[🌐 ${sender_name}]**: ${roleMention} (${totalCount}/4) seated, looking for more players!`,
-      allowedMentions: { roles: lobby.mode === 'live' ? ['1219666679764877424'] : ['1219666516644204554'] }
-    });
+    await executeLobbyPing(lobby, channel);
   }
 }
 
@@ -969,8 +1062,6 @@ function startRealtimeListener() {
 
         // Web users clicked 'Start Game'
         if (oldRecord.status === 'searching' && newRecord.status === 'started') {
-          // Verify that this wasn't just the bot's own update bouncing back
-          // We can just call executeLobbyStartSequence, it handles safety checks inherently.
           await executeLobbyStartSequence(newRecord);
         }
       }
@@ -1647,6 +1738,55 @@ async function checkAndExpireCheckins() {
 }
 
 // -------------------------------------------------------------
+// ⏳ AUTOMATED LOBBY EXPIRY SWEEPER
+// -------------------------------------------------------------
+async function checkAndExpireLobbies() {
+  try {
+    const nowISO = new Date().toISOString();
+    
+    const { data: expiredLobbies, error } = await supabase
+      .from('active_async_matches')
+      .select('*')
+      .eq('status', 'searching')
+      .lte('expires_at', nowISO);
+
+    if (error) {
+      console.error('Failed to query expired lobbies:', error);
+      return;
+    }
+
+    if (!expiredLobbies || expiredLobbies.length === 0) return;
+
+    for (const lobby of expiredLobbies) {
+      await supabase
+        .from('active_async_matches')
+        .update({ status: 'cancelled', auto_start_at: null })
+        .eq('id', lobby.id);
+
+      console.log(`⏱️ Lobby ${lobby.match_id} expired. Marked as cancelled.`);
+
+      if (lobby.channel_id && lobby.message_id) {
+        const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+        if (channel) {
+          const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
+          if (msg && msg.embeds && msg.embeds.length > 0) {
+            const expiredEmbed = EmbedBuilder.from(msg.embeds[0])
+              .setTitle('⏳ Lobby Expired')
+              .setColor(0x95A5A6)
+              .setDescription('This lobby timed out because it did not fill up in time.');
+            
+            await msg.edit({ content: `🚫 **Lobby expired**`, embeds: [expiredEmbed] }).catch(() => {});
+            await msg.reactions.removeAll().catch(() => {});
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('Error running lobby expiry sweep:', err);
+  }
+}
+
+// -------------------------------------------------------------
 // 🔄 LIVE TOURNAMENT VOTING & DYNAMIC SLOT CONSENSUS ENGINE
 // -------------------------------------------------------------
 async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
@@ -1817,7 +1957,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
         .eq('id', fresh.id);
 
       const playerMentions = fresh.player_discord_ids.map(id => `<@${id}>`).join(' ');
-      const matchTitle = `[${fresh.match_code}] ${fresh.round_type}${fresh.table_identifier}`;
+      const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
       const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
 
       const tableSlugCode = fresh.match_code && fresh.match_code.includes('G') 
@@ -1886,7 +2026,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       for (const s of threeVoterSlots) {
         const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
         const missingTags = s.missing.map(id => `<@${id}>`).join(', ');
-        breakdownLines.push(`• **${s.label}${s.time_text}**\n  ↳ Agreed: ${agreedTags}\n  ↳ **Needs:** ${missingTags} — *Are you available, or could you play slightly earlier/later?*`);
+        breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${agreedTags}\n  ↳ **Needs:** ${missingTags} — *Are you available, or could you play slightly earlier/later?*`);
       }
       breakdownLines.push('');
     }
@@ -1895,7 +2035,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
       for (const s of twoVoterSlots) {
         const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
-        breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed:${agreedTags})`);
+        breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${agreedTags})`);
       }
       breakdownLines.push('');
     }
@@ -1920,7 +2060,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     ].join('\n');
 
     const conflictEmbed = new EmbedBuilder()
-      .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`)
+      .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
       .setColor(0xE74C3C)
       .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}${howToResolve}`)
       .setTimestamp();
@@ -2028,7 +2168,7 @@ async function checkAndSendMatchReminders() {
             );
 
             const asyncReminderEmbed = new EmbedBuilder()
-              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type}${asyncMatch.table_identifier}`)
+              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`)
               .setColor(0x3498DB)
               .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
               .setTimestamp();
@@ -2099,7 +2239,7 @@ discordClient.on('interactionCreate', async (interaction) => {
 
     const playerMentions = (schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
     const startEmbed = new EmbedBuilder()
-      .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`)
+      .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
       .setColor(0x2ECC71)
       .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
       .setTimestamp();
@@ -2190,8 +2330,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
     const embedTitle = message.embeds[0]?.title || '';
-    const isLiveLobby = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
-
     const emoji = reaction.emoji.name || reaction.emoji;
     const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
                         reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
@@ -2243,76 +2381,12 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     }
 
     if (emoji === '📢') {
-      const now = new Date();
-      const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
-
-      if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
-        const nextAvailableTime = Math.floor((lastTagged.getTime() + TAG_COOLDOWN_MS) / 1000);
-        await reaction.users.remove(user.id).catch(() => {});
-
+      const pingResult = await executeLobbyPing(lobby, message.channel);
+      if (!pingResult) {
+        const nextAvailableTime = Math.floor((new Date(lobby.last_prompted_at).getTime() + TAG_COOLDOWN_MS) / 1000);
         const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>` }).catch(() => {});
-        setTimeout(() => {
-          cooldownMsg.delete().catch(() => {});
-        }, 5000);
-        return;
+        setTimeout(() => { cooldownMsg.delete().catch(() => {}); }, 5000);
       }
-
-      await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
-      lobby.last_prompted_at = now.toISOString();
-
-      let roleMention = isLiveLobby ? `<@&1219666679764877424>` : `<@&1219666516644204554>`;
-
-      const detailsBlock = message.embeds[0]?.fields[0]?.value || '';
-      const modeInformation = detailsBlock.split('\n')[0].replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '').replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '');
-
-      const totalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
-      const hostMentionString = `<@${lobby.host_id}>`;
-      const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
-      const accurateEndEmoji = isLiveLobby ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
-      
-      const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
-
-      const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation} ${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
-      
-      const allowedMentionsOptions = isLiveLobby ? { roles: ['1219666679764877424'] } : { roles: ['1219666516644204554'] };
-
-      let historyCountMet = false;
-      try {
-        const fetchedHistory = await message.channel.messages.fetch({ after: message.id, limit: 12 }).catch(() => null);
-        if (fetchedHistory && fetchedHistory.size >= 5) {
-          historyCountMet = true;
-        }
-      } catch (err) { console.error(err); }
-
-      if (historyCountMet) {
-        const activeEmbed = EmbedBuilder.from(message.embeds[0]);
-        const newLobbyMsg = await message.channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
-
-        try {
-          const joinEmojiObj = message.guild.emojis.cache.find(e => e.name === (isLiveLobby ? 'LiveDune' : 'AsyncDune'));
-          if (joinEmojiObj) {
-            await newLobbyMsg.react(joinEmojiObj).catch(() => {});
-          } else {
-            await newLobbyMsg.react(isLiveLobby ? '⚔️' : '🎲').catch(() => {});
-          }
-          await newLobbyMsg.react('🎮').catch(() => {});
-          await newLobbyMsg.react('❌').catch(() => {});
-          await newLobbyMsg.react('🔔').catch(() => {});
-          await newLobbyMsg.react('📢').catch(() => {});
-        } catch (rErr) { console.error(rErr); }
-
-        await supabase.from('active_async_matches').update({ message_id: newLobbyMsg.id }).eq('id', lobby.id);
-
-        message.reactions.cache.forEach(async (r) => {
-          await r.users.remove(discordClient.user.id).catch(() => {});
-        });
-
-        const moveRefLink = `https://discord.com/channels/${message.guild.id}/${message.channel.id}/${newLobbyMsg.id}`;
-        await message.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
-      } else {
-        await message.channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
-      }
-
       await reaction.users.remove(user.id).catch(() => {});
       return;
     }
@@ -2441,6 +2515,10 @@ discordClient.once('clientReady', async () => {
 
   setInterval(async () => {
     await checkAndExpireCheckins();
+  }, 5 * 60 * 1000);
+
+  setInterval(async () => {
+    await checkAndExpireLobbies();
   }, 5 * 60 * 1000);
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
