@@ -22,6 +22,8 @@ const massThreadsCommand = require('./mass-threads');
 const spCommand = require('./sp'); 
 const confirmCommand = require('./confirm');
 const tournamentStatusCommand = require('./tournament-status');
+const checkinCommand = require('./checkin');
+const { TOURNAMENTS_CONFIG } = require('./tournament-config');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
 
@@ -65,11 +67,17 @@ const SCAN_STATUS_COLORS = {
   'Manually reviewed': 0x9B59B6
 };
 
-// --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION (T15 & T16) ---
-const TOURNAMENT_ROLE_MAP = {
-  15: '1533819999699865751', // T15 Registered Role
-  16: '1266076612424634571'  // T16 Registered Role
-};
+// --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION ---
+// Derived from tournament-config.js — add a tournament there once, it's active here automatically.
+const TOURNAMENT_ROLE_MAP = Object.fromEntries(
+  Object.entries(TOURNAMENTS_CONFIG)
+    .filter(([, cfg]) => cfg.registeredRoleId)
+    .map(([num, cfg]) => [Number(num), cfg.registeredRoleId])
+);
+
+// --- TOURNAMENT CHECK-IN CONFIGURATION ---
+const CHECKIN_REMINDER_CHANNEL_ID = '1084215380517605486';
+const CHECKIN_EMOJI_NAME = 'SA';
 
 // --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
 const LEADER_EMOJI_MAP = {
@@ -158,7 +166,8 @@ const slashCommands = new Map([
   [massThreadsCommand.data.name, massThreadsCommand],
   [spCommand.data.name, spCommand],
   [confirmCommand.data.name, confirmCommand],
-  [tournamentStatusCommand.data.name, tournamentStatusCommand]
+  [tournamentStatusCommand.data.name, tournamentStatusCommand],
+  [checkinCommand.data.name, checkinCommand]
 ]);
 
 const pendingGames = new Set();
@@ -1343,6 +1352,112 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
 }
 
 // -------------------------------------------------------------
+// ✅ TOURNAMENT CHECK-IN REACTION HANDLING
+// -------------------------------------------------------------
+async function handleTournamentCheckinReaction(message, user, emojiName) {
+  // Only care about the configured check-in emoji (or its ✅ fallback if the custom emoji is missing)
+  if (emojiName !== CHECKIN_EMOJI_NAME && emojiName !== '✅') return;
+
+  const { data: checkin, error } = await supabase
+    .from('tournament_checkins')
+    .select('*')
+    .eq('message_id', message.id)
+    .maybeSingle();
+
+  if (error || !checkin || checkin.deleted_at) return;
+
+  const config = TOURNAMENTS_CONFIG[checkin.tournament_num];
+  if (!config || !config.registeredRoleId || !config.checkInRoleId) return;
+
+  const guild = message.guild;
+  if (!guild) return;
+
+  const member = await guild.members.fetch(user.id).catch(() => null);
+  if (!member) return;
+
+  const hasRegisteredRole = member.roles.cache.has(config.registeredRoleId);
+  const hasCheckInRole = member.roles.cache.has(config.checkInRoleId);
+  const reminderChannel = await discordClient.channels.fetch(CHECKIN_REMINDER_CHANNEL_ID).catch(() => null);
+
+  if (hasRegisteredRole) {
+    if (!hasCheckInRole) {
+      await member.roles.add(config.checkInRoleId).catch((err) => console.error('Failed to add check-in role:', err));
+      if (reminderChannel) {
+        await reminderChannel.send({
+          content: `✅ <@${user.id}> has successfully checked in for **Tournament #${checkin.tournament_num}**!`
+        }).catch(() => {});
+      }
+    }
+    // Already checked in previously — silently ignore, no repeat post.
+    return;
+  }
+
+  // Not registered — remove their reaction so the roster only reflects real check-ins,
+  // and post a public reminder (deduped so re-reacting doesn't spam the channel).
+  const targetReaction = message.reactions.cache.find((r) => (r.emoji.name || r.emoji.toString()) === emojiName);
+  if (targetReaction) {
+    await targetReaction.users.remove(user.id).catch(() => {});
+  }
+
+  const notified = checkin.notified_user_ids || [];
+  if (notified.includes(user.id)) return;
+
+  if (reminderChannel) {
+    await reminderChannel.send({
+      content: `⚠️ <@${user.id}>, you tried to check in for **Tournament #${checkin.tournament_num}** but you're not registered yet!\n\n` +
+        `🔗 Register here: https://dunestats.cc/tournament-register/t${checkin.tournament_num}\n` +
+        `📝 Use this exact Discord username when registering: \`${member.user.username}\``
+    }).catch(() => {});
+  }
+
+  await supabase
+    .from('tournament_checkins')
+    .update({ notified_user_ids: [...notified, user.id] })
+    .eq('id', checkin.id)
+    .catch((err) => console.error('Failed to update notified_user_ids for check-in', checkin.id, err));
+}
+
+async function checkAndExpireCheckins() {
+  try {
+    const now = new Date();
+    const { data: dueCheckins, error } = await supabase
+      .from('tournament_checkins')
+      .select('*')
+      .lte('expires_at', now.toISOString())
+      .is('deleted_at', null);
+
+    if (error) { console.error('Failed to query due tournament check-ins:', error); return; }
+    if (!dueCheckins || !dueCheckins.length) return;
+
+    for (const row of dueCheckins) {
+      const channel = await discordClient.channels.fetch(row.channel_id).catch(() => null);
+      const msg = channel ? await channel.messages.fetch(row.message_id).catch(() => null) : null;
+
+      if (row.remove_after_24h) {
+        if (msg) await msg.delete().catch((err) => console.error('Failed to delete expired check-in message:', err));
+        await supabase.from('tournament_checkins').update({ deleted_at: now.toISOString() }).eq('id', row.id);
+        console.log(`✅ Deleted expired check-in message for Tournament #${row.tournament_num} (remove_after_24h=true).`);
+        continue;
+      }
+
+      if (!row.closed_at) {
+        if (msg && msg.embeds[0]) {
+          const closedEmbed = EmbedBuilder.from(msg.embeds[0])
+            .setTitle(`🔒 Tournament #${row.tournament_num} Check-In is CLOSED`)
+            .setColor(0x95A5A6)
+            .setFooter({ text: 'Check-in window has ended.' });
+          await msg.edit({ embeds: [closedEmbed] }).catch((err) => console.error('Failed to mark check-in message closed:', err));
+        }
+        await supabase.from('tournament_checkins').update({ closed_at: now.toISOString() }).eq('id', row.id);
+        console.log(`🔒 Marked check-in message closed for Tournament #${row.tournament_num}.`);
+      }
+    }
+  } catch (err) {
+    console.error('Error running check-in expiry sweep:', err);
+  }
+}
+
+// -------------------------------------------------------------
 // 🔄 LIVE TOURNAMENT VOTING & DYNAMIC SLOT CONSENSUS ENGINE
 // -------------------------------------------------------------
 async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
@@ -1911,6 +2026,9 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     // Check Live Tournament Voting Reactions
     await handleTournamentVotingReaction(message, user, emojiName, true);
 
+    // Check Tournament Check-In Reactions
+    await handleTournamentCheckinReaction(message, user, emojiName);
+
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
@@ -2193,6 +2311,11 @@ discordClient.once('clientReady', async () => {
   setInterval(async () => {
     await checkAndSendMatchReminders();
   }, 60 * 1000);
+
+  // Background Check-In Expiry Sweep (every 5 minutes — closes/deletes 24h-old check-in messages)
+  setInterval(async () => {
+    await checkAndExpireCheckins();
+  }, 5 * 60 * 1000);
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
