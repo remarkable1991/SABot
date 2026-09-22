@@ -10,7 +10,7 @@ http.createServer((req, res) => {
   console.log(`Health check server instantly listening on port ${PORT}`);
 });
 
-const { Client, GatewayIntentBits, Partials, EmbedBuilder, AttachmentBuilder, userMention, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes } = require('discord.js');
+const { Client, GatewayIntentBits, Partials, EmbedBuilder, AttachmentBuilder, userMention, ActionRowBuilder, ButtonBuilder, ButtonStyle, REST, Routes, MessageFlags } = require('discord.js');
 const { createClient } = require('@supabase/supabase-js');
 const WebSocket = require('ws');
 const statsCommand = require('./stats');
@@ -131,41 +131,25 @@ if (!DISCORD_BOT_TOKEN || !SUPABASE_URL || !SUPABASE_SECRET_KEY) {
 }
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SECRET_KEY, {
-  auth: {
-    autoRefreshToken: true,
-    persistSession: false
-  },
+  auth: { autoRefreshToken: true, persistSession: false },
   realtime: { transport: WebSocket, params: { eventsPerSecond: 10 } },
   global: { WebSocket }
 });
 
 const discordClient = new Client({
   intents: [
-    GatewayIntentBits.Guilds, 
-    GatewayIntentBits.GuildMembers, 
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent, 
-    GatewayIntentBits.DirectMessages,
-    GatewayIntentBits.GuildMessageReactions 
+    GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent, GatewayIntentBits.DirectMessages, GatewayIntentBits.GuildMessageReactions 
   ],
-  partials: [
-    Partials.Message, 
-    Partials.Channel, 
-    Partials.Reaction 
-  ]
+  partials: [ Partials.Message, Partials.Channel, Partials.Reaction ]
 });
 
 const slashCommands = new Map([
-  [statsCommand.data.name, statsCommand],
-  [asyncCommand.data.name, asyncCommand],
-  [liveCommand.data.name, liveCommand], 
-  [fixCommand.data.name, fixCommand],
-  [tournamentCommand.data.name, tournamentCommand],
-  [massThreadsCommand.data.name, massThreadsCommand],
-  [spCommand.data.name, spCommand],
-  [confirmCommand.data.name, confirmCommand],
-  [tournamentStatusCommand.data.name, tournamentStatusCommand],
-  [checkinCommand.data.name, checkinCommand]
+  [statsCommand.data.name, statsCommand], [asyncCommand.data.name, asyncCommand],
+  [liveCommand.data.name, liveCommand], [fixCommand.data.name, fixCommand],
+  [tournamentCommand.data.name, tournamentCommand], [massThreadsCommand.data.name, massThreadsCommand],
+  [spCommand.data.name, spCommand], [confirmCommand.data.name, confirmCommand],
+  [tournamentStatusCommand.data.name, tournamentStatusCommand], [checkinCommand.data.name, checkinCommand]
 ]);
 
 const pendingGames = new Set();
@@ -175,23 +159,13 @@ let realtimeRetryCount = 0;
 let realtimeChannel = null;
 let reconnectTimer = null;
 
-function capitalize(word) {
-  if (!word) return '';
-  return word.charAt(0).toUpperCase() + word.slice(1);
-}
-
-function normalizeName(value) {
-  return String(value || '').trim().toLowerCase().replace(/^[.\s]+|[.\s]+$/g, '').replace(/[^a-z0-9]/g, '');
-}
+function capitalize(word) { return word ? word.charAt(0).toUpperCase() + word.slice(1) : ''; }
+function normalizeName(value) { return String(value || '').trim().toLowerCase().replace(/^[.\s]+|[.\s]+$/g, '').replace(/[^a-z0-9]/g, ''); }
 
 function similarity(a, b) {
-  const x = normalizeName(a);
-  const y = normalizeName(b);
-  if (!x || !y) return 0;
-  if (x === y) return 1;
-  if (x.includes(y) || y.includes(x)) {
-    return Math.min(x.length, y.length) / Math.max(x.length, y.length);
-  }
+  const x = normalizeName(a); const y = normalizeName(b);
+  if (!x || !y) return 0; if (x === y) return 1;
+  if (x.includes(y) || y.includes(x)) return Math.min(x.length, y.length) / Math.max(x.length, y.length);
   const dp = Array.from({ length: x.length + 1 }, () => Array(y.length + 1).fill(0));
   for (let i = 0; i <= x.length; i++) dp[i][0] = i;
   for (let j = 0; j <= y.length; j++) dp[0][j] = j;
@@ -201,37 +175,19 @@ function similarity(a, b) {
       dp[i][j] = Math.min(dp[i - 1][j] + 1, dp[i][j - 1] + 1, dp[i - 1][j - 1] + cost);
     }
   }
-  const distance = dp[x.length][y.length];
-  return 1 - distance / Math.max(x.length, y.length);
+  return 1 - dp[x.length][y.length] / Math.max(x.length, y.length);
 }
 
-function formatDelta(value) {
-  const num = Number(value || 0);
-  return (num > 0 ? '+' : '') + num.toFixed(2);
-}
-
+function formatDelta(value) { const num = Number(value || 0); return (num > 0 ? '+' : '') + num.toFixed(2); }
 function getEmoji(guild, name, fallback) {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
   return emoji ? emoji.toString() : fallback;
 }
-
-function getLeaderEmoji(guild, leaderName) {
-  if (!leaderName) return '';
-  const emojiKey = LEADER_EMOJI_MAP[leaderName];
-  if (!emojiKey) return '';
-  return getEmoji(guild, emojiKey, '');
-}
-
+function getLeaderEmoji(guild, leaderName) { return getEmoji(guild, LEADER_EMOJI_MAP[leaderName], ''); }
 function getPlacementEmoji(guild, placement) {
-  const map = {
-    1: { name: 'Tournament', fallback: '1st' },
-    2: { name: '2ndTrophy', fallback: '2nd' },
-    3: { name: '3rdTrophy', fallback: '3rd' },
-    4: { name: '4thTrophy', fallback: '4th' }
-  };
-  if (!map[placement]) return String(placement);
-  return getEmoji(guild, map[placement].name, map[placement].fallback);
+  const map = { 1: { name: 'Tournament', fallback: '1st' }, 2: { name: '2ndTrophy', fallback: '2nd' }, 3: { name: '3rdTrophy', fallback: '3rd' }, 4: { name: '4thTrophy', fallback: '4th' } };
+  return map[placement] ? getEmoji(guild, map[placement].name, map[placement].fallback) : String(placement);
 }
 
 function buildGameTags(game, guild) {
@@ -239,40 +195,12 @@ function buildGameTags(game, guild) {
   if (game.has_epic_mode) tags.push(getEmoji(guild, 'Epic', 'Epic') + ' Epic Mode');
   if (game.has_immortality) tags.push(getEmoji(guild, 'Immo', 'Immo') + ' Immortality');
   if (game.has_rise_of_ix) tags.push(getEmoji(guild, 'Ix', 'Ix') + ' Rise of IX');
-  if (String(game.game_version || '').toLowerCase() === 'uprising') {
-    tags.push(getEmoji(guild, 'Uprising', 'Uprising') + ' Uprising');
-  }
+  if (String(game.game_version || '').toLowerCase() === 'uprising') tags.push(getEmoji(guild, 'Uprising', 'Uprising') + ' Uprising');
   if (game.has_base_leaders) tags.push('Base Leaders');
   return tags;
 }
 
-function normalizeDiscordId(value) {
-  const id = String(value || '').trim();
-  return /^\d{17,20}$/.test(id) ? id : null;
-}
-
-function extractUnixSec(value) {
-  if (!value) return null;
-  const str = String(value).trim();
-  const matchDiscord = str.match(/<t:(\d+)/);
-  if (matchDiscord) return parseInt(matchDiscord[1], 10);
-  if (/^\d{10}$/.test(str)) return parseInt(str, 10);
-  if (/^\d{13}$/.test(str)) return Math.floor(parseInt(str, 10) / 1000);
-  const parsed = Date.parse(str);
-  if (!isNaN(parsed)) return Math.floor(parsed / 1000);
-  return null;
-}
-
-function generateGoogleCalendarUrl(title, startDate, durationHours = 2) {
-  if (!startDate || isNaN(startDate.getTime())) return null;
-  const endDate = new Date(startDate.getTime() + durationHours * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  const formatUtc = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
-  const dates = `${formatUtc(startDate)}/${formatUtc(endDate)}`;
-  const text = encodeURIComponent(title);
-  const details = encodeURIComponent('Strategy Arena Tournament Match. Coordinate with your tablemates on Discord!');
-  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&dates=${dates}&details=${details}`;
-}
+function normalizeDiscordId(value) { const id = String(value || '').trim(); return /^\d{17,20}$/.test(id) ? id : null; }
 
 async function getDatabasePlayerMap(playerName) {
   const normalized = normalizeName(playerName);
@@ -285,19 +213,13 @@ async function getDatabasePlayerMap(playerName) {
     .select('id, player_key, display_name, username, discord_username, claimed_by, discord_user_id')
     .or(`player_key.eq.${normalized},display_name.ilike.${pattern},discord_username.ilike.${pattern},username.ilike.${pattern}`)
     .limit(10);
-  if (error) {
-    console.error('Failed player_discord_map lookup for', playerName, error);
-    return null;
-  }
-  if (!data || !data.length) return null;
-  let best = null;
-  let bestScore = 0;
+  if (error || !data || !data.length) return null;
+  let best = null, bestScore = 0;
   for (const row of data) {
     const score = Math.max(similarity(playerName, row.player_key), similarity(playerName, row.display_name), similarity(playerName, row.discord_username), similarity(playerName, row.username));
     if (score > bestScore) { best = row; bestScore = score; }
   }
-  if (!best || bestScore < DB_MATCH_THRESHOLD) return null;
-  return best;
+  return bestScore >= DB_MATCH_THRESHOLD ? best : null;
 }
 
 async function searchGuildMemberByNames(guild, names) {
@@ -312,326 +234,169 @@ async function searchGuildMemberByNames(guild, names) {
         const candidateNames = [member.user && member.user.username, member.nickname, member.displayName, member.user && member.user.globalName].filter(Boolean);
         const score = Math.max(...candidateNames.map((candidate) => similarity(query, candidate)));
         const existing = seen.get(member.id);
-        if (!existing || score > existing.score) { seen.set(member.id, { member, score }); }
+        if (!existing || score > existing.score) seen.set(member.id, { member, score });
       }
-    } catch (err) { console.error('Guild search failed for', query, err); }
+    } catch (err) {}
   }
   const ranked = Array.from(seen.values()).sort((a, b) => b.score - a.score);
-  if (!ranked.length) return null;
-  if (ranked[0].score < GUILD_MATCH_THRESHOLD) return null;
+  if (!ranked.length || ranked[0].score < GUILD_MATCH_THRESHOLD) return null;
   if (ranked[1] && ranked[0].score - ranked[1].score < GUILD_MATCH_GAP) return null;
   return ranked[0].member;
 }
 
 async function persistDiscordUserId(dbMatch, discordUserId) {
   const normalizedId = normalizeDiscordId(discordUserId);
-  if (!dbMatch || !dbMatch.id || !normalizedId) return;
-  if (normalizeDiscordId(dbMatch.discord_user_id) === normalizedId) return;
-  const { error } = await supabase.from('player_discord_map').update({ discord_user_id: normalizedId, updated_at: new Date().toISOString() }).eq('id', dbMatch.id);
-  if (error) { console.error('Failed to persist discord_user_id for', dbMatch.player_key || dbMatch.display_name, error); }
+  if (!dbMatch || !dbMatch.id || !normalizedId || normalizeDiscordId(dbMatch.discord_user_id) === normalizedId) return;
+  await supabase.from('player_discord_map').update({ discord_user_id: normalizedId, updated_at: new Date().toISOString() }).eq('id', dbMatch.id);
 }
 
 async function resolveMentionForName(guild, playerName) {
   const dbMatch = await getDatabasePlayerMap(playerName);
   const mappedDiscordId = normalizeDiscordId(dbMatch && dbMatch.discord_user_id);
-  if (mappedDiscordId) { return userMention(mappedDiscordId); }
+  if (mappedDiscordId) return userMention(mappedDiscordId);
   const searchNames = [dbMatch && dbMatch.discord_username, dbMatch && dbMatch.display_name, dbMatch && dbMatch.username, dbMatch && dbMatch.player_key, playerName].filter(Boolean);
   const member = await searchGuildMemberByNames(guild, searchNames);
   if (member && member.id) { await persistDiscordUserId(dbMatch, member.id); return userMention(member.id); }
-  if (dbMatch && dbMatch.discord_username) { return '(' + dbMatch.discord_username + ')'; }
+  if (dbMatch && dbMatch.discord_username) return '(' + dbMatch.discord_username + ')';
   return null;
 }
 
-// --- R2 IMAGE FETCH ---
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
-
   const publicUrl = `${R2_PUBLIC_BASE}/${storagePath}`;
-
-  let attempts = 3;
-  let response = null;
-
+  let attempts = 3, response = null;
   while (attempts > 0) {
-    try {
-      response = await fetch(publicUrl);
-      if (response.ok) break;
-    } catch (fetchErr) {
-      console.error(`R2 asset fetch attempt failed (${attempts} remaining):`, fetchErr);
-    }
-    attempts -= 1;
-    if (attempts > 0) {
-      await new Promise(resolve => setTimeout(resolve, 2500));
-    }
+    try { response = await fetch(publicUrl); if (response.ok) break; } catch (e) {}
+    attempts -= 1; if (attempts > 0) await new Promise(resolve => setTimeout(resolve, 2500));
   }
-
-  if (!response || !response.ok) {
-    console.error('Failed to retrieve verified asset buffer payload for path:', storagePath);
-    return null;
-  }
-
+  if (!response || !response.ok) return null;
   try {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     const maxBytes = Math.floor(7.5 * 1024 * 1024);
-    if (!contentType.startsWith('image/')) { return { attachment: null, imageUrl: publicUrl, tooLarge: false }; }
+    if (!contentType.startsWith('image/')) return { attachment: null, imageUrl: publicUrl, tooLarge: false };
     const arrayBuffer = await response.arrayBuffer();
     let buffer = Buffer.from(arrayBuffer);
-    if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }), imageUrl: null, tooLarge: false }; }
+    if (buffer.length <= maxBytes) return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }), imageUrl: null, tooLarge: false };
     try {
       buffer = await sharp(buffer).rotate().resize({ width: 1600, withoutEnlargement: true }).jpeg({ quality: 76, mozjpeg: true }).toBuffer();
-      if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false }; }
+      if (buffer.length <= maxBytes) return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
       buffer = await sharp(buffer).resize({ width: 1280, withoutEnlargement: true }).jpeg({ quality: 62, mozjpeg: true }).toBuffer();
-      if (buffer.length <= maxBytes) { return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false }; }
-    } catch (compressionError) { console.error('Failed to compress screenshot', compressionError); }
+      if (buffer.length <= maxBytes) return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+    } catch (e) {}
     return { attachment: null, imageUrl: publicUrl, tooLarge: true };
-  } catch (err) { console.error('Failed to build attachment from screenshot', err); return { attachment: null, imageUrl: null, tooLarge: false }; }
+  } catch (err) { return { attachment: null, imageUrl: null, tooLarge: false }; }
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase
-    .from('games')
-    .select('id, public_match_id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num')
-    .eq('id', gameId)
-    .single();
-
-  if (gameError || !game) { console.error('Failed to fetch game', gameId, gameError); return null; }
-  
-  const { data: results, error: resultsError = null } = await supabase
-    .from('game_results')
-    .select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall')
-    .eq('game_id', gameId)
-    .order('placement', { ascending: true });
-
-  if (resultsError || !results || !results.length) { console.error('Failed to fetch results for', gameId, resultsError); return null; }
+  const { data: game, error: gameError } = await supabase.from('games').select('id, public_match_id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num').eq('id', gameId).single();
+  if (gameError || !game) return null;
+  const { data: results, error: resultsError = null } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
+  if (resultsError || !results || !results.length) return null;
   
   let tournamentDetails = null;
   if (game.tournament_num) {
     try {
       const currentPlayers = results.map(r => normalizeName(r.player_name));
-
-      const { data: matchRows, error: tourneyError } = await supabase
-        .from('tournament_matches')
-        .select('round_type, table_identifier, player_name')
-        .eq('tournament_num', game.tournament_num);
-
-      if (!tourneyError && matchRows && matchRows.length > 0) {
+      const { data: matchRows } = await supabase.from('tournament_matches').select('round_type, table_identifier, player_name').eq('tournament_num', game.tournament_num);
+      if (matchRows && matchRows.length > 0) {
         const tablesMap = new Map();
-        
         matchRows.forEach(row => {
-          const groupKey = `${row.round_type}\vert{}\vert{}${row.table_identifier}`;
-          if (!tablesMap.has(groupKey)) {
-            tablesMap.set(groupKey, {
-              roundType: row.round_type,
-              tableIdentifier: row.table_identifier,
-              players: []
-            });
-          }
+          const groupKey = `${row.round_type}||${row.table_identifier}`;
+          if (!tablesMap.has(groupKey)) tablesMap.set(groupKey, { roundType: row.round_type, tableIdentifier: row.table_identifier, players: [] });
           tablesMap.get(groupKey).players.push(normalizeName(row.player_name));
         });
-
-        const matchedTable = Array.from(tablesMap.values()).find(t => {
-          return currentPlayers.every(p => t.players.includes(p));
-        });
-
-        if (matchedTable) {
-          tournamentDetails = {
-            roundType: matchedTable.roundType,
-            tableIdentifier: matchedTable.tableIdentifier
-          };
-        }
+        const matchedTable = Array.from(tablesMap.values()).find(t => currentPlayers.every(p => t.players.includes(p)));
+        if (matchedTable) tournamentDetails = { roundType: matchedTable.roundType, tableIdentifier: matchedTable.tableIdentifier };
       }
-    } catch (err) {
-      console.error('Error cross-referencing tournament match metadata pairings:', err);
-    }
+    } catch (err) {}
   }
 
-  const playerKeys = results.map((r) => String(r.player_name || '').toLowerCase());
-
-  const { data: ratings, error: ratingsError = null } = await supabase
-    .from('player_ratings')
-    .select('player_key, display_name, game_version, elo')
-    .in('player_key', playerKeys)
-    .in('game_version', ['overall', game.game_version]);
-
-  if (ratingsError) { console.error('Failed to fetch ratings', ratingsError); }
+  const playerKeys = results.map(r => String(r.player_name || '').toLowerCase());
+  const { data: ratings } = await supabase.from('player_ratings').select('player_key, display_name, game_version, elo').in('player_key', playerKeys).in('game_version', ['overall', game.game_version]);
   const ratingsMap = {};
   for (const row of ratings || []) {
     if (!ratingsMap[row.player_key]) ratingsMap[row.player_key] = {};
     ratingsMap[row.player_key][row.game_version] = row.elo;
   }
 
-  const { data: sandboxResults, error: sandboxResultsError = null } = await supabase
-    .from('sandbox_game_results')
-    .select('player_name, elo_delta_overall')
-    .eq('game_id', gameId);
-
-  if (sandboxResultsError) { console.error('Failed to fetch sandbox results', sandboxResultsError); }
+  const { data: sandboxResults } = await supabase.from('sandbox_game_results').select('player_name, elo_delta_overall').eq('game_id', gameId);
   const sandboxDeltaMap = {};
-  for (const row of sandboxResults || []) {
-    const key = normalizeName(row.player_name);
-    sandboxDeltaMap[key] = row.elo_delta_overall;
-  }
+  for (const row of sandboxResults || []) sandboxDeltaMap[normalizeName(row.player_name)] = row.elo_delta_overall;
 
-  const { data: sandboxRatings, error: sandboxRatingsError = null } = await supabase
-    .from('sandbox_player_ratings')
-    .select('player_key, overall_vp_elo')
-    .in('player_key', playerKeys)
-    .eq('game_version', 'overall');
-
-  if (sandboxRatingsError) { console.error('Failed to fetch sandbox ratings', sandboxRatingsError); }
+  const { data: sandboxRatings } = await supabase.from('sandbox_player_ratings').select('player_key, overall_vp_elo').in('player_key', playerKeys).eq('game_version', 'overall');
   const sandboxRatingsMap = {};
-  for (const row of sandboxRatings || []) {
-    sandboxRatingsMap[row.player_key] = row.overall_vp_elo;
-  }
+  for (const row of sandboxRatings || []) sandboxRatingsMap[row.player_key] = row.overall_vp_elo;
 
   const screenshotMedia = game.image_url ? await createDiscordImagePayload(game.image_url) : null;
   return { game, results, ratingsMap, sandboxDeltaMap, sandboxRatingsMap, screenshotMedia, tournamentDetails };
 }
 
 async function buildEmbed(payload, guild) {
-  const game = payload.game; 
-  const results = payload.results; 
-  const ratingsMap = payload.ratingsMap; 
-  const sandboxDeltaMap = payload.sandboxDeltaMap || {};
-  const sandboxRatingsMap = payload.sandboxRatingsMap || {};
-  const screenshotMedia = payload.screenshotMedia;
-  const tourney = payload.tournamentDetails;
-  
+  const { game, results, ratingsMap, sandboxDeltaMap, sandboxRatingsMap, screenshotMedia, tournamentDetails: tourney } = payload;
   const modeLabel = capitalize(game.game_version || 'unknown'); 
   const tags = buildGameTags(game, guild); 
   const lines = [];
   
   let titleString = `Game Finished - ${modeLabel}`;
-  if (game.tournament_num) {
-    if (tourney) {
-      titleString = `🏆 Tournament ${game.tournament_num} | ${tourney.roundType}${tourney.tableIdentifier}`;
-    } else {
-      titleString = `🏆 Tournament ${game.tournament_num} Match Finished!`;
-    }
-  }
-
-  const matchUrl = game.public_match_id 
-    ? `https://dunestats.cc/match/${game.public_match_id}` 
-    : `https://dunestats.cc/matches`;
+  if (game.tournament_num) titleString = tourney ? `🏆 Tournament ${game.tournament_num} | ${tourney.roundType} ${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
 
   for (const row of results) {
     const place = getPlacementEmoji(guild, row.placement); 
     const playerKey = String(row.player_name || '').toLowerCase();
     const normalizedKey = normalizeName(row.player_name);
-
-    const currentOverall = ratingsMap[playerKey] ? ratingsMap[playerKey].overall : undefined; 
-    const currentMode = ratingsMap[playerKey] ? ratingsMap[playerKey][game.game_version] : undefined;
-    
-    const sandboxDelta = sandboxDeltaMap[normalizedKey];
-    const currentSandboxTotal = sandboxRatingsMap[playerKey];
-
     const mention = await resolveMentionForName(guild, row.player_name);
-    const playerPart = mention ? '**' + row.player_name + '** ' + mention : '**' + row.player_name + '**';
-    
     const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
-    const leaderDisplay = leaderEmoji ? `${leaderEmoji}${row.leader_name}` : (row.leader_name || 'Unknown Leader');
 
-    let text = place + ' ' + playerPart + ' - ' + leaderDisplay + ' - ' + (row.points ?? '?') + ' pts';
-    text += '\nOverall: ' + formatDelta(row.elo_delta_overall);
-    if (currentOverall !== undefined) { text += ' (-> ' + Number(currentOverall).toFixed(1) + ')'; }
-    text += ' | ' + modeLabel + ': ' + formatDelta(row.elo_delta);
-    if (currentMode !== undefined) { text += ' (-> ' + Number(currentMode).toFixed(1) + ')'; }
-
-    if (sandboxDelta !== undefined) {
-      text += ' | All VP: ' + formatDelta(sandboxDelta);
-      if (currentSandboxTotal !== undefined) { text += ' (-> ' + Number(currentSandboxTotal).toFixed(1) + ')'; }
+    let text = `${place} **${row.player_name}** ${mention || ''} - ${leaderEmoji}${row.leader_name || 'Unknown Leader'} - ${row.points ?? '?'} pts`;
+    text += `\nOverall: ${formatDelta(row.elo_delta_overall)}`;
+    if (ratingsMap[playerKey]?.overall !== undefined) text += ` (-> ${Number(ratingsMap[playerKey].overall).toFixed(1)})`;
+    text += ` | ${modeLabel}: ${formatDelta(row.elo_delta)}`;
+    if (ratingsMap[playerKey]?.[game.game_version] !== undefined) text += ` (-> ${Number(ratingsMap[playerKey][game.game_version]).toFixed(1)})`;
+    if (sandboxDeltaMap[normalizedKey] !== undefined) {
+      text += ` | All VP: ${formatDelta(sandboxDeltaMap[normalizedKey])}`;
+      if (sandboxRatingsMap[playerKey] !== undefined) text += ` (-> ${Number(sandboxRatingsMap[playerKey]).toFixed(1)})`;
     }
-
     lines.push(text);
   }
 
-  if (tags.length) { lines.push('Game modes played: ' + tags.join(' | ')); }
+  if (tags.length) lines.push('Game modes played: ' + tags.join(' | '));
 
   const embed = new EmbedBuilder()
     .setTitle(titleString)
-    .setURL(matchUrl)
+    .setURL(game.public_match_id ? `https://dunestats.cc/match/${game.public_match_id}` : `https://dunestats.cc/matches`)
     .setDescription(lines.join('\n\n'))
     .setColor(game.tournament_num ? 0xd35400 : 0xC9A24B)
     .setTimestamp(new Date());
 
-  if (screenshotMedia?.imageUrl) { embed.setImage(screenshotMedia.imageUrl); }
+  if (screenshotMedia?.imageUrl) embed.setImage(screenshotMedia.imageUrl);
   return { embed, screenshotMedia };
 }
 
 async function announceGame(gameId) {
-  const { data: checkGame } = await supabase
-    .from('games')
-    .select('announced_to_discord')
-    .eq('id', gameId)
-    .single();
-
-  if (checkGame && checkGame.announced_to_discord === true) {
-    console.log(`Game ${gameId} was already announced. Skipping duplicate.`);
-    return;
-  }
+  const { data: checkGame } = await supabase.from('games').select('announced_to_discord').eq('id', gameId).single();
+  if (checkGame && checkGame.announced_to_discord) return;
 
   const payload = await buildGameResultPayload(gameId); 
   if (!payload) return;
 
   const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); 
-  if (!channel) { 
-    console.error('Could not find target channel', DISCORD_CHANNEL_ID); 
-    return; 
-  }
+  if (!channel) return; 
 
   const built = await buildEmbed(payload, channel.guild); 
   const messagePayload = { embeds: [built.embed] };
 
-  if (built.screenshotMedia?.attachment) { 
-    messagePayload.files = [built.screenshotMedia.attachment]; 
-  } else if (built.screenshotMedia?.tooLarge) { 
-    messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; 
-  }
+  if (built.screenshotMedia?.attachment) messagePayload.files = [built.screenshotMedia.attachment]; 
+  else if (built.screenshotMedia?.tooLarge) messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; 
 
   await channel.send(messagePayload);
+  await supabase.from('games').update({ announced_to_discord: true }).eq('id', gameId);
 
-  const { error: updateErr } = await supabase
-    .from('games')
-    .update({ announced_to_discord: true })
-    .eq('id', gameId);
-
-  if (updateErr) {
-    console.error(`Failed to update announced_to_discord flag for game ${gameId}:`, updateErr);
-  } else {
-    console.log('Announced game and updated database flag:', gameId);
-  }
-
-  // --- AUTO-UPDATE TOURNAMENT SCHEDULE STATUS TO 'PLAYED' ---
   if (payload.game?.tournament_num && payload.tournamentDetails) {
     try {
-      await supabase
-        .from('tournament_match_schedules')
-        .update({
-          status: 'played',
-          updated_at: new Date().toISOString()
-        })
-        .eq('tournament_num', payload.game.tournament_num)
-        .eq('round_type', payload.tournamentDetails.roundType)
-        .eq('table_identifier', payload.tournamentDetails.tableIdentifier);
-
-      console.log(`🏆 Auto-marked tournament match schedule as PLAYED: T${payload.game.tournament_num} ${payload.tournamentDetails.roundType}${payload.tournamentDetails.tableIdentifier}`);
-    } catch (schedErr) {
-      console.error('Failed to update tournament_match_schedules to played:', schedErr);
-    }
+      await supabase.from('tournament_match_schedules').update({ status: 'played', updated_at: new Date().toISOString() })
+        .eq('tournament_num', payload.game.tournament_num).eq('round_type', payload.tournamentDetails.roundType).eq('table_identifier', payload.tournamentDetails.tableIdentifier);
+    } catch (schedErr) {}
   }
-
-  // --- IF THIS WAS A WEB LOBBY, MARK COMPLETED ---
-  try {
-    const { data: possibleLobby } = await supabase
-      .from('active_async_matches')
-      .select('id')
-      .eq('status', 'started')
-      .order('created_at', { ascending: false })
-      .limit(1); 
-    
-    if (possibleLobby && possibleLobby.length > 0) {
-      // Future implementation: automatic LFG closure
-    }
-  } catch (err) {}
 }
 
 function scheduleAnnouncement(gameId) {
@@ -639,188 +404,111 @@ function scheduleAnnouncement(gameId) {
   pendingGames.add(gameId);
   setTimeout(async () => {
     pendingGames.delete(gameId);
-    try { await announceGame(gameId); } catch (err) { console.error('Error announcing game', gameId, err); }
+    try { await announceGame(gameId); } catch (err) {}
   }, GAME_ROWS_WAIT_MS);
 }
 
 // -------------------------------------------------------------
-// 🔍 AI SCAN STATUS ANNOUNCEMENT
-// -------------------------------------------------------------
-function buildFactionLine(row) {
-  const factions = [
-    ['Emperor', row.emperor_level, row.emperor_alliance],
-    ['Guild', row.spacing_guild_level, row.spacing_guild_alliance],
-    ['Bene Gesserit', row.bene_gesserit_level, row.bene_gesserit_alliance],
-    ['Fremen', row.fremen_level, row.fremen_alliance]
-  ];
-  const parts = factions
-    .filter(([, level]) => level > 0)
-    .map(([name, level, alliance]) => `${name} Lv${level}${alliance ? ' 👑' : ''}`);
-  return parts.length ? parts.join(' · ') : null;
-}
-
-function buildScanResultEmbed(game, results) {
-  const sorted = [...results].sort((a, b) => (a.player_slot ?? 0) - (b.player_slot ?? 0));
-
-  const lines = sorted.map((row) => {
-    const placementLabel = { 1: '🥇', 2: '🥈', 3: '🥉', 4: '4️⃣' }[row.placement] || row.placement;
-
-    const badges = [
-      row.has_first_player ? '✅' : '',
-      row.has_high_council ? '🏛️ High Council' : '',
-      row.has_swordmaster ? '⚔️ Swordmaster' : ''
-    ].filter(Boolean).join('  ');
-
-    let block = `${placementLabel} **${row.player_name}** —${row.leader_name || 'Unknown Leader'}\n`;
-    block += `${row.points ?? '?'} pts · Slot ${row.player_slot ?? '?'} · Turn ${row.turn_order ?? '?'}\n`;
-    block += `🌶️ ${row.spice ?? 0}  💰 ${row.solaris ?? 0}  💧 ${row.water ?? 0}`;
-    if (badges) block += `   ${badges}`;
-
-    const factionLine = buildFactionLine(row);
-    if (factionLine) block += `\n${factionLine}`;
-
-    return block;
-  });
-
-  const matchUrl = game.public_match_id ? `https://dunestats.cc/match/${game.public_match_id}` : null;
-  const imageUrl = game.public_match_id
-    ? `${R2_MATCHES_BASE}/matches/${game.public_match_id}/${game.public_match_id}-content-area.png`
-    : null;
-
-  const titleBase = SCAN_STATUS_TITLES[game.ai_scan_status] || 'Match Scan Result';
-  const color = SCAN_STATUS_COLORS[game.ai_scan_status] || 0x95A5A6;
-
-  const embed = new EmbedBuilder()
-    .setTitle(`${titleBase}${game.public_match_id ? ` — #${game.public_match_id}` : ''}`)
-    .setDescription(lines.join('\n\n'))
-    .setColor(color)
-    .setFooter({ text: `Status: ${game.ai_scan_status}` })
-    .setTimestamp(new Date());
-
-  if (matchUrl) embed.setURL(matchUrl);
-  if (imageUrl) embed.setImage(imageUrl);
-
-  return embed;
-}
-
-async function announceOrUpdateScanResult(gameId) {
-  const { data: game, error: gameError } = await supabase
-    .from('games')
-    .select('id, public_match_id, ai_scan_status, ai_scan_discord_message_id')
-    .eq('id', gameId)
-    .single();
-
-  if (gameError || !game) { console.error('Failed to fetch game for scan announcement', gameId, gameError); return; }
-  if (!game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
-
-  const { data: results, error: resultsError } = await supabase
-    .from('game_results')
-    .select('*')
-    .eq('game_id', gameId)
-    .order('player_slot', { ascending: true });
-
-  if (resultsError || !results || !results.length) { console.error('Failed to fetch results for scan announcement', gameId, resultsError); return; }
-
-  const channel = await discordClient.channels.fetch(SCAN_RESULTS_CHANNEL_ID).catch(() => null);
-  if (!channel) { console.error('Could not find scan results channel', SCAN_RESULTS_CHANNEL_ID); return; }
-
-  const embed = buildScanResultEmbed(game, results);
-
-  if (game.ai_scan_discord_message_id) {
-    const existingMsg = await channel.messages.fetch(game.ai_scan_discord_message_id).catch(() => null);
-    if (existingMsg) {
-      await existingMsg.edit({ embeds: [embed] }).catch((err) => console.error('Failed to edit scan result message for game', gameId, err));
-      console.log('Edited existing scan result message for game:', gameId, '-> status:', game.ai_scan_status);
-      return;
-    }
-    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game${gameId} no longer exists. Posting a new one.`);
-  }
-
-  const sentMessage = await channel.send({ embeds: [embed] });
-
-  const { error: updateErr } = await supabase
-    .from('games')
-    .update({ ai_scan_discord_message_id: sentMessage.id })
-    .eq('id', gameId);
-
-  if (updateErr) console.error(`Failed to store ai_scan_discord_message_id for game ${gameId}:`, updateErr);
-  else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
-}
-
-function scheduleScanRefresh(gameId) {
-  if (!gameId || pendingScanRefresh.has(gameId)) return;
-  pendingScanRefresh.add(gameId);
-  setTimeout(async () => {
-    pendingScanRefresh.delete(gameId);
-    try {
-      const { data: game, error } = await supabase
-        .from('games')
-        .select('ai_scan_status')
-        .eq('id', gameId)
-        .single();
-
-      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
-
-      await announceOrUpdateScanResult(gameId);
-    } catch (err) {
-      console.error('Error refreshing scan result after game_results change', gameId, err);
-    }
-  }, GAME_ROWS_WAIT_MS);
-}
-
-// -------------------------------------------------------------
-// 🌐 WEB LOBBIES / QUICK CHAT HANDLERS
+// 🌐 WEB LOBBIES / QUICK CHAT / ROSTER RENDERING HANDLERS
 // -------------------------------------------------------------
 async function getDiscordMentionsForWebPlayers(webIds) {
   if (!webIds || webIds.length === 0) return {};
-  const { data } = await supabase
-    .from('player_discord_map')
-    .select('claimed_by, discord_user_id')
-    .in('claimed_by', webIds);
-    
+  const { data } = await supabase.from('player_discord_map').select('claimed_by, discord_user_id').in('claimed_by', webIds);
   const map = {};
-  if (data) {
-    data.forEach(row => {
-      if (row.discord_user_id) map[row.claimed_by] = ` <@${row.discord_user_id}>`;
-    });
-  }
+  if (data) data.forEach(row => { if (row.discord_user_id) map[row.claimed_by] = ` <@${row.discord_user_id}>`; });
   return map;
+}
+
+// Universal unified roster renderer that prevents duplicates and fetches IGNs automatically
+async function buildRosterDisplay(lobby) {
+  const pIds = lobby.player_ids || [];
+  const guests = lobby.guest_players || [];
+  const webNames = lobby.web_player_names || [];
+  const webIds = lobby.web_player_ids || [];
+  const notifies = lobby.notify_user_ids || [];
+
+  const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
+  const discordIgnMap = {};
+  
+  if (pIds.length > 0) {
+    const { data: dMap } = await supabase.from('player_discord_map').select('discord_user_id, player_key').in('discord_user_id', pIds);
+    if (dMap) dMap.forEach(r => discordIgnMap[r.discord_user_id] = capitalize(r.player_key));
+  }
+
+  const rosterLines = [];
+  const seenDiscordIds = new Set();
+  let actualCount = 0;
+
+  for (const id of pIds) {
+    seenDiscordIds.add(id);
+    const ign = discordIgnMap[id];
+    const bell = notifies.includes(id) ? ' 🔔' : '';
+    rosterLines.push(ign ? `• **${ign}** <@${id}>${bell}` : `• <@${id}>${bell}`);
+    actualCount++;
+  }
+
+  for (let i = 0; i < webNames.length; i++) {
+    const name = webNames[i];
+    const wId = webIds[i];
+    let dId = null;
+    if (wId && webMentionsMap[wId]) {
+      const match = webMentionsMap[wId].match(/<@(\d+)>/);
+      if (match) dId = match[1];
+    }
+
+    if (dId && seenDiscordIds.has(dId)) continue; 
+
+    const mention = dId ? ` <@${dId}>` : '';
+    rosterLines.push(`• **${name}** 🌐${mention}`);
+    if (dId) seenDiscordIds.add(dId);
+    actualCount++;
+  }
+
+  for (const guest of guests) {
+    rosterLines.push(`• ${guest} 👥`);
+    actualCount++;
+  }
+
+  return { display: rosterLines.join('\n') || 'None', count: actualCount };
 }
 
 async function syncLobbyEmbed(lobby) {
   if (!lobby.channel_id || !lobby.message_id) return;
-  
   const channel = await discordClient.channels.fetch(lobby.channel_id).catch(()=>null);
   if (!channel) return;
-  
   const msg = await channel.messages.fetch(lobby.message_id).catch(()=>null);
   if (!msg || !msg.embeds || !msg.embeds[0]) return;
 
-  const pIds = lobby.player_ids || [];
-  const notifies = lobby.notify_user_ids || [];
-  const guests = lobby.guest_players || [];
-  const webNames = lobby.web_player_names || [];
-  const webIds = lobby.web_player_ids || [];
+  const { display, count } = await buildRosterDisplay(lobby);
 
-  const totalCount = pIds.length + guests.length + webNames.length;
-  
-  const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
+  let hostDisplay = 'Web Player 🌐';
+  if (lobby.host_id) {
+     const { data: mapData } = await supabase.from('player_discord_map').select('player_key').eq('discord_user_id', lobby.host_id).maybeSingle();
+     if (mapData && mapData.player_key) hostDisplay = `**${capitalize(mapData.player_key)}** <@${lobby.host_id}>`;
+     else hostDisplay = `<@${lobby.host_id}>`;
+  } else if (lobby.web_player_names && lobby.web_player_names.length > 0) {
+     hostDisplay = `**${lobby.web_player_names[0]} 🌐**`;
+     if (lobby.web_player_ids && lobby.web_player_ids[0]) {
+         const webMentionsMap = await getDiscordMentionsForWebPlayers([lobby.web_player_ids[0]]);
+         if (webMentionsMap[lobby.web_player_ids[0]]) hostDisplay += webMentionsMap[lobby.web_player_ids[0]];
+     }
+  }
 
-  const mentionsList = pIds.map(id => `• <@${id}>${notifies.includes(id) ? ' 🔔' : ''}`);
-  const guestsList = guests.map(name => `• ${name} 👥`);
-  const webList = webNames.map((name, idx) => {
-    const wId = webIds[idx];
-    const mention = wId && webMentionsMap[wId] ? webMentionsMap[wId] : '';
-    return `• ${name} 🌐${mention}`;
-  });
+  const oldDetails = msg.embeds[0].fields[0].value;
+  const verb = oldDetails.includes('created a lobby') ? 'created a lobby for' : 'is looking for players for';
+  const expText = (lobby.expansions && lobby.expansions.length > 0) ? ` with ${lobby.expansions.join(', ')}` : '';
+  const boardText = lobby.board_type || 'Base Game';
   
-  const fullRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n');
+  const newDetailsLine = `${hostDisplay} ${verb} ${boardText}${expText}.`;
+  const timerLine = oldDetails.split('\n')[1] || `*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`;
 
   const embed = EmbedBuilder.from(msg.embeds[0]);
+  if (lobby.message_text) embed.setDescription(`"${lobby.message_text}"`);
+  
   embed.setFields(
-    { name: msg.embeds[0].fields[0].name, value: msg.embeds[0].fields[0].value, inline: false },
+    { name: '📝 Match Details', value: `${newDetailsLine}\n${timerLine}`, inline: false },
     { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-    { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay || 'None', inline: false },
+    { name: `👥 Players (${count}/4)`, value: display, inline: false },
     { name: msg.embeds[0].fields[3].name, value: msg.embeds[0].fields[3].value, inline: false }
   );
 
@@ -837,19 +525,11 @@ async function handleWebLobbyCreation(lobby) {
     let hostName = 'Web Player';
     let discordMention = '';
 
-    // Look up the host's IGN and Discord ID
     if (lobby.web_host_id) {
-      const { data: mapData } = await supabase
-        .from('player_discord_map')
-        .select('player_key, discord_user_id')
-        .eq('claimed_by', lobby.web_host_id)
-        .limit(1);
-        
+      const { data: mapData } = await supabase.from('player_discord_map').select('player_key, discord_user_id').eq('claimed_by', lobby.web_host_id).limit(1);
       if (mapData && mapData.length > 0) {
         hostName = capitalize(mapData[0].player_key);
-        if (mapData[0].discord_user_id) {
-          discordMention = ` <@${mapData[0].discord_user_id}>`;
-        }
+        if (mapData[0].discord_user_id) discordMention = ` <@${mapData[0].discord_user_id}>`;
       }
     }
 
@@ -860,13 +540,9 @@ async function handleWebLobbyCreation(lobby) {
     const { data: existingHostLobbies } = await supabase.from('active_async_matches').select('match_id').ilike('match_id', `${prefixPattern}%`);
     if (existingHostLobbies && existingHostLobbies.length > 0) {
       let maxNumber = 0;
-      const numberRegex = new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i');
       existingHostLobbies.forEach((row) => {
-        const match = row.match_id ? row.match_id.match(numberRegex) : null;
-        if (match) {
-          const num = parseInt(match[1], 10);
-          if (!isNaN(num) && num > maxNumber) maxNumber = num;
-        }
+        const match = row.match_id ? row.match_id.match(new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i')) : null;
+        if (match && parseInt(match[1], 10) > maxNumber) maxNumber = parseInt(match[1], 10);
       });
       generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
     }
@@ -874,23 +550,20 @@ async function handleWebLobbyCreation(lobby) {
     const emojiTarget = isLive ? '⚔️' : '🎲';
     const embedColor = isLive ? 0xe74c3c : 0xC9A24B;
     const roleId = isLive ? '1219666679764877424' : '1219666516644204554';
-    const roleMention = `<@&${roleId}>`;
     
     const expStrings = lobby.expansions || [];
     const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
     const boardDisplay = lobby.board_type ? lobby.board_type : 'Base Game';
     const statusSentence = `**${hostName} 🌐**${discordMention} created a lobby for ${boardDisplay}${expText}.`;
 
-    // Ghost ping sentence logic
-    let customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${isLive ? 'live' : 'async'} players ${roleMention}`;
+    let customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${isLive ? 'live' : 'async'} players <@&${roleId}>`;
     if (lobby.board_type && lobby.board_type !== 'Base Game') customPingSentence += ` for ${lobby.board_type}`;
     else if (lobby.board_type === 'Base Game') customPingSentence += ` for Base Game`;
-    if (expText) customPingSentence += expText;
-    customPingSentence += '.';
+    customPingSentence += `${expText}.`;
 
-    const embedTitle = hostName !== 'Web Player' 
-      ? `${emojiTarget} ${hostName}'s Game [ID:${generatedMatchId}]`
-      : `${emojiTarget} New Match Open! [ID:${generatedMatchId}]`;
+    const embedTitle = hostName !== 'Web Player' ? `${emojiTarget} ${hostName}'s Game [ID:${generatedMatchId}]` : `${emojiTarget} New Match Open! [ID:${generatedMatchId}]`;
+    const tempLobby = { ...lobby, web_player_names: [hostName], web_player_ids: [lobby.web_host_id] };
+    const { display: rosterStr } = await buildRosterDisplay(tempLobby);
 
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
@@ -899,189 +572,117 @@ async function handleWebLobbyCreation(lobby) {
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (1/4)`, value: `• ${hostName} 🌐${discordMention}`, inline: false },
-        { name: 'Reaction Legend', value: [
-            `${emojiTarget} • **Join / Leave** the lobby`,
-            `🎮 • **Start Game** (Requires 2+ players)`,
-            `❌ • **Cancel Lobby** (Host only)`,
-            `🔔 • **Toggle Ping Alerts**`,
-            `📢 • **Ping Lobby Role** (45m cooldown)`
-          ].join('\n'), inline: false 
-        }
+        { name: `👥 Players (1/4)`, value: rosterStr, inline: false },
+        { name: 'Reaction Legend', value: [`${emojiTarget} • **Join / Leave** the lobby`, `🎮 • **Start Game** (Requires 2+ players)`, `❌ • **Cancel Lobby** (Host only)`, `🔔 • **Toggle Ping Alerts**`, `📢 • **Ping Lobby Role** (45m cooldown)`].join('\n'), inline: false }
       )
-      .setFooter({ text: `Lobby created from dunestats.cc/lobbies` })
-      .setTimestamp();
+      .setFooter({ text: `Lobby created from dunestats.cc/lobbies` }).setTimestamp();
 
     let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
-    if (lobby.lobby_password && lobby.lobby_password !== 'None') {
-      copyableContent += `\n🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*`;
-    }
+    if (lobby.lobby_password && lobby.lobby_password !== 'None') copyableContent += `\n🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*`;
 
     const message = await channel.send({ content: copyableContent, embeds: [embed] });
 
     try {
       const customJoinEmoji = channel.guild.emojis.cache.find(e => e.name === (isLive ? 'LiveDune' : 'AsyncDune'));
-      if (customJoinEmoji) await message.react(customJoinEmoji).catch(() => {});
-      else await message.react(emojiTarget).catch(() => {});
-      await message.react('🎮').catch(() => {});
-      await message.react('❌').catch(() => {});
-      await message.react('🔔').catch(() => {});
-      await message.react('📢').catch(() => {});
-    } catch (reactErr) { console.error(reactErr); }
+      await message.react(customJoinEmoji ? customJoinEmoji : emojiTarget).catch(() => {});
+      await message.react('🎮').catch(() => {}); await message.react('❌').catch(() => {});
+      await message.react('🔔').catch(() => {}); await message.react('📢').catch(() => {});
+    } catch (reactErr) {}
 
-    // Send and delete ghost ping
-    const pingMessage = await channel.send({
-      content: customPingSentence,
-      allowedMentions: { roles: [roleId] }
-    });
-    setTimeout(() => {
-      pingMessage.delete().catch(() => {});
-    }, 1500);
+    const pingMessage = await channel.send({ content: customPingSentence, allowedMentions: { roles: [roleId] } });
+    setTimeout(() => { pingMessage.delete().catch(() => {}); }, 1500);
 
-    // Update Supabase (Ensure web_player_ids captures the host UUID)
     await supabase.from('active_async_matches').update({
-      status: 'searching',
-      match_id: generatedMatchId,
-      message_id: message.id,
-      channel_id: channel.id,
-      guild_id: channel.guild.id,
-      web_player_names: [hostName],
-      web_player_ids: [lobby.web_host_id]
+      status: 'searching', match_id: generatedMatchId, message_id: message.id, channel_id: channel.id, guild_id: channel.guild.id,
+      web_player_names: [hostName], web_player_ids: [lobby.web_host_id]
     }).eq('id', lobby.id);
 
-  } catch (err) {
-    console.error('Error creating Discord Lobby from Web Event:', err);
-  }
+  } catch (err) { console.error('Error creating Discord Lobby from Web Event:', err); }
 }
 
-// -------------------------------------------------------------
-// 📢 UNIVERSAL LOBBY PING NOTIFICATION ENGINE
-// -------------------------------------------------------------
 async function executeLobbyPing(lobby, channel) {
   const now = new Date();
   const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
-
-  if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
-    return false;
-  }
+  if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) return false;
 
   await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
   lobby.last_prompted_at = now.toISOString();
 
   const isLiveLobby = lobby.mode === 'live';
   let roleId = isLiveLobby ? '1219666679764877424' : '1219666516644204554';
-  let roleMention = `<@&${roleId}>`;
-
+  
   const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
   if (!msg || !msg.embeds || !msg.embeds[0]) return true;
 
-  const detailsBlock = msg.embeds[0].fields[0]?.value || '';
-  const modeInformation = detailsBlock.split('\n')[0]
+  const modeInformation = (msg.embeds[0].fields[0]?.value || '').split('\n')[0]
     .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '')
     .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '')
     .replace(/\*\*.+?\*\*\s+(?:<@\d+>\s+)?created\s+a\s+lobby\s+for\s+/i, '')
     .replace(/\*\*.+?\*\*\s+(?:<@\d+>\s+)?created\s+a\s+lobby\s+/i, '');
 
-  const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
-
-  let hostMentionString = '';
+  let hostMentionString = 'Web Player 🌐';
   if (lobby.host_id) {
-    hostMentionString = `<@${lobby.host_id}>`;
+    const { data: mapData } = await supabase.from('player_discord_map').select('player_key').eq('discord_user_id', lobby.host_id).maybeSingle();
+    hostMentionString = mapData && mapData.player_key ? `**${capitalize(mapData.player_key)}** <@${lobby.host_id}>` : `<@${lobby.host_id}>`;
   } else if (lobby.web_player_names && lobby.web_player_names.length > 0) {
-    const hostName = lobby.web_player_names[0];
-    const hostUuid = (lobby.web_player_ids && lobby.web_player_ids.length > 0) ? lobby.web_player_ids[0] : null;
-    let discordMention = '';
-    
-    if (hostUuid) {
-      const { data: mapData } = await supabase.from('player_discord_map').select('discord_user_id').eq('claimed_by', hostUuid).single();
-      if (mapData && mapData.discord_user_id) discordMention = ` <@${mapData.discord_user_id}>`;
+    hostMentionString = `**${lobby.web_player_names[0]} 🌐**`;
+    if (lobby.web_player_ids && lobby.web_player_ids[0]) {
+      const webMentionsMap = await getDiscordMentionsForWebPlayers([lobby.web_player_ids[0]]);
+      if (webMentionsMap[lobby.web_player_ids[0]]) hostMentionString += webMentionsMap[lobby.web_player_ids[0]];
     }
-    hostMentionString = `**${hostName} 🌐**${discordMention}`;
-  } else {
-    hostMentionString = `**Web Player 🌐**`;
   }
 
+  const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
   const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
   const accurateEndEmoji = isLiveLobby ? (getEmoji(channel.guild, 'LiveDune', '⚔️')) : (getEmoji(channel.guild, 'AsyncDune', '🎲'));
   const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
 
-  const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
-  const allowedMentionsOptions = { roles: [roleId] };
+  const tagMessage = `<@&${roleId}> ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
 
   let historyCountMet = false;
   try {
     const fetchedHistory = await channel.messages.fetch({ after: msg.id, limit: 12 }).catch(() => null);
-    if (fetchedHistory && fetchedHistory.size >= 5) {
-      historyCountMet = true;
-    }
-  } catch (err) { console.error(err); }
+    if (fetchedHistory && fetchedHistory.size >= 5) historyCountMet = true;
+  } catch (err) {}
 
   if (historyCountMet) {
-    const activeEmbed = EmbedBuilder.from(msg.embeds[0]);
-    const newLobbyMsg = await channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
-
+    const newLobbyMsg = await channel.send({ content: tagMessage, embeds: [EmbedBuilder.from(msg.embeds[0])], allowedMentions: { roles: [roleId] } });
     try {
       const joinEmojiObj = channel.guild.emojis.cache.find(e => e.name === (isLiveLobby ? 'LiveDune' : 'AsyncDune'));
-      if (joinEmojiObj) await newLobbyMsg.react(joinEmojiObj).catch(() => {});
-      else await newLobbyMsg.react(isLiveLobby ? '⚔️' : '🎲').catch(() => {});
-      
-      await newLobbyMsg.react('🎮').catch(() => {});
-      await newLobbyMsg.react('❌').catch(() => {});
-      await newLobbyMsg.react('🔔').catch(() => {});
-      await newLobbyMsg.react('📢').catch(() => {});
-    } catch (rErr) { console.error(rErr); }
-
+      await newLobbyMsg.react(joinEmojiObj ? joinEmojiObj : (isLiveLobby ? '⚔️' : '🎲')).catch(() => {});
+      await newLobbyMsg.react('🎮').catch(() => {}); await newLobbyMsg.react('❌').catch(() => {});
+      await newLobbyMsg.react('🔔').catch(() => {}); await newLobbyMsg.react('📢').catch(() => {});
+    } catch (rErr) {}
     await supabase.from('active_async_matches').update({ message_id: newLobbyMsg.id }).eq('id', lobby.id);
-
-    msg.reactions.cache.forEach(async (r) => {
-      await r.users.remove(discordClient.user.id).catch(() => {});
-    });
-
-    const moveRefLink = `https://discord.com/channels/${channel.guild.id}/${channel.id}/${newLobbyMsg.id}`;
-    await msg.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
+    msg.reactions.cache.forEach(async (r) => { await r.users.remove(discordClient.user.id).catch(() => {}); });
+    await msg.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** https://discord.com/channels/${channel.guild.id}/${channel.id}/${newLobbyMsg.id}`, embeds: [] }).catch(() => {});
   } else {
-    await channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
+    await channel.send({ content: tagMessage, allowedMentions: { roles: [roleId] } });
   }
-
   return true;
 }
 
 async function handleWebQuickChat(chatRow) {
   const { lobby_id, sender_name, message_code } = chatRow;
-  
   const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobby_id).single();
   if (!lobby || !lobby.channel_id) return;
-
   const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
   if (!channel) return;
 
-  if (message_code === 'room_up') {
-    await channel.send(`💬 **[🌐 ${sender_name}]**: 🎮 Room has been created in-game!`);
-  } else if (message_code === 'password_ask') {
-    await channel.send(`💬 **[🌐 ${sender_name}]**: 🔑 What is the in-game room password?`);
-  } else if (message_code === 'need_5') {
-    await channel.send(`💬 **[🌐 ${sender_name}]**: ⏳ Stepping away for 5 minutes, be right back!`);
-  } else if (message_code === 'ping') {
-    await executeLobbyPing(lobby, channel);
-  }
+  if (message_code === 'room_up') await channel.send(`💬 **[🌐 ${sender_name}]**: 🎮 Room has been created in-game!`);
+  else if (message_code === 'password_ask') await channel.send(`💬 **[🌐 ${sender_name}]**: 🔑 What is the in-game room password?`);
+  else if (message_code === 'need_5') await channel.send(`💬 **[🌐 ${sender_name}]**: ⏳ Stepping away for 5 minutes, be right back!`);
+  else if (message_code === 'lobby_name_ask') await channel.send(`💬 **[🌐 ${sender_name}]**: 📛 What is the in-game lobby name?`);
+  else if (message_code === 'ping') await executeLobbyPing(lobby, channel);
 }
 
 function startRealtimeListener() {
-  if (reconnectTimer) {
-    clearTimeout(reconnectTimer);
-    reconnectTimer = null;
-  }
-
-  if (realtimeChannel) {
-    console.log('Cleaning up stale Realtime channel...');
-    supabase.removeChannel(realtimeChannel);
-    realtimeChannel = null;
-  }
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+  if (realtimeChannel) { supabase.removeChannel(realtimeChannel); realtimeChannel = null; }
 
   realtimeChannel = supabase.channel('global_discord_listeners')
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
-      const gameId = payload && payload.new ? payload.new.game_id : null; 
-      if (gameId) scheduleAnnouncement(gameId);
+      if (payload && payload.new && payload.new.game_id) scheduleAnnouncement(payload.new.game_id);
     })
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'lobby_quick_chats' }, (payload) => {
       if (payload.new) handleWebQuickChat(payload.new);
@@ -1089,184 +690,80 @@ function startRealtimeListener() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'active_async_matches' }, async (payload) => {
       const { eventType, new: newRecord, old: oldRecord } = payload;
       if (!newRecord) return;
-
-      if (eventType === 'INSERT' && newRecord.status === 'pending_creation') {
-        await handleWebLobbyCreation(newRecord);
-      }
+      if (eventType === 'INSERT' && newRecord.status === 'pending_creation') await handleWebLobbyCreation(newRecord);
       
       if (eventType === 'UPDATE' && oldRecord) {
-        // Sync Roster if arrays changed
         if (
           JSON.stringify(oldRecord.web_player_names) !== JSON.stringify(newRecord.web_player_names) ||
           JSON.stringify(oldRecord.player_ids) !== JSON.stringify(newRecord.player_ids) ||
-          JSON.stringify(oldRecord.guest_players) !== JSON.stringify(newRecord.guest_players)
+          JSON.stringify(oldRecord.guest_players) !== JSON.stringify(newRecord.guest_players) ||
+          oldRecord.board_type !== newRecord.board_type ||
+          JSON.stringify(oldRecord.expansions) !== JSON.stringify(newRecord.expansions) ||
+          oldRecord.lobby_password !== newRecord.lobby_password ||
+          oldRecord.message_text !== newRecord.message_text
         ) {
           await syncLobbyEmbed(newRecord);
         }
-
-        // Web users clicked 'Start Game'
-        if (oldRecord.status === 'searching' && newRecord.status === 'started') {
-          await executeLobbyStartSequence(newRecord);
-        }
+        if (oldRecord.status === 'searching' && newRecord.status === 'started') await executeLobbyStartSequence(newRecord);
       }
     })
     .subscribe(async (status, err) => {
-      console.log('Supabase realtime subscription status:', status);
-      
       if (status === 'SUBSCRIBED') { 
         realtimeRetryCount = 0; 
         try {
-          const tenSecondsAgo = new Date(Date.now() - 10000).toISOString();
-          const { data: unannouncedGames } = await supabase
-            .from('games')
-            .select('id')
-            .eq('announced_to_discord', false)
-            .lt('created_at', tenSecondsAgo)
-            .order('created_at', { ascending: true });
-
-          if (unannouncedGames && unannouncedGames.length > 0) {
-            for (const g of unannouncedGames) {
-              scheduleAnnouncement(g.id);
-            }
-          }
-        } catch (catchUpErr) {
-          console.error('Error running reconnect catch-up scan:', catchUpErr);
-        }
+          const { data: unannouncedGames } = await supabase.from('games').select('id').eq('announced_to_discord', false).lt('created_at', new Date(Date.now() - 10000).toISOString()).order('created_at', { ascending: true });
+          if (unannouncedGames && unannouncedGames.length > 0) unannouncedGames.forEach(g => scheduleAnnouncement(g.id));
+        } catch (catchUpErr) {}
         return; 
       }
-
       if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
-        if (err) { console.error('Realtime error caught:', err); }
         supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
-        
-        if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
-          realtimeRetryCount = 0; 
-        }
-        
+        if (realtimeRetryCount >= REALTIME_MAX_RETRIES) realtimeRetryCount = 0; 
         realtimeRetryCount += 1; 
         const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000);
-        console.log(`Scheduling reconnection in ${delay / 1000}s...`);
-
-        if (!reconnectTimer) {
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            startRealtimeListener();
-          }, delay);
-        }
+        if (!reconnectTimer) { reconnectTimer = setTimeout(() => { reconnectTimer = null; startRealtimeListener(); }, delay); }
       }
     });
 }
 
 function startGlobalDatabaseListener() {
-  supabase
-    .channel('global_db_sync')
-    .on(
-      'postgres_changes',
-      { event: '*', schema: 'public' },
-      async (payload) => {
+  supabase.channel('global_db_sync')
+    .on('postgres_changes', { event: '*', schema: 'public' }, async (payload) => {
         const { table, eventType, new: newRecord, old: oldRecord } = payload;
         
-        // --- REAL-TIME TOURNAMENT REGISTRATION SYNC & UNREGISTER STRIPPING ---
         if (table === 'tournament_registrations') {
           const rec = newRecord || oldRecord;
-          if (!rec) return;
-
-          const tNum = Number(rec.tournament_num);
-          const targetRoleId = TOURNAMENT_ROLE_MAP[tNum];
-
-          if (targetRoleId) {
-            const shouldHaveRole = (eventType !== 'DELETE') && (newRecord?.active_on_discord === true);
-            await syncSingleUserRole(rec.discord_username, targetRoleId, shouldHaveRole);
+          if (rec && TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)]) {
+            await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
           }
         }
-
-        // --- AI SCAN STATUS CHANGE -> ANNOUNCE OR EDIT IN DISCORD ---
         if (table === 'games' && eventType === 'UPDATE' && newRecord) {
-          const oldStatus = oldRecord ? oldRecord.ai_scan_status : undefined;
-          const newStatus = newRecord.ai_scan_status;
-
-          if (newStatus && newStatus !== AI_SCAN_IGNORED_STATUS && newStatus !== oldStatus) {
-            try {
-              await announceOrUpdateScanResult(newRecord.id);
-            } catch (scanErr) {
-              console.error('Error announcing/updating scan result for game', newRecord.id, scanErr);
-            }
+          if (newRecord.ai_scan_status && newRecord.ai_scan_status !== AI_SCAN_IGNORED_STATUS && newRecord.ai_scan_status !== (oldRecord ? oldRecord.ai_scan_status : undefined)) {
+            try { await announceOrUpdateScanResult(newRecord.id); } catch (scanErr) {}
           }
         }
-
-        // --- GAME_RESULTS CHANGED -> REFRESH AN ALREADY-POSTED SCAN RESULT MESSAGE ---
-        if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) {
-          scheduleScanRefresh(newRecord.game_id);
-        }
+        if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
 
         if (!newRecord) return;
-
-        if (table === 'player_sp' && eventType === 'UPDATE') {
-          if (newRecord.is_claimed === true) {
-            const { data: mapRecord } = await supabase
-              .from('player_discord_map')
-              .select('discord_user_id')
-              .eq('player_key', newRecord.player_key)
-              .single();
-
-            const targetDiscordId = mapRecord?.discord_user_id;
-            if (targetDiscordId) {
-              await syncPlayerSpRole(targetDiscordId, Number(newRecord.lifetime_sp));
-            }
-          }
+        if (table === 'player_sp' && eventType === 'UPDATE' && newRecord.is_claimed === true) {
+          const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id').eq('player_key', newRecord.player_key).single();
+          if (mapRecord?.discord_user_id) await syncPlayerSpRole(mapRecord.discord_user_id, Number(newRecord.lifetime_sp));
         }
-
         if (table === 'sp_events' && eventType === 'INSERT') {
           try {
-            const event = newRecord;
-            const { data: mapRecord } = await supabase
-              .from('player_discord_map')
-              .select('discord_user_id')
-              .eq('player_key', event.player_key)
-              .single();
-
-            const targetDiscordId = mapRecord?.discord_user_id;
+            const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id').eq('player_key', newRecord.player_key).single();
             const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
-
-            if (notificationChannel && targetDiscordId) {
-              let displayAction = formatActionType(event.action_type);
-              let rewardClarity = 'Standard Reward';
-              if (event.action_type === 'daily_first_message') {
-                rewardClarity = 'Daily Bonus (First message of the day)';
-              } else if (event.action_type === 'first_live_game') {
-                rewardClarity = 'Daily Bonus (First live game of the day)';
-              } else if (event.action_type === 'first_weekly_async') {
-                rewardClarity = 'Weekly Bonus (First async game of the week)';
-              } else if (event.action_type === 'image_upload') {
-                rewardClarity = 'Standard Reward';
-                displayAction = 'Recruitment Proof Posted';
-              } else if (event.action_type === 'match_start_base') {
-                rewardClarity = 'Standard Reward';
-              }
-
-              const alertEmbed = new EmbedBuilder()
-                .setTitle('🪙 Strategy Points Earned!')
-                .setDescription(`Congratulations <@${targetDiscordId}>!\nYou've earned a **${rewardClarity}**!`)
-                .setColor(0xf1c40f)
-                .addFields(
-                  { name: '✨ Action', value: `\`${displayAction}\``, inline: true },
-                  { name: '💰 Reward', value: `**+${event.amount} SP**`, inline: true }
-                )
-                .setTimestamp();
-
-              await notificationChannel.send({ content: `<@${targetDiscordId}>`, embeds: [alertEmbed] });
+            if (notificationChannel && mapRecord?.discord_user_id) {
+              const displayAction = newRecord.action_type === 'image_upload' ? 'Recruitment Proof Posted' : newRecord.action_type.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+              const rewardClarity = newRecord.action_type === 'daily_first_message' ? 'Daily Bonus (First message of the day)' : newRecord.action_type === 'first_live_game' ? 'Daily Bonus (First live game of the day)' : newRecord.action_type === 'first_weekly_async' ? 'Weekly Bonus (First async game of the week)' : 'Standard Reward';
+              const alertEmbed = new EmbedBuilder().setTitle('🪙 Strategy Points Earned!').setDescription(`Congratulations <@${mapRecord.discord_user_id}>!\nYou've earned a **${rewardClarity}**!`).setColor(0xf1c40f).addFields({ name: '✨ Action', value: `\`${displayAction}\``, inline: true }, { name: '💰 Reward', value: `**+${newRecord.amount} SP**`, inline: true }).setTimestamp();
+              await notificationChannel.send({ content: `<@${mapRecord.discord_user_id}>`, embeds: [alertEmbed] });
             }
-          } catch (err) {
-            console.error('Failed to dispatch real-time SP notification alert:', err);
-          }
+          } catch (err) {}
         }
       }
     )
-    .subscribe((status, err) => {
-      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
-        supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
-      }
-    });
+    .subscribe((status) => { if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') supabase.realtime.setAuth(SUPABASE_SECRET_KEY); });
 }
 
 async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
@@ -1278,17 +775,9 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
     const member = await searchGuildMemberByNames(guild, [discordUsername]);
     if (!member) return;
     const hasRole = member.roles.cache.has(roleId);
-
-    if (shouldHaveRole && !hasRole) {
-      await member.roles.add(role);
-      console.log(`✅ Automated Sync: Added ${role.name} to${member.user.tag}`);
-    } else if (!shouldHaveRole && hasRole) {
-      await member.roles.remove(role);
-      console.log(`❌ Automated Sync: Stripped/Removed ${role.name} from${member.user.tag}`);
-    }
-  } catch (err) {
-    console.error(`Error executing automated sync for ${discordUsername}:`, err);
-  }
+    if (shouldHaveRole && !hasRole) await member.roles.add(role);
+    else if (!shouldHaveRole && hasRole) await member.roles.remove(role);
+  } catch (err) {}
 }
 
 async function syncPlayerSpRole(discordUserId, lifetimeSp) {
@@ -1297,831 +786,332 @@ async function syncPlayerSpRole(discordUserId, lifetimeSp) {
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
     const member = await guild.members.fetch(discordUserId).catch(() => null);
     if (!member) return;
-
     const targetRoleConfig = SP_ROLES_CONFIG.find(role => lifetimeSp >= role.min);
     if (!targetRoleConfig) return;
-
-    const allRoleIds = SP_ROLES_CONFIG.map(r => r.id);
-    const rolesToRemove = allRoleIds.filter(id => id !== targetRoleConfig.id && member.roles.cache.has(id));
-    const shouldAddTarget = !member.roles.cache.has(targetRoleConfig.id);
-
-    if (rolesToRemove.length > 0) {
-      for (const roleId of rolesToRemove) {
-        await member.roles.remove(roleId).catch(() => null);
-      }
-    }
-
-    if (shouldAddTarget) {
+    const rolesToRemove = SP_ROLES_CONFIG.map(r => r.id).filter(id => id !== targetRoleConfig.id && member.roles.cache.has(id));
+    for (const roleId of rolesToRemove) await member.roles.remove(roleId).catch(() => null);
+    if (!member.roles.cache.has(targetRoleConfig.id)) {
       const targetRole = guild.roles.cache.get(targetRoleConfig.id);
-      if (targetRole) {
-        await member.roles.add(targetRole).catch(() => null);
-        console.log(`🎖️ SP Promotion: Assigned ${targetRole.name} to ${member.user.tag} (${lifetimeSp} SP)`);
-      }
+      if (targetRole) await member.roles.add(targetRole).catch(() => null);
     }
-  } catch (err) {
-    console.error(`Failed executing unified SP tier validation loops for user ID ${discordUserId}:`, err);
-  }
+  } catch (err) {}
 }
 
 async function executeGlobalSpAuditSweep() {
-  console.log('🧼 Starting comprehensive background SP role synchronization sweep...');
   try {
-    const { data: claimedSpRecords, error: spError } = await supabase
-      .from('player_sp')
-      .select('player_key, lifetime_sp')
-      .eq('is_claimed', true);
-
+    const { data: claimedSpRecords, error: spError } = await supabase.from('player_sp').select('player_key, lifetime_sp').eq('is_claimed', true);
     if (spError || !claimedSpRecords || !claimedSpRecords.length) return;
-
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
     if (!guild) return;
-
     for (const record of claimedSpRecords) {
-      let { data: mapRecord } = await supabase
-        .from('player_discord_map')
-        .select('id, discord_user_id, discord_username, display_name, username')
-        .eq('player_key', record.player_key)
-        .maybeSingle();
-
+      let { data: mapRecord } = await supabase.from('player_discord_map').select('id, discord_user_id, discord_username, display_name, username').eq('player_key', record.player_key).maybeSingle();
       let discordId = mapRecord?.discord_user_id;
-
       if (!discordId && mapRecord) {
-        const searchNames = [
-          mapRecord.discord_username,
-          mapRecord.display_name,
-          mapRecord.username,
-          record.player_key
-        ].filter(Boolean);
-
+        const searchNames = [mapRecord.discord_username, mapRecord.display_name, mapRecord.username, record.player_key].filter(Boolean);
         const member = await searchGuildMemberByNames(guild, searchNames);
-        if (member) {
-          discordId = member.id;
-          console.log(`🔗 Sweep Auto-Link: Mapped unclaimed ID for "${record.player_key}" -> ${member.user.tag}`);
-          await persistDiscordUserId(mapRecord, member.id);
-        }
+        if (member) { discordId = member.id; await persistDiscordUserId(mapRecord, member.id); }
       }
-
-      if (discordId) {
-        await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
-      }
+      if (discordId) await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
     }
-    console.log('🏁 Global background validation check complete.');
-  } catch (err) {
-    console.error('Critical failure running background validation sweeps:', err);
-  }
+  } catch (err) {}
 }
 
 async function runInitialDatabaseSync() {
-  console.log('🔄 Running initial boot-time synchronization scan...');
   try {
     const activeTournamentNums = Object.keys(TOURNAMENT_ROLE_MAP).map(Number);
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
-
-    const { data: activeRegs, error } = await supabase
-      .from('tournament_registrations')
-      .select('discord_username, tournament_num')
-      .in('tournament_num', activeTournamentNums)
-      .eq('active_on_discord', true);
-
-    if (error) throw error;
-
+    const { data: activeRegs } = await supabase.from('tournament_registrations').select('discord_username, tournament_num').in('tournament_num', activeTournamentNums).eq('active_on_discord', true);
     const activeUserMap = new Map();
     if (activeRegs && activeRegs.length) {
-      console.log(`Found ${activeRegs.length} active registrations across Tournaments${activeTournamentNums.join(', ')}.`);
       for (const reg of activeRegs) {
-        const tNum = Number(reg.tournament_num);
-        const roleId = TOURNAMENT_ROLE_MAP[tNum];
+        const roleId = TOURNAMENT_ROLE_MAP[Number(reg.tournament_num)];
         if (roleId) {
           if (!activeUserMap.has(roleId)) activeUserMap.set(roleId, new Set());
           activeUserMap.get(roleId).add(reg.discord_username.toLowerCase());
-
           await syncSingleUserRole(reg.discord_username, roleId, true);
         }
       }
     }
-
     if (guild) {
       for (const tNum of activeTournamentNums) {
         const roleId = TOURNAMENT_ROLE_MAP[tNum];
         const role = guild.roles.cache.get(roleId);
         const validUsersSet = activeUserMap.get(roleId) || new Set();
-
         if (role && role.members) {
           for (const member of role.members.values()) {
             const memberNames = [member.user.username, member.nickname, member.displayName].filter(Boolean).map(n => n.toLowerCase());
-            const isStillRegistered = memberNames.some(name => validUsersSet.has(name));
-
-            if (!isStillRegistered) {
-              await member.roles.remove(roleId).catch(() => null);
-              console.log(`🧹 Unregistered Cleanup: Stripped role ${role.name} from${member.user.tag} (No active registration)`);
-            }
+            if (!memberNames.some(name => validUsersSet.has(name))) await member.roles.remove(roleId).catch(() => null);
           }
         }
       }
     }
-
     await executeGlobalSpAuditSweep();
-    console.log('🏁 Boot-time verification sweep complete.');
-  } catch (err) {
-    console.error('Failed executing initial boot-time scan:', err);
-  }
+  } catch (err) {}
 }
 
 async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
   if (!discordUserId) return null;
-
-  let { data, error } = await supabase
-    .from('player_discord_map')
-    .select('player_key, claimed_by, id, discord_user_id')
-    .eq('discord_user_id', discordUserId)
-    .maybeSingle();
-
-  if (data) {
-    return { playerKey: data.player_key, userId: data.claimed_by };
-  }
+  let { data } = await supabase.from('player_discord_map').select('player_key, claimed_by, id, discord_user_id').eq('discord_user_id', discordUserId).maybeSingle();
+  if (data) return { playerKey: data.player_key, userId: data.claimed_by };
 
   let member = memberObject;
   if (!member) {
     try {
       const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
       member = await guild.members.fetch(discordUserId).catch(() => null);
-    } catch (err) {
-      console.error(`Failed to fetch guild member metadata for fallback mapping on ID ${discordUserId}:`, err);
-    }
+    } catch (err) {}
   }
-
   if (!member) return null;
 
-  const candidates = [
-    member.user?.username,
-    member.user?.globalName,
-    member.displayName,
-    member.nickname
-  ].filter(Boolean);
+  const candidates = [member.user?.username, member.user?.globalName, member.displayName, member.nickname].filter(Boolean);
+  const orFilters = [...candidates.map((value) => `discord_username.ilike.${value}`), ...candidates.map((value) => `username.ilike.${value}`), ...candidates.map((value) => `display_name.ilike.${value}`)];
+  const { data: searchData } = await supabase.from('player_discord_map').select('player_key, claimed_by, id, username, discord_username, display_name, discord_user_id').or(orFilters.join(',')).limit(10);
+  if (!searchData || !searchData.length) return null;
 
-  const orFilters = [
-    ...candidates.map((value) => `discord_username.ilike.${value}`),
-    ...candidates.map((value) => `username.ilike.${value}`),
-    ...candidates.map((value) => `display_name.ilike.${value}`)
-  ];
-
-  const { data: searchData, error: searchError } = await supabase
-    .from('player_discord_map')
-    .select('player_key, claimed_by, id, username, discord_username, display_name, discord_user_id')
-    .or(orFilters.join(','))
-    .limit(10);
-
-  if (searchError || !searchData || !searchData.length) return null;
-
-  let bestMatch = null;
-  let bestScore = 0;
-
+  let bestMatch = null, bestScore = 0;
   for (const row of searchData) {
-    const score = Math.max(
-      ...candidates.flatMap((candidate) => [
-        similarity(candidate, row.player_key),
-        similarity(candidate, row.display_name),
-        similarity(candidate, row.username),
-        similarity(candidate, row.discord_username)
-      ])
-    );
-
-    if (score > bestScore) {
-      bestMatch = row;
-      bestScore = score;
-    }
+    const score = Math.max(...candidates.flatMap((candidate) => [similarity(candidate, row.player_key), similarity(candidate, row.display_name), similarity(candidate, row.username), similarity(candidate, row.discord_username)]));
+    if (score > bestScore) { bestMatch = row; bestScore = score; }
   }
 
   if (bestMatch && bestScore >= DB_MATCH_THRESHOLD) {
-    console.log(`🔗 Auto-Linking Map: Resolved ${member.user.tag} to database player "${bestMatch.player_key}" (Score: ${bestScore.toFixed(2)})`);
     await persistDiscordUserId(bestMatch, discordUserId);
     return { playerKey: bestMatch.player_key, userId: bestMatch.claimed_by };
   }
-
   return null;
-}
-
-function formatActionType(action) {
-  return action
-    .split('_')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
-    .join(' ');
 }
 
 async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   try {
-    const { error: eventError } = await supabase
-      .from('sp_events')
-      .insert({
-        player_key: playerKey,
-        user_id: userId || null,
-        action_type: actionType,
-        amount: amount,
-        metadata: metadata
-      });
-
-    if (eventError) throw eventError;
-
-    const { data: currentSp, error: selectError } = await supabase
-      .from('player_sp')
-      .select('lifetime_sp, seasonal_sp')
-      .eq('player_key', playerKey)
-      .single();
-
-    if (selectError) throw selectError;
-
-    const newLifetime = (currentSp?.lifetime_sp || 0) + amount;
-    const newSeasonal = (currentSp?.seasonal_sp || 0) + amount;
-
-    const { error: updateError } = await supabase
-      .from('player_sp')
-      .update({
-        lifetime_sp: newLifetime,
-        seasonal_sp: newSeasonal,
-        updated_at: new Date().toISOString()
-      })
-      .eq('player_key', playerKey);
-
-    if (updateError) throw updateError;
-
-    console.log(`🪙 Awarded +${amount} SP to ${playerKey} for${actionType}`);
-  } catch (err) {
-    console.error(`Failed to award SP to ${playerKey}:`, err);
-  }
+    await supabase.from('sp_events').insert({ player_key: playerKey, user_id: userId || null, action_type: actionType, amount: amount, metadata: metadata });
+    const { data: currentSp } = await supabase.from('player_sp').select('lifetime_sp, seasonal_sp').eq('player_key', playerKey).single();
+    await supabase.from('player_sp').update({ lifetime_sp: (currentSp?.lifetime_sp || 0) + amount, seasonal_sp: (currentSp?.seasonal_sp || 0) + amount, updated_at: new Date().toISOString() }).eq('player_key', playerKey);
+  } catch (err) {}
 }
 
 async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
-  let channel = targetChannel;
-  if (!channel) {
-    channel = await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
-  }
+  let channel = targetChannel || await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
   if (!channel) return;
 
   const targetMsg = await channel.messages.fetch(lobbyRecord.message_id).catch(() => null);
   if (!targetMsg || !targetMsg.embeds[0]) return;
 
-  const embedTitle = targetMsg.embeds[0].title || '';
-  const representsLive = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match');
-
   await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
 
-  let players = [...(lobbyRecord.player_ids || [])];
-  let notifications = [...(lobbyRecord.notify_user_ids || [])];
-  const guestPlayers = [...(lobbyRecord.guest_players || [])];
-  const webNames = [...(lobbyRecord.web_player_names || [])];
-  const webIds = [...(lobbyRecord.web_player_ids || [])];
-  
-  const totalCount = players.length + guestPlayers.length + webNames.length;
+  const { display, count } = await buildRosterDisplay(lobbyRecord);
+  const cleanStartedSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
+  const matchTypeTitle = (targetMsg.embeds[0].title || '').includes('Live Match') || !(targetMsg.embeds[0].title || '').includes('Async Match') ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
 
-  const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
+  const embed = EmbedBuilder.from(targetMsg.embeds[0])
+    .setTitle(matchTypeTitle).setColor(0x2ecc71).setFooter(null) 
+    .setFields(
+      { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
+      { name: '🔑 Password', value: lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None' ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
+      { name: `👥 Final Roster (${count}/4)`, value: display, inline: false }
+    );
 
-  const embed = EmbedBuilder.from(targetMsg.embeds[0]);
-  const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
-  const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-  const webList = webNames.map((name, idx) => {
-    const wId = webIds[idx];
-    const mention = wId && webMentionsMap[wId] ? webMentionsMap[wId] : '';
-    return `• ${name} 🌐${mention}`;
-  });
-  
-  const finalRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n');
+  await targetMsg.edit({ content: `🚀 **The match${lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : ''} has officially begun! Good luck, commanders!**\nPlayers: ${(lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
 
-  const originalDetailsSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0];
-  const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
-  const matchTypeTitle = representsLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
-
-  embed.setTitle(matchTypeTitle)
-       .setColor(0x2ecc71)
-       .setFooter(null) 
-       .setFields(
-         { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
-         { name: '🔑 Password', value: lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None' ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
-         { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
-       );
-
-  const labelMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
-  await targetMsg.edit({ content: `🚀 **The match${labelMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${players.map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
-
-  const now = new Date();
-  const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-  const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-  const currentUtcDay = now.getUTCDay(); 
-  const sundayDistanceMs = currentUtcDay * 24 * 60 * 60 * 1000;
-  const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - sundayDistanceMs).toISOString();
-
+  const now = new Date(), startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+  const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - (now.getUTCDay() * 24 * 60 * 60 * 1000)).toISOString();
   const unlinkedPlayers = [];
 
-  for (const playerId of players) {
+  for (const playerId of (lobbyRecord.player_ids || [])) {
     const profile = await getPlayerProfileFromDiscord(playerId);
     if (!profile) {
-      let potentialSp = SP_REWARDS_CONFIG.MATCH_START_BASE.amount; 
-      if (representsLive) {
-        potentialSp += SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount; 
-      } else {
-        potentialSp += SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount; 
-      }
-      unlinkedPlayers.push({ id: playerId, points: potentialSp });
+      unlinkedPlayers.push({ id: playerId, points: SP_REWARDS_CONFIG.MATCH_START_BASE.amount + (matchTypeTitle.includes('Live') ? SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount : SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount) });
       continue;
     }
+    const { data: hourlyMatchEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'match_start_base').gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString());
+    if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'match_start_base', SP_REWARDS_CONFIG.MATCH_START_BASE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
 
-    const { data: hourlyMatchEvents } = await supabase
-      .from('sp_events')
-      .select('id')
-      .eq('player_key', profile.playerKey)
-      .eq('action_type', 'match_start_base')
-      .gte('created_at', oneHourAgo);
-
-    if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
-      await awardSP(
-        profile.playerKey,
-        profile.userId,
-        'match_start_base',
-        SP_REWARDS_CONFIG.MATCH_START_BASE.amount,
-        { discord_user_id: playerId, match_id: lobbyRecord.id }
-      );
-    }
-
-    if (representsLive) {
-      const { data: dailyLiveEvents } = await supabase
-        .from('sp_events')
-        .select('id')
-        .eq('player_key', profile.playerKey)
-        .eq('action_type', 'first_live_game')
-        .gte('created_at', startOfToday);
-
-      if (!dailyLiveEvents || dailyLiveEvents.length === 0) {
-        await awardSP(
-          profile.playerKey,
-          profile.userId,
-          'first_live_game',
-          SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount,
-          { discord_user_id: playerId, match_id: lobbyRecord.id }
-        );
-      }
+    if (matchTypeTitle.includes('Live')) {
+      const { data: dailyLiveEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'first_live_game').gte('created_at', startOfToday);
+      if (!dailyLiveEvents || dailyLiveEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'first_live_game', SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
     } else {
-      const { data: weeklyAsyncEvents } = await supabase
-        .from('sp_events')
-        .select('id')
-        .eq('player_key', profile.playerKey)
-        .eq('action_type', 'first_weekly_async')
-        .gte('created_at', startOfThisWeek);
-
-      if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) {
-        await awardSP(
-          profile.playerKey,
-          profile.userId,
-          'first_weekly_async',
-          SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount,
-          { discord_user_id: playerId, match_id: lobbyRecord.id }
-        );
-      }
+      const { data: weeklyAsyncEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'first_weekly_async').gte('created_at', startOfThisWeek);
+      if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'first_weekly_async', SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
     }
   }
 
   if (unlinkedPlayers.length > 0) {
-    const warningLines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`);
-    const warningEmbed = new EmbedBuilder()
-      .setTitle('⚠️ Missed Strategy Points!')
-      .setDescription(`${warningLines.join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`)
-      .setColor(0xe74c3c); 
-    await channel.send({ embeds: [warningEmbed] }).catch(() => {});
+    await channel.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Missed Strategy Points!').setDescription(`${unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`).setColor(0xe74c3c)] }).catch(() => {});
   }
 }
 
-// -------------------------------------------------------------
-// ✅ TOURNAMENT CHECK-IN REACTION HANDLING
-// -------------------------------------------------------------
 async function handleTournamentCheckinReaction(message, user, emojiName) {
   if (emojiName !== CHECKIN_EMOJI_NAME && emojiName !== '✅') return;
-
-  const { data: checkin, error } = await supabase
-    .from('tournament_checkins')
-    .select('*')
-    .eq('message_id', message.id)
-    .maybeSingle();
-
-  if (error || !checkin || checkin.deleted_at) return;
-
+  const { data: checkin } = await supabase.from('tournament_checkins').select('*').eq('message_id', message.id).maybeSingle();
+  if (!checkin || checkin.deleted_at) return;
   const config = TOURNAMENTS_CONFIG[checkin.tournament_num];
   if (!config || !config.registeredRoleId || !config.checkInRoleId) return;
-
-  const guild = message.guild;
-  if (!guild) return;
-
-  const member = await guild.members.fetch(user.id).catch(() => null);
+  const member = await message.guild?.members.fetch(user.id).catch(() => null);
   if (!member) return;
 
-  const hasRegisteredRole = member.roles.cache.has(config.registeredRoleId);
-  const hasCheckInRole = member.roles.cache.has(config.checkInRoleId);
   const reminderChannel = await discordClient.channels.fetch(CHECKIN_REMINDER_CHANNEL_ID).catch(() => null);
-
-  if (hasRegisteredRole) {
-    if (!hasCheckInRole) {
-      await member.roles.add(config.checkInRoleId).catch((err) => console.error('Failed to add check-in role:', err));
-      if (reminderChannel) {
-        await reminderChannel.send({
-          content: `✅ <@${user.id}> has successfully checked in for **Tournament #${checkin.tournament_num}**!`
-        }).catch(() => {});
-      }
+  if (member.roles.cache.has(config.registeredRoleId)) {
+    if (!member.roles.cache.has(config.checkInRoleId)) {
+      await member.roles.add(config.checkInRoleId).catch(() => {});
+      if (reminderChannel) await reminderChannel.send({ content: `✅ <@${user.id}> has successfully checked in for **Tournament #${checkin.tournament_num}**!` }).catch(() => {});
     }
     return;
   }
 
   const targetReaction = message.reactions.cache.find((r) => (r.emoji.name || r.emoji.toString()) === emojiName);
-  if (targetReaction) {
-    await targetReaction.users.remove(user.id).catch(() => {});
-  }
-
-  const notified = checkin.notified_user_ids || [];
-  if (notified.includes(user.id)) return;
-
-  if (reminderChannel) {
-    await reminderChannel.send({
-      content: `⚠️ <@${user.id}>, you tried to check in for **Tournament #${checkin.tournament_num}** but you're not registered yet!\n\n` +
-        `🔗 Register here: https://dunestats.cc/tournament-register/t${checkin.tournament_num}\n` +
-        `📝 Use this exact Discord username when registering: \`${member.user.username}\``
-    }).catch(() => {});
-  }
-
-  await supabase
-    .from('tournament_checkins')
-    .update({ notified_user_ids: [...notified, user.id] })
-    .eq('id', checkin.id)
-    .catch((err) => console.error('Failed to update notified_user_ids for check-in', checkin.id, err));
+  if (targetReaction) await targetReaction.users.remove(user.id).catch(() => {});
+  if ((checkin.notified_user_ids || []).includes(user.id)) return;
+  
+  if (reminderChannel) await reminderChannel.send({ content: `⚠️ <@${user.id}>, you tried to check in for **Tournament #${checkin.tournament_num}** but you're not registered yet!\n\n🔗 Register here: https://dunestats.cc/tournament-register/t${checkin.tournament_num}\n📝 Use this exact Discord username when registering: \`${member.user.username}\`` }).catch(() => {});
+  await supabase.from('tournament_checkins').update({ notified_user_ids: [...(checkin.notified_user_ids || []), user.id] }).eq('id', checkin.id).catch(() => {});
 }
 
 async function checkAndExpireCheckins() {
   try {
-    const now = new Date();
-    const { data: dueCheckins, error } = await supabase
-      .from('tournament_checkins')
-      .select('*')
-      .lte('expires_at', now.toISOString())
-      .is('deleted_at', null);
-
-    if (error) { console.error('Failed to query due tournament check-ins:', error); return; }
+    const { data: dueCheckins } = await supabase.from('tournament_checkins').select('*').lte('expires_at', new Date().toISOString()).is('deleted_at', null);
     if (!dueCheckins || !dueCheckins.length) return;
-
     for (const row of dueCheckins) {
       const channel = await discordClient.channels.fetch(row.channel_id).catch(() => null);
       const msg = channel ? await channel.messages.fetch(row.message_id).catch(() => null) : null;
-
       if (row.remove_after_24h) {
-        if (msg) await msg.delete().catch((err) => console.error('Failed to delete expired check-in message:', err));
-        await supabase.from('tournament_checkins').update({ deleted_at: now.toISOString() }).eq('id', row.id);
-        console.log(`✅ Deleted expired check-in message for Tournament #${row.tournament_num} (remove_after_24h=true).`);
-        continue;
-      }
-
-      if (!row.closed_at) {
-        if (msg && msg.embeds[0]) {
-          const closedEmbed = EmbedBuilder.from(msg.embeds[0])
-            .setTitle(`🔒 Tournament #${row.tournament_num} Check-In is CLOSED`)
-            .setColor(0x95A5A6)
-            .setFooter({ text: 'Check-in window has ended.' });
-          await msg.edit({ embeds: [closedEmbed] }).catch((err) => console.error('Failed to mark check-in message closed:', err));
-        }
-        await supabase.from('tournament_checkins').update({ closed_at: now.toISOString() }).eq('id', row.id);
-        console.log(`🔒 Marked check-in message closed for Tournament #${row.tournament_num}.`);
+        if (msg) await msg.delete().catch(() => {});
+        await supabase.from('tournament_checkins').update({ deleted_at: new Date().toISOString() }).eq('id', row.id);
+      } else if (!row.closed_at) {
+        if (msg && msg.embeds[0]) await msg.edit({ embeds: [EmbedBuilder.from(msg.embeds[0]).setTitle(`🔒 Tournament #${row.tournament_num} Check-In is CLOSED`).setColor(0x95A5A6).setFooter({ text: 'Check-in window has ended.' })] }).catch(() => {});
+        await supabase.from('tournament_checkins').update({ closed_at: new Date().toISOString() }).eq('id', row.id);
       }
     }
-  } catch (err) {
-    console.error('Error running check-in expiry sweep:', err);
-  }
+  } catch (err) {}
 }
 
-// -------------------------------------------------------------
-// ⏳ AUTOMATED LOBBY EXPIRY SWEEPER
-// -------------------------------------------------------------
 async function checkAndExpireLobbies() {
   try {
-    const nowISO = new Date().toISOString();
-    
-    const { data: expiredLobbies, error } = await supabase
-      .from('active_async_matches')
-      .select('*')
-      .eq('status', 'searching')
-      .lte('expires_at', nowISO);
-
-    if (error) {
-      console.error('Failed to query expired lobbies:', error);
-      return;
-    }
-
+    const { data: expiredLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').lte('expires_at', new Date().toISOString());
     if (!expiredLobbies || expiredLobbies.length === 0) return;
-
     for (const lobby of expiredLobbies) {
-      await supabase
-        .from('active_async_matches')
-        .update({ status: 'cancelled', auto_start_at: null })
-        .eq('id', lobby.id);
-
-      console.log(`⏱️ Lobby ${lobby.match_id} expired. Marked as cancelled.`);
-
+      await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
       if (lobby.channel_id && lobby.message_id) {
         const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
-        if (channel) {
-          const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
-          if (msg && msg.embeds && msg.embeds.length > 0) {
-            const expiredEmbed = EmbedBuilder.from(msg.embeds[0])
-              .setTitle('⏳ Lobby Expired')
-              .setColor(0x95A5A6)
-              .setDescription('This lobby timed out because it did not fill up in time.');
-            
-            await msg.edit({ content: `🚫 **Lobby expired**`, embeds: [expiredEmbed] }).catch(() => {});
-            await msg.reactions.removeAll().catch(() => {});
-          }
+        const msg = channel ? await channel.messages.fetch(lobby.message_id).catch(() => null) : null;
+        if (msg && msg.embeds && msg.embeds.length > 0) {
+          await msg.edit({ content: `🚫 **Lobby expired**`, embeds: [EmbedBuilder.from(msg.embeds[0]).setTitle('⏳ Lobby Expired').setColor(0x95A5A6).setDescription('This lobby timed out because it did not fill up in time.')] }).catch(() => {});
+          await msg.reactions.removeAll().catch(() => {});
         }
       }
     }
-  } catch (err) {
-    console.error('Error running lobby expiry sweep:', err);
-  }
+  } catch (err) {}
 }
 
-// -------------------------------------------------------------
-// 🔄 LIVE TOURNAMENT VOTING & DYNAMIC SLOT CONSENSUS ENGINE
-// -------------------------------------------------------------
 async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
-  const { data: schedule, error } = await supabase
-    .from('tournament_match_schedules')
-    .select('*')
-    .eq('message_id', message.id)
-    .single();
-
-  if (error || !schedule || schedule.mode?.trim() !== 'live' || schedule.status === 'played') return;
-  if (!schedule.player_discord_ids || !schedule.player_discord_ids.includes(user.id)) return;
-
+  const { data: schedule } = await supabase.from('tournament_match_schedules').select('*').eq('message_id', message.id).single();
+  if (!schedule || schedule.mode?.trim() !== 'live' || schedule.status === 'played' || !schedule.player_discord_ids?.includes(user.id)) return;
   const availableSlotLabels = (schedule.suggested_slots || []).map(s => s.label);
   if (!availableSlotLabels.includes(emojiName)) return;
 
-  let fetchedMsg = message;
-  try {
-    fetchedMsg = await message.channel.messages.fetch(schedule.message_id);
-  } catch (err) {
-    console.error('Failed to fetch message for reactions:', err);
-  }
-
+  let fetchedMsg = await message.channel.messages.fetch(schedule.message_id).catch(() => message);
   const currentVotes = {};
   for (const slot of availableSlotLabels) {
-    const r = fetchedMsg.reactions.cache.find(
-      react => react.emoji.name === slot || react.emoji.toString() === slot
-    );
+    const r = fetchedMsg.reactions.cache.find(react => react.emoji.name === slot || react.emoji.toString() === slot);
     if (r) {
       try {
-        const users = await r.users.fetch();
-        for (const [uid, u] of users) {
-          if (u.bot) continue;
-          if (!schedule.player_discord_ids.includes(uid)) continue;
-          if (!currentVotes[uid]) currentVotes[uid] = [];
-          if (!currentVotes[uid].includes(slot)) currentVotes[uid].push(slot);
+        for (const [uid, u] of await r.users.fetch()) {
+          if (!u.bot && schedule.player_discord_ids.includes(uid)) {
+            if (!currentVotes[uid]) currentVotes[uid] = [];
+            if (!currentVotes[uid].includes(slot)) currentVotes[uid].push(slot);
+          }
         }
-      } catch (fErr) {
-        console.error(`Failed fetching voters for ${slot}:`, fErr);
-      }
+      } catch (fErr) {}
     }
   }
 
   const votedUserIds = Object.keys(currentVotes);
   const votesCount = votedUserIds.length;
 
-  try {
-    if (fetchedMsg && fetchedMsg.embeds.length > 0) {
-      const originalEmbed = fetchedMsg.embeds[0];
-      const updatedEmbed = EmbedBuilder.from(originalEmbed);
-
-      const slotLines = (schedule.suggested_slots || []).map((slot) => {
-        const votersForSlot = schedule.player_discord_ids.filter(
-          id => currentVotes[id] && currentVotes[id].includes(slot.label)
-        );
-        const voterMentions = votersForSlot.length > 0
-          ? ` — ${votersForSlot.map(id => `<@${id}>`).join(' ')}`
-          : '';
-        return `${slot.label} ${slot.time_text}${voterMentions}`;
-      });
-
-      const nonVoters = schedule.player_discord_ids.filter(id => !votedUserIds.includes(id));
-      const nonVoterDisplay = nonVoters.length > 0
-        ? `\n\n**⏳ Did not vote yet (${votesCount}/4):**\n${nonVoters.map(id => `<@${id}>`).join(', ')}`
-        : `\n\n**✅ All 4 players have voted!**`;
-
-      const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
-      updatedFields.push({
-        name: '📅 Suggested Time Slots & Votes',
-        value: `${slotLines.join('\n')}${nonVoterDisplay}`,
-        inline: false
-      });
-
-      updatedEmbed.setFields(updatedFields);
-      await fetchedMsg.edit({ embeds: [updatedEmbed] }).catch(() => {});
-    }
-  } catch (embedUpdateErr) {
-    console.error('Failed updating guidelines embed:', embedUpdateErr);
+  if (fetchedMsg && fetchedMsg.embeds.length > 0) {
+    const originalEmbed = fetchedMsg.embeds[0];
+    const updatedEmbed = EmbedBuilder.from(originalEmbed);
+    const slotLines = (schedule.suggested_slots || []).map((slot) => {
+      const votersForSlot = schedule.player_discord_ids.filter(id => currentVotes[id] && currentVotes[id].includes(slot.label));
+      return `${slot.label} ${slot.time_text}${votersForSlot.length > 0 ? ` — ${votersForSlot.map(id => `<@${id}>`).join(' ')}` : ''}`;
+    });
+    const nonVoters = schedule.player_discord_ids.filter(id => !votedUserIds.includes(id));
+    const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
+    updatedFields.push({ name: '📅 Suggested Time Slots & Votes', value: `${slotLines.join('\n')}${nonVoters.length > 0 ? `\n\n**⏳ Did not vote yet (${votesCount}/4):**\n${nonVoters.map(id => `<@${id}>`).join(', ')}` : `\n\n**✅ All 4 players have voted!**`}`, inline: false });
+    updatedEmbed.setFields(updatedFields);
+    await fetchedMsg.edit({ embeds: [updatedEmbed] }).catch(() => {});
   }
 
   const slotScores = {};
   for (const slot of availableSlotLabels) slotScores[slot] = 0;
-
-  for (const uid of votedUserIds) {
-    for (const slot of currentVotes[uid]) {
-      if (slotScores[slot] !== undefined) slotScores[slot]++;
-    }
-  }
-
+  for (const uid of votedUserIds) for (const slot of currentVotes[uid]) if (slotScores[slot] !== undefined) slotScores[slot]++;
   const winningSlot = availableSlotLabels.find(slot => slotScores[slot] >= 4);
 
   const previousStatus = schedule.status;
-  let newStatus = schedule.status;
-  if (winningSlot) {
-    newStatus = 'confirmed';
-  } else if (votesCount >= 4) {
-    newStatus = 'conflict';
-  } else {
-    newStatus = 'pending_votes';
-  }
-
-  await supabase
-    .from('tournament_match_schedules')
-    .update({
-      votes: currentVotes,
-      votes_count: votesCount,
-      status: newStatus,
-      updated_at: new Date().toISOString()
-    })
-    .eq('id', schedule.id);
+  const newStatus = winningSlot ? 'confirmed' : (votesCount >= 4 ? 'conflict' : 'pending_votes');
+  await supabase.from('tournament_match_schedules').update({ votes: currentVotes, votes_count: votesCount, status: newStatus, updated_at: new Date().toISOString() }).eq('id', schedule.id);
 
   const debounceKey = `schedule_${schedule.id}`;
-  if (scheduleDebounceTimers.has(debounceKey)) {
-    clearTimeout(scheduleDebounceTimers.get(debounceKey));
-    scheduleDebounceTimers.delete(debounceKey);
-  }
+  if (scheduleDebounceTimers.has(debounceKey)) { clearTimeout(scheduleDebounceTimers.get(debounceKey)); scheduleDebounceTimers.delete(debounceKey); }
 
   if (newStatus === 'confirmed') {
-    const timer = setTimeout(async () => {
+    scheduleDebounceTimers.set(debounceKey, setTimeout(async () => {
       scheduleDebounceTimers.delete(debounceKey);
-
-      const { data: fresh } = await supabase
-        .from('tournament_match_schedules')
-        .select('*')
-        .eq('id', schedule.id)
-        .single();
-
+      const { data: fresh } = await supabase.from('tournament_match_schedules').select('*').eq('id', schedule.id).single();
       if (!fresh || fresh.status !== 'confirmed') return;
 
       const freshVotes = fresh.votes || {};
       const freshSlots = (fresh.suggested_slots || []).map(s => s.label);
       const freshScores = {};
       for (const slot of freshSlots) freshScores[slot] = 0;
-
-      for (const uid of Object.keys(freshVotes)) {
-        for (const slot of freshVotes[uid]) {
-          if (freshScores[slot] !== undefined) freshScores[slot]++;
-        }
-      }
+      for (const uid of Object.keys(freshVotes)) for (const slot of freshVotes[uid]) if (freshScores[slot] !== undefined) freshScores[slot]++;
       const finalWinSlot = freshSlots.find(s => freshScores[s] >= 4);
       if (!finalWinSlot) return;
 
       const matchedSlot = (fresh.suggested_slots || []).find(s => s.label === finalWinSlot);
-      let confirmedTimestamp = null;
-      let confirmedDate = null;
+      let confirmedTimestamp = null, confirmedDate = null;
       const confirmedTimeText = matchedSlot ? matchedSlot.time_text : 'Agreed Time';
-
       const matchDiscord = String(confirmedTimeText).match(/<t:(\d+)/);
-      if (matchDiscord) {
-        confirmedDate = new Date(parseInt(matchDiscord[1], 10) * 1000);
-        confirmedTimestamp = confirmedDate.toISOString();
-      } else {
-        const parsed = Date.parse(confirmedTimeText);
-        if (!isNaN(parsed)) {
-          confirmedDate = new Date(parsed);
-          confirmedTimestamp = confirmedDate.toISOString();
-        }
-      }
+      if (matchDiscord) { confirmedDate = new Date(parseInt(matchDiscord[1], 10) * 1000); confirmedTimestamp = confirmedDate.toISOString(); } 
+      else { const parsed = Date.parse(confirmedTimeText); if (!isNaN(parsed)) { confirmedDate = new Date(parsed); confirmedTimestamp = confirmedDate.toISOString(); } }
 
-      await supabase
-        .from('tournament_match_schedules')
-        .update({
-          confirmed_slot: finalWinSlot,
-          confirmed_time_text: confirmedTimeText,
-          confirmed_timestamp: confirmedTimestamp,
-          reminders_sent: [],
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', fresh.id);
+      await supabase.from('tournament_match_schedules').update({ confirmed_slot: finalWinSlot, confirmed_time_text: confirmedTimeText, confirmed_timestamp: confirmedTimestamp, reminders_sent: [], updated_at: new Date().toISOString() }).eq('id', fresh.id);
 
-      const playerMentions = fresh.player_discord_ids.map(id => `<@${id}>`).join(' ');
-      const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
-      const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
-
-      const tableSlugCode = fresh.match_code && fresh.match_code.includes('G') 
-        ? fresh.match_code.slice(fresh.match_code.indexOf('G')) 
-        : 'table';
-      const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${tableSlugCode}`;
-      const firstMessageLink = `https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id}`;
-
-      const confirmEmbed = new EmbedBuilder()
-        .setTitle(`📅 Match Time Confirmed: ${matchTitle}`)
-        .setColor(0x2ECC71)
-        .setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](${firstMessageLink})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`)
-        .setTimestamp();
-
-      const components = [];
-      if (calUrl) {
-        components.push(
-          new ActionRowBuilder().addComponents(
-            new ButtonBuilder()
-              .setLabel('Add to Google Calendar')
-              .setStyle(ButtonStyle.Link)
-              .setURL(calUrl)
-              .setEmoji('📅')
-          )
-        );
-      }
-
-      await fetchedMsg.channel.send({
-        content: `👥 ${playerMentions}`,
-        embeds: [confirmEmbed],
-        components: components
-      }).catch(() => {});
-
-    }, 60 * 1000);
-
-    scheduleDebounceTimers.set(debounceKey, timer);
-
+      const calUrl = confirmedDate ? generateGoogleCalendarUrl(`[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`, confirmedDate) : null;
+      const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${fresh.match_code && fresh.match_code.includes('G') ? fresh.match_code.slice(fresh.match_code.indexOf('G')) : 'table'}`;
+      
+      const confirmEmbed = new EmbedBuilder().setTitle(`📅 Match Time Confirmed: [${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`).setColor(0x2ECC71).setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`).setTimestamp();
+      
+      const components = calUrl ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Add to Google Calendar').setStyle(ButtonStyle.Link).setURL(calUrl).setEmoji('📅'))] : [];
+      await fetchedMsg.channel.send({ content: `👥 ${fresh.player_discord_ids.map(id => `<@${id}>`).join(' ')}`, embeds: [confirmEmbed], components: components }).catch(() => {});
+    }, 60 * 1000));
   } else if (newStatus === 'conflict' && previousStatus !== 'conflict') {
-    const playerMentions = schedule.player_discord_ids.map(id => `<@${id}>`).join(' ');
-    const tableSlugCode = schedule.match_code && schedule.match_code.includes('G') 
-      ? schedule.match_code.slice(schedule.match_code.indexOf('G')) 
-      : 'table';
-    const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${tableSlugCode}`;
-    const firstMessageLink = `https://discord.com/channels/${DISCORD_GUILD_ID}/${schedule.thread_id}/${schedule.message_id}`;
-
+    const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${schedule.match_code && schedule.match_code.includes('G') ? schedule.match_code.slice(schedule.match_code.indexOf('G')) : 'table'}`;
     const rankedSlots = (schedule.suggested_slots || []).map((slot) => {
-      const backers = schedule.player_discord_ids.filter(
-        id => currentVotes[id] && currentVotes[id].includes(slot.label)
-      );
-      const missing = schedule.player_discord_ids.filter(id => !backers.includes(id));
-      return {
-        ...slot,
-        count: backers.length,
-        backers,
-        missing
-      };
+      const backers = schedule.player_discord_ids.filter(id => currentVotes[id] && currentVotes[id].includes(slot.label));
+      return { ...slot, count: backers.length, backers, missing: schedule.player_discord_ids.filter(id => !backers.includes(id)) };
     }).sort((a, b) => b.count - a.count);
 
     const breakdownLines = [];
     const threeVoterSlots = rankedSlots.filter(s => s.count === 3);
     const twoVoterSlots = rankedSlots.filter(s => s.count === 2);
-    const lowerVoterSlots = rankedSlots.filter(s => s.count < 2);
-
+    
     if (threeVoterSlots.length > 0) {
       breakdownLines.push('**🔥 Closest Options (3/4 Players Agreed):**');
-      for (const s of threeVoterSlots) {
-        const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
-        const missingTags = s.missing.map(id => `<@${id}>`).join(', ');
-        breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${agreedTags}\n  ↳ **Needs:** ${missingTags} — *Are you available, or could you play slightly earlier/later?*`);
-      }
+      for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
       breakdownLines.push('');
     }
-
     if (twoVoterSlots.length > 0) {
       breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
-      for (const s of twoVoterSlots) {
-        const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
-        breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${agreedTags})`);
-      }
+      for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')})`);
       breakdownLines.push('');
     }
-
-    if (threeVoterSlots.length === 0 && twoVoterSlots.length === 0 && lowerVoterSlots.length > 0) {
+    if (threeVoterSlots.length === 0 && twoVoterSlots.length === 0) {
       breakdownLines.push('**Current Votes:**');
-      for (const s of lowerVoterSlots) {
-        breakdownLines.push(`• **${s.label} ${s.time_text}** (${s.count}/4 votes)`);
-      }
+      for (const s of rankedSlots.filter(s => s.count < 2)) breakdownLines.push(`• **${s.label} ${s.time_text}** (${s.count}/4 votes)`);
       breakdownLines.push('');
     }
 
-    const howToResolve = [
-      '**💡 How to Resolve & Propose Solutions:**',
-      `1. [Jump to the pinned voting post](${firstMessageLink}) to check or update your votes.`,
-      `2. Check mutual 2-hour free windows on the live map:`,
-      `   👉 **[Availability Map for Table ${schedule.table_identifier}](${webUrl})** *(Click any slot to copy its Discord timestamp)*`,
-      '3. Use `/confirm` to propose an adjustment:',
-      '   • **Shift by minutes:** `/confirm slot: B offset_minutes: 60` *(Creates a new option **🇩** shifted +1h)*',
-      '   • **Custom time code:** `/confirm custom_time: <t:1787814000:F>`',
-      '4. Once proposed, everyone can vote on the new option above!'
-    ].join('\n');
-
-    const conflictEmbed = new EmbedBuilder()
-      .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
-      .setColor(0xE74C3C)
-      .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}${howToResolve}`)
-      .setTimestamp();
-
-    await fetchedMsg.channel.send({
-      content: `👥 ${playerMentions}\n🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}>`,
-      embeds: [conflictEmbed]
-    }).catch(() => {});
+    const conflictEmbed = new EmbedBuilder().setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`).setColor(0xE74C3C).setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}**💡 How to Resolve & Propose Solutions:**\n1. [Jump to the pinned voting post](https://discord.com/channels/${DISCORD_GUILD_ID}/${schedule.thread_id}/${schedule.message_id}) to check or update your votes.\n2. Check mutual 2-hour free windows on the live map:\n   👉 **[Availability Map for Table ${schedule.table_identifier}](${webUrl})** *(Click any slot to copy its Discord timestamp)*\n3. Use \`/confirm\` to propose an adjustment:\n   • **Shift by minutes:** \`/confirm slot: B offset_minutes: 60\` *(Creates a new option **🇩** shifted +1h)*\n   • **Custom time code:** \`/confirm custom_time: <t:1787814000:F>\`\n4. Once proposed, everyone can vote on the new option above!`).setTimestamp();
+    await fetchedMsg.channel.send({ content: `👥 ${schedule.player_discord_ids.map(id => `<@${id}>`).join(' ')}\n🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}>`, embeds: [conflictEmbed] }).catch(() => {});
   }
 }
 
@@ -2130,312 +1120,131 @@ async function checkAndSendMatchReminders() {
     const now = new Date();
     
     // --- 1. LIVE MATCH REMINDERS ---
-    const { data: liveConfirmedMatches, error } = await supabase
-      .from('tournament_match_schedules')
-      .select('*')
-      .eq('status', 'confirmed')
-      .not('confirmed_timestamp', 'is', null);
-
+    const { data: liveConfirmedMatches } = await supabase.from('tournament_match_schedules').select('*').eq('status', 'confirmed').not('confirmed_timestamp', 'is', null);
     const matches = (liveConfirmedMatches || []).filter(m => m.mode?.trim() === 'live');
-
-    if (!error && matches.length > 0) {
+    if (matches.length > 0) {
       for (const match of matches) {
         const matchTime = new Date(match.confirmed_timestamp);
-        const diffMs = matchTime.getTime() - now.getTime();
-        const diffMinutes = Math.floor(diffMs / (1000 * 60));
-
+        const diffMinutes = Math.floor((matchTime.getTime() - now.getTime()) / (1000 * 60));
         if (diffMinutes < -60) continue; 
 
         const sent = match.reminders_sent || [];
-        let alertStage = null;
-        let alertTitle = '';
-        let alertDesc = '';
+        let alertStage = null, alertTitle = '', alertDesc = '';
 
-        if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) {
-          alertStage = '36h';
-          alertTitle = '⏳ 36-Hour Match Reminder';
-          alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
-        }
-        else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
-          alertStage = '1h';
-          alertTitle = '⏰ 1-Hour Match Reminder';
-          alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\nPlease start getting ready and say anything in this chat to let everyone know you will be there.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`;
-        }
-        else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
-          alertStage = '5m';
-          alertTitle = '🚨 5-Minute Final Call!';
-          alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`;
-        }
+        if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) { alertStage = '36h'; alertTitle = '⏳ 36-Hour Match Reminder'; alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`; }
+        else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) { alertStage = '1h'; alertTitle = '⏰ 1-Hour Match Reminder'; alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\nPlease start getting ready and say anything in this chat to let everyone know you will be there.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`; }
+        else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) { alertStage = '5m'; alertTitle = '🚨 5-Minute Final Call!'; alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`; }
 
         if (alertStage) {
           const thread = await discordClient.channels.fetch(match.thread_id).catch(() => null);
-          if (thread) {
-            const playerMentions = (match.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
-
-            const reminderEmbed = new EmbedBuilder()
-              .setTitle(alertTitle)
-              .setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12))
-              .setDescription(alertDesc)
-              .setTimestamp();
-
-            await thread.send({
-              content: `👥 ${playerMentions}`,
-              embeds: [reminderEmbed]
-            }).catch(() => {});
-          }
-
-          await supabase
-            .from('tournament_match_schedules')
-            .update({
-              reminders_sent: [...sent, alertStage],
-              updated_at: new Date().toISOString()
-            })
-            .eq('id', match.id);
+          if (thread) await thread.send({ content: `👥 ${(match.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`, embeds: [new EmbedBuilder().setTitle(alertTitle).setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12)).setDescription(alertDesc).setTimestamp()] }).catch(() => {});
+          await supabase.from('tournament_match_schedules').update({ reminders_sent: [...sent, alertStage], updated_at: new Date().toISOString() }).eq('id', match.id);
         }
       }
     }
 
-    // --- 2. ASYNC 24-HOUR MATCH START REMINDERS ---
-    const { data: asyncMatches, error: asyncErr } = await supabase
-      .from('tournament_match_schedules')
-      .select('*')
-      .eq('mode', 'async')
-      .in('status', ['pending_votes', 'published'])
-      .is('confirmed_timestamp', null);
-
-    if (!asyncErr && asyncMatches && asyncMatches.length > 0) {
+    // --- 2. ASYNC MATCH START REMINDERS ---
+    const { data: asyncMatches } = await supabase.from('tournament_match_schedules').select('*').eq('mode', 'async').in('status', ['pending_votes', 'published']).is('confirmed_timestamp', null);
+    if (asyncMatches && asyncMatches.length > 0) {
       for (const asyncMatch of asyncMatches) {
-        const lastUpdated = new Date(asyncMatch.updated_at || asyncMatch.created_at);
-        const hoursSinceUpdate = (now.getTime() - lastUpdated.getTime()) / (1000 * 60 * 60);
-
-        if (hoursSinceUpdate >= 24) {
+        if ((now.getTime() - new Date(asyncMatch.updated_at || asyncMatch.created_at).getTime()) / (1000 * 60 * 60) >= 24) {
           const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch(() => null);
           if (thread) {
-            const playerMentions = (asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
-            
-            const startBtn = new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setCustomId(`async_start_${asyncMatch.id}`)
-                .setLabel('🚀 Mark Game Started')
-                .setStyle(ButtonStyle.Success)
-            );
-
-            const asyncReminderEmbed = new EmbedBuilder()
-              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`)
-              .setColor(0x3498DB)
-              .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
-              .setTimestamp();
-
             await thread.send({
-              content: `👥 ${playerMentions}`,
-              embeds: [asyncReminderEmbed],
-              components: [startBtn]
+              content: `👥 ${(asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`,
+              embeds: [new EmbedBuilder().setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`).setColor(0x3498DB).setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()],
+              components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`async_start_${asyncMatch.id}`).setLabel('🚀 Mark Game Started').setStyle(ButtonStyle.Success))]
             }).catch(() => {});
-
-            await supabase
-              .from('tournament_match_schedules')
-              .update({ updated_at: now.toISOString() })
-              .eq('id', asyncMatch.id);
+            await supabase.from('tournament_match_schedules').update({ updated_at: now.toISOString() }).eq('id', asyncMatch.id);
           }
         }
       }
     }
-  } catch (err) {
-    console.error('Error running match reminder dispatcher:', err);
-  }
+  } catch (err) {}
 }
 
 discordClient.on('interactionCreate', async (interaction) => {
   if (interaction.isChatInputCommand()) {
     const command = slashCommands.get(interaction.commandName); if (!command) return;
-    try {
-      await command.execute(interaction, { supabase, discordClient });
-    } catch (error) {
-      console.error(`Error running /${interaction.commandName}:`, error);
-      const message = 'Something went wrong while processing the command.';
-      if (interaction.deferred || interaction.replied) { await interaction.editReply({ content: message }).catch(() => {}); }
-      else { await interaction.reply({ content: message, ephemeral: true }).catch(() => {}); }
+    try { await command.execute(interaction, { supabase, discordClient }); } 
+    catch (error) {
+      if (interaction.deferred || interaction.replied) await interaction.editReply({ content: 'Something went wrong while processing the command.' }).catch(() => {}); 
+      else await interaction.reply({ content: 'Something went wrong while processing the command.', flags: MessageFlags.Ephemeral }).catch(() => {}); 
     }
     return;
   }
 
   if (interaction.isButton() && interaction.customId.startsWith('async_start_')) {
     const matchId = interaction.customId.replace('async_start_', '');
-    const { data: schedule, error } = await supabase
-      .from('tournament_match_schedules')
-      .select('*')
-      .eq('id', matchId)
-      .single();
-
-    if (error || !schedule) {
-      return await interaction.reply({ content: '❌ Match schedule not found.', ephemeral: true });
+    const { data: schedule } = await supabase.from('tournament_match_schedules').select('*').eq('id', matchId).single();
+    if (!schedule) return await interaction.reply({ content: '❌ Match schedule not found.', flags: MessageFlags.Ephemeral });
+    if (!(schedule.player_discord_ids && schedule.player_discord_ids.includes(interaction.user.id)) && !interaction.member.roles.cache.has(TOURNAMENT_HOST_ROLE_ID) && !interaction.member.permissions.has('Administrator')) {
+      return await interaction.reply({ content: '❌ You must be a player in this match or tournament host to mark it as started.', flags: MessageFlags.Ephemeral });
     }
-
-    const isParticipant = schedule.player_discord_ids && schedule.player_discord_ids.includes(interaction.user.id);
-    const isHost = interaction.member.roles.cache.has(TOURNAMENT_HOST_ROLE_ID);
-    const isAdmin = interaction.member.permissions.has('Administrator');
-
-    if (!isParticipant && !isHost && !isAdmin) {
-      return await interaction.reply({ content: '❌ You must be a player in this match or tournament host to mark it as started.', ephemeral: true });
-    }
-
-    const nowISO = new Date().toISOString();
-    await supabase
-      .from('tournament_match_schedules')
-      .update({
-        status: 'ongoing',
-        confirmed_timestamp: nowISO,
-        updated_at: nowISO
-      })
-      .eq('id', schedule.id);
-
-    const playerMentions = (schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
-    const startEmbed = new EmbedBuilder()
-      .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
-      .setColor(0x2ECC71)
-      .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
-      .setTimestamp();
-
+    await supabase.from('tournament_match_schedules').update({ status: 'ongoing', confirmed_timestamp: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', schedule.id);
     await interaction.update({ components: [] }).catch(() => {});
-    await interaction.channel.send({ content: `👥 ${playerMentions}`, embeds: [startEmbed] });
+    await interaction.channel.send({ content: `👥 ${(schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`, embeds: [new EmbedBuilder().setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`).setColor(0x2ECC71).setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()] });
   }
 });
 
 discordClient.on('messageCreate', async (message) => {
   try {
     if (message.author.bot || !message.guild) return;
-
     const profile = await getPlayerProfileFromDiscord(message.author.id);
     if (!profile) return; 
 
     const now = new Date();
     const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+    const { data: dailyTextEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'daily_first_message').gte('created_at', startOfToday);
+    if (!dailyTextEvents || dailyTextEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'daily_first_message', SP_REWARDS_CONFIG.DAILY_FIRST_MESSAGE.amount, { discord_user_id: message.author.id, channel_id: message.channel.id });
 
-    const { data: dailyTextEvents, error: textErr } = await supabase
-      .from('sp_events')
-      .select('id')
-      .eq('player_key', profile.playerKey)
-      .eq('action_type', 'daily_first_message')
-      .gte('created_at', startOfToday);
-
-    if (!textErr && (!dailyTextEvents || dailyTextEvents.length === 0)) {
-      await awardSP(
-        profile.playerKey,
-        profile.userId,
-        'daily_first_message',
-        SP_REWARDS_CONFIG.DAILY_FIRST_MESSAGE.amount,
-        { discord_user_id: message.author.id, channel_id: message.channel.id }
-      );
+    if (message.channel.id === IMAGE_UPLOADS_CHANNEL_ID && Array.from(message.attachments.values()).some(attachment => (attachment.contentType && attachment.contentType.startsWith('image/')) || /\.(jpg|jpeg|png|gif|webp)$/i.test(attachment.url))) {
+      const { data: recentImageEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'image_upload').gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString());
+      if (!recentImageEvents || recentImageEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'image_upload', SP_REWARDS_CONFIG.IMAGE_UPLOAD.amount, { discord_user_id: message.author.id, message_id: message.id });
     }
-
-    const attachments = Array.from(message.attachments.values());
-    const hasImage = attachments.some(attachment => 
-      (attachment.contentType && attachment.contentType.startsWith('image/')) || 
-      /\.(jpg|jpeg|png|gif|webp)$/i.test(attachment.url)
-    );
-
-    if (message.channel.id === IMAGE_UPLOADS_CHANNEL_ID && hasImage) {
-      const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000).toISOString();
-
-      const { data: recentImageEvents, error: imgErr } = await supabase
-        .from('sp_events')
-        .select('id')
-        .eq('player_key', profile.playerKey)
-        .eq('action_type', 'image_upload')
-        .gte('created_at', oneHourAgo);
-
-      if (!imgErr && (!recentImageEvents || recentImageEvents.length === 0)) {
-        await awardSP(
-          profile.playerKey,
-          profile.userId,
-          'image_upload',
-          SP_REWARDS_CONFIG.IMAGE_UPLOAD.amount,
-          { discord_user_id: message.author.id, message_id: message.id }
-        );
-      }
-    }
-  } catch (err) {
-    console.error('Error processing message for SP triggers:', err);
-  }
+  } catch (err) {}
 });
 
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
-
-    if (reaction.partial) {
-      try {
-        await reaction.fetch();
-      } catch (err) {
-        console.error('Failed to resolve partial reaction structure:', err);
-        return;
-      }
-    }
-
+    if (reaction.partial) { try { await reaction.fetch(); } catch (err) { return; } }
     const message = reaction.message;
     const emojiName = reaction.emoji.name || reaction.emoji.toString();
 
     await handleTournamentVotingReaction(message, user, emojiName, true);
     await handleTournamentCheckinReaction(message, user, emojiName);
 
-    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
-    if (fetchErr || !lobby || lobby.status !== 'searching') return;
+    const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (!lobby || lobby.status !== 'searching') return;
 
-    const emoji = reaction.emoji.name || reaction.emoji;
-    const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
-                        reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
-                        emoji === '🎲' || emoji === '⚔️';
-
+    const isJoinEmoji = emojiName === 'AsyncDune' || emojiName === 'LiveDune' || emojiName === '🎲' || emojiName === '⚔️' || reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune');
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
-    const guestPlayers = [...(lobby.guest_players || [])];
     let shouldUpdate = false;
 
     if (isJoinEmoji) {
       if (!players.includes(user.id)) {
-        const totalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
-        if (totalCount < 4) {
+        if (players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) < 4) {
           players.push(user.id);
           shouldUpdate = true;
-          if (notifications.length > 0) {
-            await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
-          }
+          if (notifications.length > 0) await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
         } else {
           await reaction.users.remove(user.id).catch(() => {});
         }
       }
-    }
-
-    if (emoji === '🎮') {
-      const totalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
-      if (players.includes(user.id) && totalCount >= 2) {
-        await executeLobbyStartSequence(lobby, message.channel);
-        return;
-      }
-    }
-
-    if (emoji === '❌' && user.id === lobby.host_id) {
+    } else if (emojiName === '🎮') {
+      if (players.includes(user.id) && players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) >= 2) return await executeLobbyStartSequence(lobby, message.channel);
+    } else if (emojiName === '❌' && user.id === lobby.host_id) {
       await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
-      const embed = EmbedBuilder.from(message.embeds[0]);
-      embed.setTitle('❌ Lobby Cancelled')
-           .setColor(0xff0000)
-           .setDescription(`This lobby was cancelled by ${user.username}`);
-      await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [embed] }).catch(() => {});
+      await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [EmbedBuilder.from(message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${user.username}`)] }).catch(() => {});
       return;
-    }
-
-    if (emoji === '🔔') {
-      if (!notifications.includes(user.id)) {
-        notifications.push(user.id);
-        shouldUpdate = true;
-      }
-    }
-
-    if (emoji === '📢') {
+    } else if (emojiName === '🔔') {
+      if (!notifications.includes(user.id)) { notifications.push(user.id); shouldUpdate = true; }
+    } else if (emojiName === '📢') {
       const pingResult = await executeLobbyPing(lobby, message.channel);
       if (!pingResult) {
-        const nextAvailableTime = Math.floor((new Date(lobby.last_prompted_at).getTime() + TAG_COOLDOWN_MS) / 1000);
-        const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${nextAvailableTime}:R>` }).catch(() => {});
+        const cooldownMsg = await message.reply({ content: `⏳ Tag is on cooldown. Next ping available <t:${Math.floor((new Date(lobby.last_prompted_at).getTime() + TAG_COOLDOWN_MS) / 1000)}:R>` }).catch(() => {});
         setTimeout(() => { cooldownMsg.delete().catch(() => {}); }, 5000);
       }
       await reaction.users.remove(user.id).catch(() => {});
@@ -2443,90 +1252,46 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     }
 
     if (shouldUpdate) {
-      const finalTotal = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
-      
-      if (finalTotal === 4 && !lobby.auto_start_at) {
+      if (players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) === 4 && !lobby.auto_start_at) {
         const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
         updatePayload.auto_start_at = startTargetDate.toISOString();
-        lobby.auto_start_at = startTargetDate.toISOString();
-        
-        const timestampSeconds = Math.floor(startTargetDate.getTime() / 1000);
-        const countdownAlert = `⏳ **Lobby full!** Match will automatically begin <t:${timestampSeconds}:R>. Set up your in-game rooms now!`;
-        
-        await message.channel.send({ content: countdownAlert }).catch(() => {});
+        await message.channel.send({ content: `⏳ **Lobby full!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
       }
-
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-      await syncLobbyEmbed({ ...lobby, ...updatePayload });
     }
-  } catch (err) {
-    console.error('Error handling reaction:', err);
-  }
+  } catch (err) {}
 });
 
 discordClient.on('messageReactionRemove', async (reaction, user) => {
   try {
     if (user.bot) return;
-
-    if (reaction.partial) {
-      try {
-        await reaction.fetch();
-      } catch (err) {
-        console.error('Failed to resolve partial unreaction structure:', err);
-        return;
-      }
-    }
-
+    if (reaction.partial) { try { await reaction.fetch(); } catch (err) { return; } }
     const message = reaction.message;
     const emojiName = reaction.emoji.name || reaction.emoji.toString();
 
     await handleTournamentVotingReaction(message, user, emojiName, false);
 
-    const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
-    if (fetchErr || !lobby || lobby.status !== 'searching') return;
+    const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    if (!lobby || lobby.status !== 'searching') return;
 
-    const emoji = reaction.emoji.name || reaction.emoji;
-    const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
-                        reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
-                        emoji === '🎲' || emoji === '⚔️';
-
+    const isJoinEmoji = emojiName === 'AsyncDune' || emojiName === 'LiveDune' || emojiName === '🎲' || emojiName === '⚔️' || reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune');
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
-    const guestPlayers = [...(lobby.guest_players || [])];
     let shouldUpdate = false;
 
-    if (isJoinEmoji) {
-      if (players.includes(user.id)) {
-        players = players.filter(id => id !== user.id);
-        notifications = notifications.filter(id => id !== user.id);
-        shouldUpdate = true;
-      }
-    }
-
-    if (emoji === '🔔') {
-      if (!notifications.includes(user.id)) {
-        notifications = notifications.filter(id => id !== user.id);
-        shouldUpdate = true;
-      }
-    }
+    if (isJoinEmoji && players.includes(user.id)) { players = players.filter(id => id !== user.id); notifications = notifications.filter(id => id !== user.id); shouldUpdate = true; }
+    if (emojiName === '🔔' && notifications.includes(user.id)) { notifications = notifications.filter(id => id !== user.id); shouldUpdate = true; }
 
     if (shouldUpdate) {
-      const finalTotal = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
-      
-      if (finalTotal < 4 && lobby.auto_start_at) {
+      if (players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) < 4 && lobby.auto_start_at) {
         updatePayload.auto_start_at = null;
-        lobby.auto_start_at = null;
         await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${lobby.match_id ? `\`${lobby.match_id}\`` : ''} aborted.` }).catch(() => {});
       }
-
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-      await syncLobbyEmbed({ ...lobby, ...updatePayload });
     }
-  } catch (err) {
-    console.error('Error handling reaction remove:', err);
-  }
+  } catch (err) {}
 });
 
 discordClient.once('clientReady', async () => {
@@ -2535,42 +1300,16 @@ discordClient.once('clientReady', async () => {
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
 
-  setInterval(async () => {
-    await executeGlobalSpAuditSweep();
-  }, 24 * 60 * 60 * 1000);
-
+  setInterval(async () => { await executeGlobalSpAuditSweep(); }, 24 * 60 * 60 * 1000);
   setInterval(async () => {
     try {
-      const nowISO = new Date().toISOString();
-      const { data: expiredLobbies } = await supabase
-        .from('active_async_matches')
-        .select('*')
-        .eq('status', 'searching')
-        .not('auto_start_at', 'is', null)
-        .lte('auto_start_at', nowISO);
-
-      if (expiredLobbies && expiredLobbies.length > 0) {
-        for (const targetLobby of expiredLobbies) {
-          console.log(`⏱️ Auto-Start triggered for lobby: ${targetLobby.match_id}`);
-          await executeLobbyStartSequence(targetLobby).catch(err => console.error(err));
-        }
-      }
-    } catch (cronErr) {
-      console.error('Error running automated countdown polling sweeps:', cronErr);
-    }
+      const { data: expiredLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').not('auto_start_at', 'is', null).lte('auto_start_at', new Date().toISOString());
+      if (expiredLobbies && expiredLobbies.length > 0) for (const targetLobby of expiredLobbies) await executeLobbyStartSequence(targetLobby).catch(() => {});
+    } catch (cronErr) {}
   }, 30 * 1000);
-
-  setInterval(async () => {
-    await checkAndSendMatchReminders();
-  }, 60 * 1000);
-
-  setInterval(async () => {
-    await checkAndExpireCheckins();
-  }, 5 * 60 * 1000);
-
-  setInterval(async () => {
-    await checkAndExpireLobbies();
-  }, 5 * 60 * 1000);
+  setInterval(async () => { await checkAndSendMatchReminders(); }, 60 * 1000);
+  setInterval(async () => { await checkAndExpireCheckins(); }, 5 * 60 * 1000);
+  setInterval(async () => { await checkAndExpireLobbies(); }, 5 * 60 * 1000);
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
@@ -2578,7 +1317,7 @@ discordClient.once('clientReady', async () => {
       const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
       await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), { body: commands });
       console.log('Successfully registered all commands internally.');
-    } catch (error) { console.error('Failed to register commands internally:', error); }
+    } catch (error) {}
   }
 });
 
