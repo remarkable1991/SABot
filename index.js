@@ -841,7 +841,7 @@ async function handleWebLobbyCreation(lobby) {
     // Convert expansions stored to text format
     const expStrings = lobby.expansions || [];
     const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
-    const statusSentence = `**${hostName} 🌐** created a lobby for ${lobby.board_type \vert{}\vert{} 'Base Game'}${expText}.`;
+  const statusSentence = `**${hostName} 🌐** created a lobby for ${lobby.board_type || 'Base Game'}${expText}.`;
 
     const embed = new EmbedBuilder()
       .setTitle(`${emojiTarget} New Match Open! [ID:${generatedMatchId}]`)
