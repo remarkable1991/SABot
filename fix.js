@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, userMention } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -11,7 +11,7 @@ module.exports = {
     )
     .addStringOption(option =>
       option.setName('action')
-        .setDescription('Choose whether to add or remove targets (Required if using Target or IGN)')
+        .setDescription('Choose whether to add or remove targets')
         .setRequired(false)
         .addChoices(
           { name: 'Add', value: 'add' },
@@ -21,11 +21,6 @@ module.exports = {
     .addStringOption(option =>
       option.setName('target')
         .setDescription('Tag a user, enter guest names, or a number (1 or 2) to add/remove')
-        .setRequired(false)
-    )
-    .addStringOption(option =>
-      option.setName('ign')
-        .setDescription('Add or remove a Web Player by their exact In-Game Name (IGN)')
         .setRequired(false)
     )
     .addStringOption(option =>
@@ -69,23 +64,22 @@ module.exports = {
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, discordClient }) {
+  async execute(interaction, { supabase }) {
     const matchId = interaction.options.getString('match_id').trim();
     const action = interaction.options.getString('action');
     const targetInput = interaction.options.getString('target')?.trim();
-    const ignInput = interaction.options.getString('ign')?.trim();
     const password = interaction.options.getString('password');
     const board = interaction.options.getString('board');
     let expansion = interaction.options.getString('expansion');
     const selectedMode = interaction.options.getString('mode');
     const notes = interaction.options.getString('notes');
 
-    if (!action && !targetInput && !ignInput && !password && !board && !expansion && !selectedMode && !notes) {
-      return interaction.reply({ content: '❌ You must specify at least one setting or roster change to apply.', ephemeral: true });
+    if (!action && !targetInput && !password && !board && !expansion && !selectedMode && !notes) {
+      return interaction.reply({ content: '❌ You must specify at least one setting or roster change to apply.', flags: MessageFlags.Ephemeral });
     }
 
-    if ((targetInput || ignInput) && !action) {
-      return interaction.reply({ content: '❌ You must select an `action` (Add/Remove) when providing a `target` or `ign`.', ephemeral: true });
+    if (targetInput && !action) {
+      return interaction.reply({ content: '❌ You must select an `action` (Add/Remove) when providing a `target`.', flags: MessageFlags.Ephemeral });
     }
 
     const { data: lobby, error: fetchErr } = await supabase
@@ -95,11 +89,11 @@ module.exports = {
       .maybeSingle();
 
     if (fetchErr || !lobby) {
-      return interaction.reply({ content: `❌ Could not find an active lobby with Match ID \`${matchId}\`.`, ephemeral: true });
+      return interaction.reply({ content: `❌ Could not find an active lobby with Match ID \`${matchId}\`.`, flags: MessageFlags.Ephemeral });
     }
 
     if (lobby.status !== 'searching') {
-      return interaction.reply({ content: `❌ This lobby has already been ${lobby.status} and cannot be modified.`, ephemeral: true });
+      return interaction.reply({ content: `❌ This lobby has already been ${lobby.status} and cannot be modified.`, flags: MessageFlags.Ephemeral });
     }
 
     const guild = interaction.guild;
@@ -128,152 +122,96 @@ module.exports = {
 
     let players = [...(lobby.player_ids || [])];
     let guestPlayers = [...(lobby.guest_players || [])];
-    let webNames = [...(lobby.web_player_names || [])];
-    let webIds = [...(lobby.web_player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
     let logMessages = [];
+    const currentTotal = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
 
     // --- ROSTER MODIFICATIONS ---
-    if (action) {
-      let currentTotal = players.length + guestPlayers.length + webNames.length;
-
+    if (action && targetInput) {
       if (action === 'add') {
-        // Handle Target (Discord/Guest)
-        if (targetInput) {
-          if (currentTotal >= 4) return interaction.reply({ content: `❌ Lobby full (4/4).`, ephemeral: true });
+        if (currentTotal >= 4) return interaction.reply({ content: `❌ Lobby full (4/4).`, flags: MessageFlags.Ephemeral });
 
-          const mentionRegex = /<@!?(\d+)>/g;
-          let match;
-          const parsedMentions = [];
-          while ((match = mentionRegex.exec(targetInput)) !== null) parsedMentions.push(match[1]);
+        const mentionRegex = /<@!?(\d+)>/g;
+        let match;
+        const parsedMentions = [];
+        while ((match = mentionRegex.exec(targetInput)) !== null) parsedMentions.push(match[1]);
 
-          if (parsedMentions.length > 0) {
-            for (const id of parsedMentions.slice(0, 2)) {
-              if (players.length + guestPlayers.length + webNames.length >= 4) break;
-              if (!players.includes(id)) { players.push(id); logMessages.push(`Added <@${id}>.`); }
-            }
-          } else if (/^\d+$/.test(targetInput)) {
-            const num = parseInt(targetInput, 10);
-            if (num === 1 || num === 2) {
-              const limit = Math.min(num, 4 - currentTotal);
-              for (let i = 0; i < limit; i++) guestPlayers.push(`Friend of ${interaction.user.username}`);
-              logMessages.push(`Added ${limit} guest(s).`);
-            } else {
-              return interaction.reply({ content: `❌ Numeric guest entry must be 1 or 2.`, ephemeral: true });
-            }
+        if (parsedMentions.length > 0) {
+          for (const id of parsedMentions.slice(0, 2)) {
+            if (players.length + guestPlayers.length + (lobby.web_player_names?.length || 0) >= 4) break;
+            if (!players.includes(id)) { players.push(id); logMessages.push(`Added <@${id}>.`); }
+          }
+        } else if (/^\d+$/.test(targetInput)) {
+          const num = parseInt(targetInput, 10);
+          if (num === 1 || num === 2) {
+            const limit = Math.min(num, 4 - currentTotal);
+            for (let i = 0; i < limit; i++) guestPlayers.push(`Friend of ${interaction.user.username}`);
+            logMessages.push(`Added ${limit} guest(s).`);
           } else {
-            const rawNames = targetInput.split(',').map(n => n.trim()).filter(Boolean);
-            for (const name of rawNames.slice(0, 2)) {
-              if (players.length + guestPlayers.length + webNames.length >= 4) break;
-              let bestDbMatch = null;
-              let bestScore = 0;
-              try {
-                const { data: dbRows } = await supabase.from('player_discord_map')
-                  .select('discord_user_id, display_name, discord_username, player_key')
-                  .or(`display_name.ilike.%${name}\%,discord_username.ilike.\%${name}%`)
-                  .limit(5);
-                for (const row of dbRows || []) {
-                  if (!row.discord_user_id) continue;
-                  const sc = Math.max(calculateSimilarity(name, row.display_name), calculateSimilarity(name, row.discord_username), calculateSimilarity(name, row.player_key));
-                  if (sc > bestScore) { bestScore = sc; bestDbMatch = row.discord_user_id; }
-                }
-              } catch (e) {}
-
-              if (bestDbMatch && bestScore >= 0.72) {
-                if (!players.includes(bestDbMatch)) { players.push(bestDbMatch); logMessages.push(`Added matched player <@${bestDbMatch}>.`); }
-              } else {
-                guestPlayers.push(name); logMessages.push(`Added guest "${name}".`);
+            return interaction.reply({ content: `❌ Numeric guest entry must be 1 or 2.`, flags: MessageFlags.Ephemeral });
+          }
+        } else {
+          const rawNames = targetInput.split(',').map(n => n.trim()).filter(Boolean);
+          for (const name of rawNames.slice(0, 2)) {
+            if (players.length + guestPlayers.length + (lobby.web_player_names?.length || 0) >= 4) break;
+            let bestDbMatch = null;
+            let bestScore = 0;
+            try {
+              const { data: dbRows } = await supabase.from('player_discord_map')
+                .select('discord_user_id, display_name, discord_username, player_key')
+                .or(`display_name.ilike.%${name}%,discord_username.ilike.%${name}%`)
+                .limit(5);
+              for (const row of dbRows || []) {
+                if (!row.discord_user_id) continue;
+                const sc = Math.max(calculateSimilarity(name, row.display_name), calculateSimilarity(name, row.discord_username), calculateSimilarity(name, row.player_key));
+                if (sc > bestScore) { bestScore = sc; bestDbMatch = row.discord_user_id; }
               }
+            } catch (e) {}
+
+            if (bestDbMatch && bestScore >= 0.72) {
+              if (!players.includes(bestDbMatch)) { players.push(bestDbMatch); logMessages.push(`Added matched player <@${bestDbMatch}>.`); }
+            } else {
+              guestPlayers.push(name); logMessages.push(`Added guest "${name}".`);
             }
-          }
-        }
-
-        // Handle IGN (Web Player)
-        if (ignInput) {
-          if (players.length + guestPlayers.length + webNames.length >= 4) return interaction.reply({ content: `❌ Lobby full (4/4).`, ephemeral: true });
-          
-          let resolvedIgn = ignInput;
-          let resolvedUuid = null;
-          let discordId = null; // Track their Discord ID
-          
-          const { data: mapData } = await supabase
-            .from('player_discord_map')
-            .select('player_key, claimed_by, discord_user_id')
-            .ilike('player_key', `%${ignInput}%`)
-            .limit(1);
-
-          if (mapData && mapData.length > 0) {
-            resolvedIgn = mapData[0].player_key.charAt(0).toUpperCase() + mapData[0].player_key.slice(1);
-            if (mapData[0].claimed_by) resolvedUuid = mapData[0].claimed_by;
-            if (mapData[0].discord_user_id) discordId = mapData[0].discord_user_id;
-          }
-
-          // 🛡️ Cross-Platform Duplicate Prevention
-          if (discordId && players.includes(discordId)) {
-            logMessages.push(`❌ **${resolvedIgn}** is already seated in this lobby via their Discord account.`);
-          } else if (!webNames.map(n => n.toLowerCase()).includes(resolvedIgn.toLowerCase())) {
-            webNames.push(resolvedIgn);
-            if (resolvedUuid) webIds.push(resolvedUuid);
-            logMessages.push(`Added Web Player "${resolvedIgn}".`);
-          } else {
-             logMessages.push(`❌ "${resolvedIgn}" is already a Web Player in this lobby.`);
           }
         }
       }
 
       if (action === 'remove') {
-        if (targetInput) {
-          const mentionMatch = targetInput.match(/<@!?(\d+)>/);
-          if (mentionMatch) {
-            const tId = mentionMatch[1];
-            if (tId === lobby.host_id) return interaction.reply({ content: `❌ The host cannot be removed.`, ephemeral: true });
-            if (players.includes(tId)) {
-              players = players.filter(id => id !== tId);
-              notifications = notifications.filter(id => id !== tId);
-              logMessages.push(`Removed <@${tId}>.`);
-            }
-          } else {
-            let bestMatch = null, bestScore = 0, targetType = '';
-            for (const pid of players) {
-              if (pid === lobby.host_id) continue;
-              const u = interaction.guild.members.cache.get(pid)?.user;
-              for (const n of [u?.username, u?.globalName].filter(Boolean)) {
-                const sc = calculateSimilarity(targetInput, n);
-                if (sc > bestScore) { bestScore = sc; bestMatch = pid; targetType = 'player'; }
-              }
-            }
-            for (let i = 0; i < guestPlayers.length; i++) {
-              const sc = calculateSimilarity(targetInput, guestPlayers[i]);
-              if (sc > bestScore) { bestScore = sc; bestMatch = i; targetType = 'guest'; }
-            }
-            if (bestScore >= 0.60) {
-              if (targetType === 'player') {
-                players = players.filter(id => id !== bestMatch);
-                notifications = notifications.filter(id => id !== bestMatch);
-                logMessages.push(`Removed <@${bestMatch}>.`);
-              } else {
-                logMessages.push(`Removed guest "${guestPlayers[bestMatch]}".`);
-                guestPlayers.splice(bestMatch, 1);
-              }
-            } else {
-              logMessages.push(`Could not match "${targetInput}" to a Discord/Guest player.`);
+        const mentionMatch = targetInput.match(/<@!?(\d+)>/);
+        if (mentionMatch) {
+          const tId = mentionMatch[1];
+          if (tId === lobby.host_id) return interaction.reply({ content: `❌ The host cannot be removed.`, flags: MessageFlags.Ephemeral });
+          if (players.includes(tId)) {
+            players = players.filter(id => id !== tId);
+            notifications = notifications.filter(id => id !== tId);
+            logMessages.push(`Removed <@${tId}>.`);
+          }
+        } else {
+          let bestMatch = null, bestScore = 0, targetType = '';
+          for (const pid of players) {
+            if (pid === lobby.host_id) continue;
+            const u = interaction.guild.members.cache.get(pid)?.user;
+            for (const n of [u?.username, u?.globalName].filter(Boolean)) {
+              const sc = calculateSimilarity(targetInput, n);
+              if (sc > bestScore) { bestScore = sc; bestMatch = pid; targetType = 'player'; }
             }
           }
-        }
-
-        if (ignInput) {
-          const lowerIgn = ignInput.toLowerCase();
-          const wIdx = webNames.findIndex(n => n.toLowerCase().includes(lowerIgn));
-          if (wIdx > -1) {
-            if (lobby.web_host_id && webIds[wIdx] === lobby.web_host_id) {
-              return interaction.reply({ content: `❌ The Web Host cannot be removed.`, ephemeral: true });
+          for (let i = 0; i < guestPlayers.length; i++) {
+            const sc = calculateSimilarity(targetInput, guestPlayers[i]);
+            if (sc > bestScore) { bestScore = sc; bestMatch = i; targetType = 'guest'; }
+          }
+          if (bestScore >= 0.60) {
+            if (targetType === 'player') {
+              players = players.filter(id => id !== bestMatch);
+              notifications = notifications.filter(id => id !== bestMatch);
+              logMessages.push(`Removed <@${bestMatch}>.`);
+            } else {
+              logMessages.push(`Removed guest "${guestPlayers[bestMatch]}".`);
+              guestPlayers.splice(bestMatch, 1);
             }
-            const removed = webNames[wIdx];
-            webNames.splice(wIdx, 1);
-            if (webIds[wIdx]) webIds.splice(wIdx, 1);
-            logMessages.push(`Removed Web Player "${removed}".`);
           } else {
-            logMessages.push(`Web Player "${ignInput}" not found in lobby.`);
+            logMessages.push(`Could not match "${targetInput}" to a Discord/Guest player.`);
           }
         }
       }
@@ -296,7 +234,6 @@ module.exports = {
       let activeMode = selectedMode;
       let activeExpansion = expansion;
 
-      // Extract existing modes/expansions if not explicitly overwritten
       if (!activeExpansion) {
         if (newExpansions.some(e => e.includes('Rise of IX'))) activeExpansion = 'Ix';
         if (newExpansions.some(e => e.includes('Immortality'))) activeExpansion = activeExpansion ? 'Ix_Immo' : 'Immortality';
@@ -310,9 +247,7 @@ module.exports = {
       if (activeMode === 'Epic' && activeExpansion !== 'Ix' && activeExpansion !== 'Ix_Immo') {
         activeExpansion = activeExpansion === 'Immortality' ? 'Ix_Immo' : 'Ix';
       }
-      if ((activeMode === 'BaseLeaders' || activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') && !isUprising) {
-        activeMode = null; 
-      }
+      if ((activeMode === 'BaseLeaders' || activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') && !isUprising) activeMode = null; 
 
       newExpansions = [];
       if (activeExpansion === 'Ix' || activeExpansion === 'Ix_Immo') newExpansions.push(`${ixEmoji} Rise of IX`.trim());
@@ -330,14 +265,12 @@ module.exports = {
     if (password !== null) logMessages.push(password === 'None' ? `Removed password.` : `Updated password.`);
     if (notes !== null) logMessages.push(`Updated lobby notes.`);
 
-    // --- APPLY UPDATES TO DB & EMBED ---
-    const totalCount = players.length + guestPlayers.length + webNames.length;
+    // --- APPLY UPDATES TO DB & LET REALTIME HANDLE EMBED ---
+    const newTotalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
     let updatePayload = { 
       player_ids: players, 
       guest_players: guestPlayers, 
       notify_user_ids: notifications,
-      web_player_names: webNames,
-      web_player_ids: webIds,
       lobby_password: newPassword,
       board_type: newBoardText,
       expansions: newExpansions,
@@ -346,13 +279,11 @@ module.exports = {
 
     let channelMsgToPost = null;
 
-    if (totalCount === 4 && !lobby.auto_start_at) {
+    if (newTotalCount === 4 && !lobby.auto_start_at) {
       const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
       updatePayload.auto_start_at = startTargetDate.toISOString();
       channelMsgToPost = `⏳ **Lobby full!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!`;
-    }
-
-    if (totalCount < 4 && lobby.auto_start_at) {
+    } else if (newTotalCount < 4 && lobby.auto_start_at) {
       updatePayload.auto_start_at = null;
       channelMsgToPost = `⚠️ **Roster drop verified.** Automated match countdown for lobby \`${lobby.match_id}\` aborted.`;
     }
@@ -361,57 +292,11 @@ module.exports = {
 
     try {
       const channel = await interaction.guild.channels.fetch(lobby.channel_id).catch(() => null);
-      if (channel) {
-        if (channelMsgToPost) await channel.send({ content: channelMsgToPost }).catch(() => {});
-
-        const targetMessage = await channel.messages.fetch(lobby.message_id).catch(() => null);
-        if (targetMessage && targetMessage.embeds[0]) {
-          
-          // Re-fetch Discord mentions for web IDs to keep rendering beautiful
-          const { data: webDiscordData } = await supabase.from('player_discord_map').select('claimed_by, discord_user_id').in('claimed_by', webIds);
-          const webMentionsMap = {};
-          (webDiscordData || []).forEach(r => { if (r.discord_user_id) webMentionsMap[r.claimed_by] = ` <@${r.discord_user_id}>`; });
-
-          const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
-          const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-          const webList = webNames.map((name, idx) => `• ${name} 🌐${webMentionsMap[webIds[idx]] || ''}`);
-          const fullRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n') || 'None';
-
-          const embed = EmbedBuilder.from(targetMessage.embeds[0]);
-          if (newNotes) embed.setDescription(`"${newNotes}"`);
-
-          // Rebuild match details sentence if settings changed
-          let oldDetailsBlock = targetMessage.embeds[0].fields[0].value;
-          if (board || expansion || selectedMode) {
-            const lines = oldDetailsBlock.split('\n');
-            const hostExtraction = lines[0].match(/^(.*?)(?:created a lobby|is looking for players)/i);
-            const hostHeader = hostExtraction ? hostExtraction[1].trim() : `<@${lobby.host_id}>`;
-
-            let modeString = newBoardText;
-            if (newExpansions.length > 0) {
-              const expText = newExpansions.join(' and ');
-              modeString += newBoardText === 'Base Game' ? ` with ${expText}` : ` with ${expText}`;
-            }
-
-            const verb = lines[0].includes('created a lobby') ? 'created a lobby for' : 'is looking for players for';
-            lines[0] = `${hostHeader} ${verb}${modeString}.`;
-            oldDetailsBlock = lines.join('\n');
-          }
-
-          embed.setFields(
-            { name: targetMessage.embeds[0].fields[0].name, value: oldDetailsBlock, inline: false },
-            { name: '🔑 Password', value: newPassword ? `\`${newPassword}\`` : 'Check chat for more info', inline: false },
-            { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay, inline: false },
-            { name: targetMessage.embeds[0].fields[3].name, value: targetMessage.embeds[0].fields[3].value, inline: false }
-          );
-
-          await targetMessage.edit({ embeds: [embed] });
-        }
+      if (channel && channelMsgToPost) {
+        await channel.send({ content: channelMsgToPost }).catch(() => {});
       }
-    } catch (err) {
-      console.error('Error updating lobby embed in fix.js:', err);
-    }
+    } catch (err) {}
 
-    return interaction.reply({ content: logMessages.join('\n'), ephemeral: true });
+    return interaction.reply({ content: logMessages.length > 0 ? logMessages.join('\n') : '✅ Re-synced lobby settings cleanly.', flags: MessageFlags.Ephemeral });
   }
 };
