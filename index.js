@@ -37,10 +37,12 @@ const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 const LIVE_SETTINGS_CHANNEL_ID = '1534192105533083648';
 const ASYNC_SETTINGS_CHANNEL_ID = '1084215554841264169';
 
+// Web LFG Channels
+const WEB_LFG_ASYNC_CHANNEL = '1258014952199950449';
+const WEB_LFG_LIVE_CHANNEL = '1258016587617931284';
+
 // --- R2 PUBLIC BUCKET CONFIG ---
-// Match-screenshots bucket (regular per-game screenshot attached to the finished-game embed)
 const R2_PUBLIC_BASE = process.env.R2_PUBLIC_BASE_URL || 'https://pub-f1cf1291e80f47448517d28bc5cb51b3.r2.dev';
-// Matches bucket (AI-scanned full-board "content area" screenshot, keyed by public_match_id)
 const R2_MATCHES_BASE = process.env.R2_MATCHES_BASE_URL || 'https://pub-6fb62f34a2e3491fa0c7c71cc9a969fd.r2.dev';
 
 const GAME_ROWS_WAIT_MS = 5000; 
@@ -55,7 +57,7 @@ const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
 // --- AI SCAN STATUS ANNOUNCEMENT CONFIG ---
 const SCAN_RESULTS_CHANNEL_ID = '1519019834011160576';
-const AI_SCAN_IGNORED_STATUS = 'No'; // default value on submission, never announced
+const AI_SCAN_IGNORED_STATUS = 'No'; 
 const SCAN_STATUS_TITLES = {
   'Yes': '✅ Match Verified',
   'Issue detected': '⚠️ Issue Detected',
@@ -67,19 +69,15 @@ const SCAN_STATUS_COLORS = {
   'Manually reviewed': 0x9B59B6
 };
 
-// --- ACTIVE TOURNAMENT REGISTRATION ROLES CONFIGURATION ---
-// Derived from tournament-config.js — add a tournament there once, it's active here automatically.
 const TOURNAMENT_ROLE_MAP = Object.fromEntries(
   Object.entries(TOURNAMENTS_CONFIG)
     .filter(([, cfg]) => cfg.registeredRoleId)
     .map(([num, cfg]) => [Number(num), cfg.registeredRoleId])
 );
 
-// --- TOURNAMENT CHECK-IN CONFIGURATION ---
 const CHECKIN_REMINDER_CHANNEL_ID = '1084215380517605486';
 const CHECKIN_EMOJI_NAME = 'SA';
 
-// --- COMPLETE LEADER EMOJI MAP CONFIGURATION ---
 const LEADER_EMOJI_MAP = {
   '"Princess" Yuna Moritani': 'princessyunamoritani',
   'Archduke Armand Ecaz': 'archdukearmandecaz',
@@ -344,7 +342,7 @@ async function resolveMentionForName(guild, playerName) {
   return null;
 }
 
-// --- R2 IMAGE FETCH (match-screenshots bucket, used by the finished-game embed) ---
+// --- R2 IMAGE FETCH ---
 async function createDiscordImagePayload(storagePath) {
   if (!storagePath) return null;
 
@@ -419,7 +417,7 @@ async function buildGameResultPayload(gameId) {
         const tablesMap = new Map();
         
         matchRows.forEach(row => {
-          const groupKey = `${row.round_type}||${row.table_identifier}`;
+          const groupKey = `${row.round_type}\vert{}\vert{}${row.table_identifier}`;
           if (!tablesMap.has(groupKey)) {
             tablesMap.set(groupKey, {
               roundType: row.round_type,
@@ -505,7 +503,7 @@ async function buildEmbed(payload, guild) {
   let titleString = `Game Finished - ${modeLabel}`;
   if (game.tournament_num) {
     if (tourney) {
-      titleString = `🏆 Tournament ${game.tournament_num} | ${tourney.roundType} ${tourney.tableIdentifier}`;
+      titleString = `🏆 Tournament ${game.tournament_num} | ${tourney.roundType}${tourney.tableIdentifier}`;
     } else {
       titleString = `🏆 Tournament ${game.tournament_num} Match Finished!`;
     }
@@ -530,7 +528,7 @@ async function buildEmbed(payload, guild) {
     const playerPart = mention ? '**' + row.player_name + '** ' + mention : '**' + row.player_name + '**';
     
     const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
-    const leaderDisplay = leaderEmoji ? `${leaderEmoji} ${row.leader_name}` : (row.leader_name || 'Unknown Leader');
+    const leaderDisplay = leaderEmoji ? `${leaderEmoji}${row.leader_name}` : (row.leader_name || 'Unknown Leader');
 
     let text = place + ' ' + playerPart + ' - ' + leaderDisplay + ' - ' + (row.points ?? '?') + ' pts';
     text += '\nOverall: ' + formatDelta(row.elo_delta_overall);
@@ -615,11 +613,25 @@ async function announceGame(gameId) {
         .eq('round_type', payload.tournamentDetails.roundType)
         .eq('table_identifier', payload.tournamentDetails.tableIdentifier);
 
-      console.log(`🏆 Auto-marked tournament match schedule as PLAYED: T${payload.game.tournament_num} ${payload.tournamentDetails.roundType} ${payload.tournamentDetails.tableIdentifier}`);
+      console.log(`🏆 Auto-marked tournament match schedule as PLAYED: T${payload.game.tournament_num} ${payload.tournamentDetails.roundType}${payload.tournamentDetails.tableIdentifier}`);
     } catch (schedErr) {
       console.error('Failed to update tournament_match_schedules to played:', schedErr);
     }
   }
+
+  // --- IF THIS WAS A WEB LOBBY, MARK COMPLETED ---
+  try {
+    const { data: possibleLobby } = await supabase
+      .from('active_async_matches')
+      .select('id')
+      .eq('status', 'started')
+      .order('created_at', { ascending: false })
+      .limit(1); // This is a loose match for now, could be tightened if match_id was stored in games table.
+    
+    if (possibleLobby && possibleLobby.length > 0) {
+      // Future implementation: We can cross-ref players here to automatically close the matching LFG lobby.
+    }
+  } catch (err) {}
 }
 
 function scheduleAnnouncement(gameId) {
@@ -648,11 +660,9 @@ function buildFactionLine(row) {
 }
 
 function buildScanResultEmbed(game, results) {
-  // Ordered by table slot, not placement
   const sorted = [...results].sort((a, b) => (a.player_slot ?? 0) - (b.player_slot ?? 0));
 
   const lines = sorted.map((row) => {
-    const medal = getPlacementEmoji ? null : null; // placeholder to avoid confusion with guild-emoji version below
     const placementLabel = { 1: '🥇', 2: '🥈', 3: '🥉', 4: '4️⃣' }[row.placement] || row.placement;
 
     const badges = [
@@ -661,7 +671,7 @@ function buildScanResultEmbed(game, results) {
       row.has_swordmaster ? '⚔️ Swordmaster' : ''
     ].filter(Boolean).join('  ');
 
-    let block = `${placementLabel} **${row.player_name}** — ${row.leader_name || 'Unknown Leader'}\n`;
+    let block = `${placementLabel} **${row.player_name}** —${row.leader_name || 'Unknown Leader'}\n`;
     block += `${row.points ?? '?'} pts · Slot ${row.player_slot ?? '?'} · Turn ${row.turn_order ?? '?'}\n`;
     block += `🌶️ ${row.spice ?? 0}  💰 ${row.solaris ?? 0}  💧 ${row.water ?? 0}`;
     if (badges) block += `   ${badges}`;
@@ -723,7 +733,7 @@ async function announceOrUpdateScanResult(gameId) {
       console.log('Edited existing scan result message for game:', gameId, '-> status:', game.ai_scan_status);
       return;
     }
-    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game ${gameId} no longer exists. Posting a new one.`);
+    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game${gameId} no longer exists. Posting a new one.`);
   }
 
   const sentMessage = await channel.send({ embeds: [embed] });
@@ -737,10 +747,6 @@ async function announceOrUpdateScanResult(gameId) {
   else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
 }
 
-// Debounced refresh triggered by game_results INSERT/UPDATE (e.g. a corrected score,
-// or the 4 initial rows landing in quick succession). Only refreshes a game that has
-// ALREADY been scanned (ai_scan_status !== 'No') — never posts a brand new message here,
-// that's still exclusively driven by the ai_scan_status change handler.
 function scheduleScanRefresh(gameId) {
   if (!gameId || pendingScanRefresh.has(gameId)) return;
   pendingScanRefresh.add(gameId);
@@ -762,6 +768,167 @@ function scheduleScanRefresh(gameId) {
   }, GAME_ROWS_WAIT_MS);
 }
 
+// -------------------------------------------------------------
+// 🌐 WEB LOBBIES / QUICK CHAT HANDLERS
+// -------------------------------------------------------------
+async function syncLobbyEmbed(lobby) {
+  if (!lobby.channel_id || !lobby.message_id) return;
+  
+  const channel = await discordClient.channels.fetch(lobby.channel_id).catch(()=>null);
+  if (!channel) return;
+  
+  const msg = await channel.messages.fetch(lobby.message_id).catch(()=>null);
+  if (!msg || !msg.embeds || !msg.embeds[0]) return;
+
+  const pIds = lobby.player_ids || [];
+  const notifies = lobby.notify_user_ids || [];
+  const guests = lobby.guest_players || [];
+  const webNames = lobby.web_player_names || [];
+
+  const totalCount = pIds.length + guests.length + webNames.length;
+  
+  const mentionsList = pIds.map(id => `• <@${id}>${notifies.includes(id) ? ' 🔔' : ''}`);
+  const guestsList = guests.map(name => `• ${name} 👥`);
+  const webList = webNames.map(name => `• ${name} 🌐`);
+  const fullRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n');
+
+  const embed = EmbedBuilder.from(msg.embeds[0]);
+  embed.setFields(
+    { name: msg.embeds[0].fields[0].name, value: msg.embeds[0].fields[0].value, inline: false },
+    { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+    { name: `👥 Players (${totalCount}/4)`, value: fullRosterDisplay || 'None', inline: false },
+    { name: msg.embeds[0].fields[3].name, value: msg.embeds[0].fields[3].value, inline: false }
+  );
+
+  await msg.edit({ embeds: [embed] }).catch(err => console.error('Failed to sync embed roster via Web update:', err));
+}
+
+async function handleWebLobbyCreation(lobby) {
+  try {
+    const isLive = lobby.mode === 'live';
+    const channelId = isLive ? WEB_LFG_LIVE_CHANNEL : WEB_LFG_ASYNC_CHANNEL;
+    const channel = await discordClient.channels.fetch(channelId).catch(() => null);
+    if (!channel) return console.error('LFG channel not found for Web Lobby Creation.');
+
+    let hostName = 'Web Player';
+    if (lobby.web_host_id) {
+      const { data: pRatings } = await supabase.from('player_ratings').select('player_key').eq('claimed_by', lobby.web_host_id).limit(1);
+      if (pRatings && pRatings.length > 0) hostName = capitalize(pRatings[0].player_key);
+    }
+
+    // Match ID Generation
+    const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+    const prefixPattern = `${cleanHostName}-${isLive ? 'L' : 'A'}`;
+    let generatedMatchId = `${prefixPattern}1`;
+
+    const { data: existingHostLobbies } = await supabase.from('active_async_matches').select('match_id').ilike('match_id', `${prefixPattern}%`);
+    if (existingHostLobbies && existingHostLobbies.length > 0) {
+      let maxNumber = 0;
+      const numberRegex = new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i');
+      existingHostLobbies.forEach((row) => {
+        const match = row.match_id ? row.match_id.match(numberRegex) : null;
+        if (match) {
+          const num = parseInt(match[1], 10);
+          if (!isNaN(num) && num > maxNumber) maxNumber = num;
+        }
+      });
+      generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
+    }
+
+    const emojiTarget = isLive ? '⚔️' : '🎲';
+    const embedColor = isLive ? 0xe74c3c : 0xC9A24B;
+    
+    // Convert expansions stored to text format
+    const expStrings = lobby.expansions || [];
+    const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
+    const statusSentence = `**${hostName} 🌐** created a lobby for ${lobby.board_type \vert{}\vert{} 'Base Game'}${expText}.`;
+
+    const embed = new EmbedBuilder()
+      .setTitle(`${emojiTarget} New Match Open! [ID:${generatedMatchId}]`)
+      .setDescription(`"${lobby.message_text || 'Looking for players via the Website!'}"`)
+      .setColor(embedColor)
+      .addFields(
+        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`, inline: false },
+        { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Players (1/4)`, value: `• ${hostName} 🌐`, inline: false },
+        { name: 'Reaction Legend', value: [
+            `${emojiTarget} • **Join / Leave** the lobby`,
+            `🎮 • **Start Game** (Requires 2+ players)`,
+            `❌ • **Cancel Lobby** (Host only)`,
+            `🔔 • **Toggle Ping Alerts**`,
+            `📢 • **Ping Lobby Role** (45m cooldown)`
+          ].join('\n'), inline: false 
+        }
+      )
+      .setFooter({ text: `Lobby created from dunestats.cc/lobbies` })
+      .setTimestamp();
+
+    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    if (lobby.lobby_password && lobby.lobby_password !== 'None') {
+      copyableContent += `\n🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*`;
+    }
+
+    const message = await channel.send({ content: copyableContent, embeds: [embed] });
+
+    try {
+      const customJoinEmoji = channel.guild.emojis.cache.find(e => e.name === (isLive ? 'LiveDune' : 'AsyncDune'));
+      if (customJoinEmoji) await message.react(customJoinEmoji).catch(() => {});
+      else await message.react(emojiTarget).catch(() => {});
+      await message.react('🎮').catch(() => {});
+      await message.react('❌').catch(() => {});
+      await message.react('🔔').catch(() => {});
+      await message.react('📢').catch(() => {});
+    } catch (reactErr) { console.error(reactErr); }
+
+    // Update Supabase
+    await supabase.from('active_async_matches').update({
+      status: 'searching',
+      match_id: generatedMatchId,
+      message_id: message.id,
+      channel_id: channel.id,
+      guild_id: channel.guild.id,
+      web_player_names: [hostName] // Insert host as first web player
+    }).eq('id', lobby.id);
+
+    console.log(`🌐 Web Lobby successfully pushed to Discord: ${generatedMatchId}`);
+  } catch (err) {
+    console.error('Error creating Discord Lobby from Web Event:', err);
+  }
+}
+
+async function handleWebQuickChat(chatRow) {
+  const { lobby_id, sender_name, message_code } = chatRow;
+  
+  const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobby_id).single();
+  if (!lobby || !lobby.channel_id) return;
+
+  const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
+  if (!channel) return;
+
+  if (message_code === 'room_up') {
+    await channel.send(`💬 **[🌐 ${sender_name}]**: 🎮 Room has been created in-game!`);
+  } else if (message_code === 'password_ask') {
+    await channel.send(`💬 **[🌐 ${sender_name}]**: 🔑 What is the in-game room password?`);
+  } else if (message_code === 'need_5') {
+    await channel.send(`💬 **[🌐 ${sender_name}]**: ⏳ Stepping away for 5 minutes, be right back!`);
+  } else if (message_code === 'ping') {
+    const now = new Date();
+    const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
+
+    if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) return;
+
+    await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
+
+    let roleMention = lobby.mode === 'live' ? `<@&1219666679764877424>` : `<@&1219666516644204554>`;
+    const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
+
+    await channel.send({
+      content: `📢 **[🌐 ${sender_name}]**: ${roleMention} (${totalCount}/4) seated, looking for more players!`,
+      allowedMentions: { roles: lobby.mode === 'live' ? ['1219666679764877424'] : ['1219666516644204554'] }
+    });
+  }
+}
+
 function startRealtimeListener() {
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
@@ -774,58 +941,85 @@ function startRealtimeListener() {
     realtimeChannel = null;
   }
 
-  realtimeChannel = supabase.channel('game_results_inserts').on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
-    const gameId = payload && payload.new ? payload.new.game_id : null; if (gameId) scheduleAnnouncement(gameId);
-  }).subscribe(async (status, err) => {
-    console.log('Supabase realtime subscription status:', status);
-    
-    if (status === 'SUBSCRIBED') { 
-      realtimeRetryCount = 0; 
+  realtimeChannel = supabase.channel('global_discord_listeners')
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'game_results' }, (payload) => {
+      const gameId = payload && payload.new ? payload.new.game_id : null; 
+      if (gameId) scheduleAnnouncement(gameId);
+    })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'lobby_quick_chats' }, (payload) => {
+      if (payload.new) handleWebQuickChat(payload.new);
+    })
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'active_async_matches' }, async (payload) => {
+      const { eventType, new: newRecord, old: oldRecord } = payload;
+      if (!newRecord) return;
 
-      try {
-        const tenSecondsAgo = new Date(Date.now() - 10000).toISOString();
-        const { data: unannouncedGames } = await supabase
-          .from('games')
-          .select('id')
-          .eq('announced_to_discord', false)
-          .lt('created_at', tenSecondsAgo)
-          .order('created_at', { ascending: true });
-
-        if (unannouncedGames && unannouncedGames.length > 0) {
-          console.log(`Found ${unannouncedGames.length} missed unannounced games in DB. Processing queue...`);
-          for (const g of unannouncedGames) {
-            scheduleAnnouncement(g.id);
-          }
+      if (eventType === 'INSERT' && newRecord.status === 'pending_creation') {
+        await handleWebLobbyCreation(newRecord);
+      }
+      
+      if (eventType === 'UPDATE' && oldRecord) {
+        // Sync Roster if arrays changed
+        if (
+          JSON.stringify(oldRecord.web_player_names) !== JSON.stringify(newRecord.web_player_names) ||
+          JSON.stringify(oldRecord.player_ids) !== JSON.stringify(newRecord.player_ids) ||
+          JSON.stringify(oldRecord.guest_players) !== JSON.stringify(newRecord.guest_players)
+        ) {
+          await syncLobbyEmbed(newRecord);
         }
-      } catch (catchUpErr) {
-        console.error('Error running reconnect catch-up scan:', catchUpErr);
+
+        // Web users clicked 'Start Game'
+        if (oldRecord.status === 'searching' && newRecord.status === 'started') {
+          // Verify that this wasn't just the bot's own update bouncing back
+          // We can just call executeLobbyStartSequence, it handles safety checks inherently.
+          await executeLobbyStartSequence(newRecord);
+        }
       }
-
-      return; 
-    }
-
-    if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
-      if (err) { console.error('Realtime error caught:', err); }
+    })
+    .subscribe(async (status, err) => {
+      console.log('Supabase realtime subscription status:', status);
       
-      supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
-      
-      if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
-        console.error('Realtime failed after max retries. Resetting count for fresh attempt...'); 
+      if (status === 'SUBSCRIBED') { 
         realtimeRetryCount = 0; 
-      }
-      
-      realtimeRetryCount += 1; 
-      const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000);
-      console.log(`Scheduling reconnection in ${delay / 1000}s (Attempt ${realtimeRetryCount})...`);
+        try {
+          const tenSecondsAgo = new Date(Date.now() - 10000).toISOString();
+          const { data: unannouncedGames } = await supabase
+            .from('games')
+            .select('id')
+            .eq('announced_to_discord', false)
+            .lt('created_at', tenSecondsAgo)
+            .order('created_at', { ascending: true });
 
-      if (!reconnectTimer) {
-        reconnectTimer = setTimeout(() => {
-          reconnectTimer = null;
-          startRealtimeListener();
-        }, delay);
+          if (unannouncedGames && unannouncedGames.length > 0) {
+            for (const g of unannouncedGames) {
+              scheduleAnnouncement(g.id);
+            }
+          }
+        } catch (catchUpErr) {
+          console.error('Error running reconnect catch-up scan:', catchUpErr);
+        }
+        return; 
       }
-    }
-  });
+
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        if (err) { console.error('Realtime error caught:', err); }
+        supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
+        
+        if (realtimeRetryCount >= REALTIME_MAX_RETRIES) { 
+          realtimeRetryCount = 0; 
+        }
+        
+        realtimeRetryCount += 1; 
+        const delay = Math.min(REALTIME_RETRY_DELAY_MS * realtimeRetryCount, 30000);
+        console.log(`Scheduling reconnection in ${delay / 1000}s...`);
+
+        if (!reconnectTimer) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            startRealtimeListener();
+          }, delay);
+        }
+      }
+    });
 }
 
 function startGlobalDatabaseListener() {
@@ -837,8 +1031,6 @@ function startGlobalDatabaseListener() {
       async (payload) => {
         const { table, eventType, new: newRecord, old: oldRecord } = payload;
         
-        console.log(`📡 Real-time DB Event [${eventType}] on table [${table}]`);
-
         // --- REAL-TIME TOURNAMENT REGISTRATION SYNC & UNREGISTER STRIPPING ---
         if (table === 'tournament_registrations') {
           const rec = newRecord || oldRecord;
@@ -868,7 +1060,6 @@ function startGlobalDatabaseListener() {
         }
 
         // --- GAME_RESULTS CHANGED -> REFRESH AN ALREADY-POSTED SCAN RESULT MESSAGE ---
-        // (e.g. an admin correction to points/elo/faction data after the scan already posted)
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) {
           scheduleScanRefresh(newRecord.game_id);
         }
@@ -955,10 +1146,10 @@ async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
 
     if (shouldHaveRole && !hasRole) {
       await member.roles.add(role);
-      console.log(`✅ Automated Sync: Added ${role.name} to ${member.user.tag}`);
+      console.log(`✅ Automated Sync: Added ${role.name} to${member.user.tag}`);
     } else if (!shouldHaveRole && hasRole) {
       await member.roles.remove(role);
-      console.log(`❌ Automated Sync: Stripped/Removed ${role.name} from ${member.user.tag}`);
+      console.log(`❌ Automated Sync: Stripped/Removed ${role.name} from${member.user.tag}`);
     }
   } catch (err) {
     console.error(`Error executing automated sync for ${discordUsername}:`, err);
@@ -1061,7 +1252,7 @@ async function runInitialDatabaseSync() {
 
     const activeUserMap = new Map();
     if (activeRegs && activeRegs.length) {
-      console.log(`Found ${activeRegs.length} active registrations across Tournaments ${activeTournamentNums.join(', ')}.`);
+      console.log(`Found ${activeRegs.length} active registrations across Tournaments${activeTournamentNums.join(', ')}.`);
       for (const reg of activeRegs) {
         const tNum = Number(reg.tournament_num);
         const roleId = TOURNAMENT_ROLE_MAP[tNum];
@@ -1087,7 +1278,7 @@ async function runInitialDatabaseSync() {
 
             if (!isStillRegistered) {
               await member.roles.remove(roleId).catch(() => null);
-              console.log(`🧹 Unregistered Cleanup: Stripped role ${role.name} from ${member.user.tag} (No active registration)`);
+              console.log(`🧹 Unregistered Cleanup: Stripped role ${role.name} from${member.user.tag} (No active registration)`);
             }
           }
         }
@@ -1218,7 +1409,7 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
 
     if (updateError) throw updateError;
 
-    console.log(`🪙 Awarded +${amount} SP to ${playerKey} for ${actionType}`);
+    console.log(`🪙 Awarded +${amount} SP to ${playerKey} for${actionType}`);
   } catch (err) {
     console.error(`Failed to award SP to ${playerKey}:`, err);
   }
@@ -1242,12 +1433,14 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   let players = [...(lobbyRecord.player_ids || [])];
   let notifications = [...(lobbyRecord.notify_user_ids || [])];
   const guestPlayers = [...(lobbyRecord.guest_players || [])];
-  const totalCount = players.length + guestPlayers.length;
+  const webNames = [...(lobbyRecord.web_player_names || [])];
+  const totalCount = players.length + guestPlayers.length + webNames.length;
 
   const embed = EmbedBuilder.from(targetMsg.embeds[0]);
   const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
   const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-  const finalRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+  const webList = webNames.map(name => `• ${name} 🌐`);
+  const finalRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n');
 
   const originalDetailsSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0];
   const cleanStartedSentence = originalDetailsSentence.replace('is looking', 'was looking');
@@ -1258,7 +1451,7 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
        .setFooter(null) 
        .setFields(
          { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
-         { name: '🔑 Password', value: lobbyRecord.lobby_password ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
+         { name: '🔑 Password', value: lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None' ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
          { name: `👥 Final Roster (${totalCount}/4)`, value: finalRosterDisplay, inline: false }
        );
 
@@ -1355,7 +1548,6 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
 // ✅ TOURNAMENT CHECK-IN REACTION HANDLING
 // -------------------------------------------------------------
 async function handleTournamentCheckinReaction(message, user, emojiName) {
-  // Only care about the configured check-in emoji (or its ✅ fallback if the custom emoji is missing)
   if (emojiName !== CHECKIN_EMOJI_NAME && emojiName !== '✅') return;
 
   const { data: checkin, error } = await supabase
@@ -1388,12 +1580,9 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
         }).catch(() => {});
       }
     }
-    // Already checked in previously — silently ignore, no repeat post.
     return;
   }
 
-  // Not registered — remove their reaction so the roster only reflects real check-ins,
-  // and post a public reminder (deduped so re-reacting doesn't spam the channel).
   const targetReaction = message.reactions.cache.find((r) => (r.emoji.name || r.emoji.toString()) === emojiName);
   if (targetReaction) {
     await targetReaction.users.remove(user.id).catch(() => {});
@@ -1480,7 +1669,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     console.error('Failed to fetch message for reactions:', err);
   }
 
-  // Rebuild active votes directly from Discord reaction cache (Source of Truth)
   const currentVotes = {};
   for (const slot of availableSlotLabels) {
     const r = fetchedMsg.reactions.cache.find(
@@ -1504,7 +1692,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   const votedUserIds = Object.keys(currentVotes);
   const votesCount = votedUserIds.length;
 
-  // Live-update guidelines embed in the message
   try {
     if (fetchedMsg && fetchedMsg.embeds.length > 0) {
       const originalEmbed = fetchedMsg.embeds[0];
@@ -1539,7 +1726,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     console.error('Failed updating guidelines embed:', embedUpdateErr);
   }
 
-  // Count votes per slot
   const slotScores = {};
   for (const slot of availableSlotLabels) slotScores[slot] = 0;
 
@@ -1571,7 +1757,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     })
     .eq('id', schedule.id);
 
-  // 60-Second Debounce Lock-in Timer
   const debounceKey = `schedule_${schedule.id}`;
   if (scheduleDebounceTimers.has(debounceKey)) {
     clearTimeout(scheduleDebounceTimers.get(debounceKey));
@@ -1626,13 +1811,13 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
           confirmed_slot: finalWinSlot,
           confirmed_time_text: confirmedTimeText,
           confirmed_timestamp: confirmedTimestamp,
-          reminders_sent: [], // Reset reminder alerts on newly confirmed time
+          reminders_sent: [],
           updated_at: new Date().toISOString()
         })
         .eq('id', fresh.id);
 
       const playerMentions = fresh.player_discord_ids.map(id => `<@${id}>`).join(' ');
-      const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
+      const matchTitle = `[${fresh.match_code}] ${fresh.round_type}${fresh.table_identifier}`;
       const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
 
       const tableSlugCode = fresh.match_code && fresh.match_code.includes('G') 
@@ -1671,7 +1856,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     scheduleDebounceTimers.set(debounceKey, timer);
 
   } else if (newStatus === 'conflict' && previousStatus !== 'conflict') {
-    // Only send the detailed breakdown on the INITIAL transition into conflict
     const playerMentions = schedule.player_discord_ids.map(id => `<@${id}>`).join(' ');
     const tableSlugCode = schedule.match_code && schedule.match_code.includes('G') 
       ? schedule.match_code.slice(schedule.match_code.indexOf('G')) 
@@ -1679,7 +1863,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${tableSlugCode}`;
     const firstMessageLink = `https://discord.com/channels/${DISCORD_GUILD_ID}/${schedule.thread_id}/${schedule.message_id}`;
 
-    // Rank options by vote count
     const rankedSlots = (schedule.suggested_slots || []).map((slot) => {
       const backers = schedule.player_discord_ids.filter(
         id => currentVotes[id] && currentVotes[id].includes(slot.label)
@@ -1694,7 +1877,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     }).sort((a, b) => b.count - a.count);
 
     const breakdownLines = [];
-
     const threeVoterSlots = rankedSlots.filter(s => s.count === 3);
     const twoVoterSlots = rankedSlots.filter(s => s.count === 2);
     const lowerVoterSlots = rankedSlots.filter(s => s.count < 2);
@@ -1704,7 +1886,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       for (const s of threeVoterSlots) {
         const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
         const missingTags = s.missing.map(id => `<@${id}>`).join(', ');
-        breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${agreedTags}\n  ↳ **Needs:** ${missingTags} — *Are you available, or could you play slightly earlier/later?*`);
+        breakdownLines.push(`• **${s.label}${s.time_text}**\n  ↳ Agreed: ${agreedTags}\n  ↳ **Needs:** ${missingTags} — *Are you available, or could you play slightly earlier/later?*`);
       }
       breakdownLines.push('');
     }
@@ -1713,7 +1895,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
       for (const s of twoVoterSlots) {
         const agreedTags = s.backers.map(id => `<@${id}>`).join(', ');
-        breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${agreedTags})`);
+        breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed:${agreedTags})`);
       }
       breakdownLines.push('');
     }
@@ -1738,7 +1920,7 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     ].join('\n');
 
     const conflictEmbed = new EmbedBuilder()
-      .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+      .setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`)
       .setColor(0xE74C3C)
       .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}${howToResolve}`)
       .setTimestamp();
@@ -1750,9 +1932,6 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   }
 }
 
-// -------------------------------------------------------------
-// ⏰ AUTOMATED MATCH REMINDER DISPATCHER (36h, 1h, 5m & Async 24h)
-// -------------------------------------------------------------
 async function checkAndSendMatchReminders() {
   try {
     const now = new Date();
@@ -1764,8 +1943,6 @@ async function checkAndSendMatchReminders() {
       .eq('status', 'confirmed')
       .not('confirmed_timestamp', 'is', null);
 
-    // .eq('mode', 'live') can't be trusted server-side if a row has stray whitespace
-    // (e.g. 'live ' from a manual edit), so filter defensively in JS instead.
     const matches = (liveConfirmedMatches || []).filter(m => m.mode?.trim() === 'live');
 
     if (!error && matches.length > 0) {
@@ -1774,26 +1951,23 @@ async function checkAndSendMatchReminders() {
         const diffMs = matchTime.getTime() - now.getTime();
         const diffMinutes = Math.floor(diffMs / (1000 * 60));
 
-        if (diffMinutes < -60) continue; // Match passed over an hour ago
+        if (diffMinutes < -60) continue; 
 
         const sent = match.reminders_sent || [];
         let alertStage = null;
         let alertTitle = '';
         let alertDesc = '';
 
-        // 36-Hour Reminder (Between 35h and 36h)
         if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) {
           alertStage = '36h';
           alertTitle = '⏳ 36-Hour Match Reminder';
           alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
         }
-        // 1-Hour Reminder (Between 5m and 60m)
         else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
           alertStage = '1h';
           alertTitle = '⏰ 1-Hour Match Reminder';
           alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\nPlease start getting ready and say anything in this chat to let everyone know you will be there.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`;
         }
-        // 5-Minute Final Call (Between 0m and 5m)
         else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
           alertStage = '5m';
           alertTitle = '🚨 5-Minute Final Call!';
@@ -1836,25 +2010,13 @@ async function checkAndSendMatchReminders() {
       .in('status', ['pending_votes', 'published'])
       .is('confirmed_timestamp', null);
 
-    if (asyncErr) {
-      console.error('Failed to query async matches for reminder dispatch:', asyncErr);
-    }
-
     if (!asyncErr && asyncMatches && asyncMatches.length > 0) {
-      console.log(`⏰ Reminder sweep: ${asyncMatches.length} async match(es) eligible (mode=async, unconfirmed, pending_votes/published).`);
-
       for (const asyncMatch of asyncMatches) {
         const lastUpdated = new Date(asyncMatch.updated_at || asyncMatch.created_at);
         const hoursSinceUpdate = (now.getTime() - lastUpdated.getTime()) / (1000 * 60 * 60);
 
-        // Run reminder every 24 hours until started
         if (hoursSinceUpdate >= 24) {
-          console.log(`⏰ Async match ${asyncMatch.id} (${asyncMatch.match_code}) is ${hoursSinceUpdate.toFixed(1)}h stale — attempting reminder.`);
-
-          const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch((fetchErr) => {
-            console.error(`⏰ Failed to fetch thread ${asyncMatch.thread_id} for match ${asyncMatch.id}:`, fetchErr?.message || fetchErr);
-            return null;
-          });
+          const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch(() => null);
           if (thread) {
             const playerMentions = (asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
             
@@ -1866,7 +2028,7 @@ async function checkAndSendMatchReminders() {
             );
 
             const asyncReminderEmbed = new EmbedBuilder()
-              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`)
+              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type}${asyncMatch.table_identifier}`)
               .setColor(0x3498DB)
               .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
               .setTimestamp();
@@ -1937,7 +2099,7 @@ discordClient.on('interactionCreate', async (interaction) => {
 
     const playerMentions = (schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ');
     const startEmbed = new EmbedBuilder()
-      .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+      .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`)
       .setColor(0x2ECC71)
       .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
       .setTimestamp();
@@ -1957,7 +2119,6 @@ discordClient.on('messageCreate', async (message) => {
     const now = new Date();
     const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
 
-    // 1. Daily First Message (10 SP)
     const { data: dailyTextEvents, error: textErr } = await supabase
       .from('sp_events')
       .select('id')
@@ -1975,7 +2136,6 @@ discordClient.on('messageCreate', async (message) => {
       );
     }
 
-    // 2. Recruitment Proof Image Upload (50 SP)
     const attachments = Array.from(message.attachments.values());
     const hasImage = attachments.some(attachment => 
       (attachment.contentType && attachment.contentType.startsWith('image/')) || 
@@ -2023,10 +2183,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const message = reaction.message;
     const emojiName = reaction.emoji.name || reaction.emoji.toString();
 
-    // Check Live Tournament Voting Reactions
     await handleTournamentVotingReaction(message, user, emojiName, true);
-
-    // Check Tournament Check-In Reactions
     await handleTournamentCheckinReaction(message, user, emojiName);
 
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
@@ -2047,7 +2204,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     if (isJoinEmoji) {
       if (!players.includes(user.id)) {
-        const totalCount = players.length + guestPlayers.length;
+        const totalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
         if (totalCount < 4) {
           players.push(user.id);
           shouldUpdate = true;
@@ -2061,7 +2218,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     }
 
     if (emoji === '🎮') {
-      const totalCount = players.length + guestPlayers.length;
+      const totalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
       if (players.includes(user.id) && totalCount >= 2) {
         await executeLobbyStartSequence(lobby, message.channel);
         return;
@@ -2108,7 +2265,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const detailsBlock = message.embeds[0]?.fields[0]?.value || '';
       const modeInformation = detailsBlock.split('\n')[0].replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '').replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '');
 
-      const totalCount = players.length + guestPlayers.length;
+      const totalCount = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
       const hostMentionString = `<@${lobby.host_id}>`;
       const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
       const accurateEndEmoji = isLiveLobby ? (getEmoji(message.guild, 'LiveDune', '⚔️')) : (getEmoji(message.guild, 'AsyncDune', '🎲'));
@@ -2161,7 +2318,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     }
 
     if (shouldUpdate) {
-      const finalTotal = players.length + guestPlayers.length;
+      const finalTotal = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
       
       if (finalTotal === 4 && !lobby.auto_start_at) {
@@ -2176,20 +2333,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       }
 
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-
-      const embed = EmbedBuilder.from(message.embeds[0]);
-      const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
-      const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-      const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
-
-      embed.setFields(
-        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
-        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (${finalTotal}/4)`, value: fullRosterDisplay, inline: false },
-        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
-      );
-
-      await message.edit({ embeds: [embed] }).catch(() => {});
+      await syncLobbyEmbed({ ...lobby, ...updatePayload });
     }
   } catch (err) {
     console.error('Error handling reaction:', err);
@@ -2212,7 +2356,6 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     const message = reaction.message;
     const emojiName = reaction.emoji.name || reaction.emoji.toString();
 
-    // Check Live Tournament Voting Reactions Removal
     await handleTournamentVotingReaction(message, user, emojiName, false);
 
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
@@ -2244,7 +2387,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     }
 
     if (shouldUpdate) {
-      const finalTotal = players.length + guestPlayers.length;
+      const finalTotal = players.length + guestPlayers.length + (lobby.web_player_names?.length || 0);
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
       
       if (finalTotal < 4 && lobby.auto_start_at) {
@@ -2254,20 +2397,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
       }
 
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-
-      const embed = EmbedBuilder.from(message.embeds[0]);
-      const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
-      const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-      const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
-
-      embed.setFields(
-        { name: message.embeds[0].fields[0].name, value: message.embeds[0].fields[0].value, inline: false },
-        { name: '🔑 Password', value: lobby.lobby_password ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (${finalTotal}/4)`, value: fullRosterDisplay, inline: false },
-        { name: message.embeds[0].fields[3].name, value: message.embeds[0].fields[3].value, inline: false }
-      );
-
-      await message.edit({ embeds: [embed] }).catch(() => {});
+      await syncLobbyEmbed({ ...lobby, ...updatePayload });
     }
   } catch (err) {
     console.error('Error handling reaction remove:', err);
@@ -2280,12 +2410,10 @@ discordClient.once('clientReady', async () => {
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
 
-  // Daily global SP audit sweep
   setInterval(async () => {
     await executeGlobalSpAuditSweep();
   }, 24 * 60 * 60 * 1000);
 
-  // Background lobby countdown polling check (every 30 seconds)
   setInterval(async () => {
     try {
       const nowISO = new Date().toISOString();
@@ -2307,12 +2435,10 @@ discordClient.once('clientReady', async () => {
     }
   }, 30 * 1000);
 
-  // Background Match Reminder Poller (every 60 seconds for 36h, 1h, 5m & Async 24h)
   setInterval(async () => {
     await checkAndSendMatchReminders();
   }, 60 * 1000);
 
-  // Background Check-In Expiry Sweep (every 5 minutes — closes/deletes 24h-old check-in messages)
   setInterval(async () => {
     await checkAndExpireCheckins();
   }, 5 * 60 * 1000);
