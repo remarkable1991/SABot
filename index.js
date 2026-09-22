@@ -407,7 +407,26 @@ function scheduleAnnouncement(gameId) {
     try { await announceGame(gameId); } catch (err) {}
   }, GAME_ROWS_WAIT_MS);
 }
+function scheduleScanRefresh(gameId) {
+  if (!gameId || pendingScanRefresh.has(gameId)) return;
+  pendingScanRefresh.add(gameId);
+  setTimeout(async () => {
+    pendingScanRefresh.delete(gameId);
+    try {
+      const { data: game, error } = await supabase
+        .from('games')
+        .select('ai_scan_status')
+        .eq('id', gameId)
+        .single();
 
+      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+
+      await announceOrUpdateScanResult(gameId);
+    } catch (err) {
+      console.error('Error refreshing scan result after game_results change', gameId, err);
+    }
+  }, GAME_ROWS_WAIT_MS);
+}
 // -------------------------------------------------------------
 // 🌐 WEB LOBBIES / QUICK CHAT / ROSTER RENDERING HANDLERS
 // -------------------------------------------------------------
