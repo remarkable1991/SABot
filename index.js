@@ -771,6 +771,22 @@ function scheduleScanRefresh(gameId) {
 // -------------------------------------------------------------
 // 🌐 WEB LOBBIES / QUICK CHAT HANDLERS
 // -------------------------------------------------------------
+async function getDiscordMentionsForWebPlayers(webIds) {
+  if (!webIds || webIds.length === 0) return {};
+  const { data } = await supabase
+    .from('player_discord_map')
+    .select('claimed_by, discord_user_id')
+    .in('claimed_by', webIds);
+    
+  const map = {};
+  if (data) {
+    data.forEach(row => {
+      if (row.discord_user_id) map[row.claimed_by] = ` <@${row.discord_user_id}>`;
+    });
+  }
+  return map;
+}
+
 async function syncLobbyEmbed(lobby) {
   if (!lobby.channel_id || !lobby.message_id) return;
   
@@ -784,12 +800,20 @@ async function syncLobbyEmbed(lobby) {
   const notifies = lobby.notify_user_ids || [];
   const guests = lobby.guest_players || [];
   const webNames = lobby.web_player_names || [];
+  const webIds = lobby.web_player_ids || [];
 
   const totalCount = pIds.length + guests.length + webNames.length;
   
+  const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
+
   const mentionsList = pIds.map(id => `• <@${id}>${notifies.includes(id) ? ' 🔔' : ''}`);
   const guestsList = guests.map(name => `• ${name} 👥`);
-  const webList = webNames.map(name => `• ${name} 🌐`);
+  const webList = webNames.map((name, idx) => {
+    const wId = webIds[idx];
+    const mention = wId && webMentionsMap[wId] ? webMentionsMap[wId] : '';
+    return `• ${name} 🌐${mention}`;
+  });
+  
   const fullRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n');
 
   const embed = EmbedBuilder.from(msg.embeds[0]);
@@ -811,9 +835,22 @@ async function handleWebLobbyCreation(lobby) {
     if (!channel) return console.error('LFG channel not found for Web Lobby Creation.');
 
     let hostName = 'Web Player';
+    let discordMention = '';
+
+    // Look up the host's IGN and Discord ID
     if (lobby.web_host_id) {
-      const { data: pRatings } = await supabase.from('player_ratings').select('player_key').eq('claimed_by', lobby.web_host_id).limit(1);
-      if (pRatings && pRatings.length > 0) hostName = capitalize(pRatings[0].player_key);
+      const { data: mapData } = await supabase
+        .from('player_discord_map')
+        .select('player_key, discord_user_id')
+        .eq('claimed_by', lobby.web_host_id)
+        .limit(1);
+        
+      if (mapData && mapData.length > 0) {
+        hostName = capitalize(mapData[0].player_key);
+        if (mapData[0].discord_user_id) {
+          discordMention = ` <@${mapData[0].discord_user_id}>`;
+        }
+      }
     }
 
     const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
@@ -840,25 +877,29 @@ async function handleWebLobbyCreation(lobby) {
     const roleMention = `<@&${roleId}>`;
     
     const expStrings = lobby.expansions || [];
-   const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
+    const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
     const boardDisplay = lobby.board_type ? lobby.board_type : 'Base Game';
-    const statusSentence = `**${hostName} 🌐** created a lobby for ${boardDisplay}${expText}.`;
+    const statusSentence = `**${hostName} 🌐**${discordMention} created a lobby for ${boardDisplay}${expText}.`;
 
     // Ghost ping sentence logic
-    let customPingSentence = `**${hostName} 🌐** is looking for ${isLive ? 'live' : 'async'} players ${roleMention}`;
+    let customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${isLive ? 'live' : 'async'} players ${roleMention}`;
     if (lobby.board_type && lobby.board_type !== 'Base Game') customPingSentence += ` for ${lobby.board_type}`;
     else if (lobby.board_type === 'Base Game') customPingSentence += ` for Base Game`;
     if (expText) customPingSentence += expText;
     customPingSentence += '.';
 
+    const embedTitle = hostName !== 'Web Player' 
+      ? `${emojiTarget} ${hostName}'s Game [ID:${generatedMatchId}]`
+      : `${emojiTarget} New Match Open! [ID:${generatedMatchId}]`;
+
     const embed = new EmbedBuilder()
-      .setTitle(`${emojiTarget} New Match Open! [ID:${generatedMatchId}]`)
+      .setTitle(embedTitle)
       .setDescription(`"${lobby.message_text || 'Looking for players via the Website!'}"`)
       .setColor(embedColor)
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (1/4)`, value: `• ${hostName} 🌐`, inline: false },
+        { name: `👥 Players (1/4)`, value: `• ${hostName} 🌐${discordMention}`, inline: false },
         { name: 'Reaction Legend', value: [
             `${emojiTarget} • **Join / Leave** the lobby`,
             `🎮 • **Start Game** (Requires 2+ players)`,
@@ -897,13 +938,15 @@ async function handleWebLobbyCreation(lobby) {
       pingMessage.delete().catch(() => {});
     }, 1500);
 
+    // Update Supabase (Ensure web_player_ids captures the host UUID)
     await supabase.from('active_async_matches').update({
       status: 'searching',
       match_id: generatedMatchId,
       message_id: message.id,
       channel_id: channel.id,
       guild_id: channel.guild.id,
-      web_player_names: [hostName]
+      web_player_names: [hostName],
+      web_player_ids: [lobby.web_host_id]
     }).eq('id', lobby.id);
 
   } catch (err) {
@@ -918,12 +961,10 @@ async function executeLobbyPing(lobby, channel) {
   const now = new Date();
   const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
 
-  // 45-minute cooldown check
   if (lastTagged && (now.getTime() - lastTagged.getTime() < TAG_COOLDOWN_MS)) {
-    return false; // Returns false if on cooldown
+    return false;
   }
 
-  // Update cooldown state
   await supabase.from('active_async_matches').update({ last_prompted_at: now.toISOString() }).eq('id', lobby.id);
   lobby.last_prompted_at = now.toISOString();
 
@@ -934,22 +975,28 @@ async function executeLobbyPing(lobby, channel) {
   const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
   if (!msg || !msg.embeds || !msg.embeds[0]) return true;
 
-  // Extract the game mode config cleanly (Supports both Discord and Web text formats)
   const detailsBlock = msg.embeds[0].fields[0]?.value || '';
   const modeInformation = detailsBlock.split('\n')[0]
     .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '')
     .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '')
-    .replace(/\*\*.+?\*\*\s+created\s+a\s+lobby\s+for\s+/i, '')
-    .replace(/\*\*.+?\*\*\s+created\s+a\s+lobby\s+/i, '');
+    .replace(/\*\*.+?\*\*\s+(?:<@\d+>\s+)?created\s+a\s+lobby\s+for\s+/i, '')
+    .replace(/\*\*.+?\*\*\s+(?:<@\d+>\s+)?created\s+a\s+lobby\s+/i, '');
 
   const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
 
-  // Determine host string representation
   let hostMentionString = '';
   if (lobby.host_id) {
     hostMentionString = `<@${lobby.host_id}>`;
   } else if (lobby.web_player_names && lobby.web_player_names.length > 0) {
-    hostMentionString = `**${lobby.web_player_names[0]} 🌐**`;
+    const hostName = lobby.web_player_names[0];
+    const hostUuid = (lobby.web_player_ids && lobby.web_player_ids.length > 0) ? lobby.web_player_ids[0] : null;
+    let discordMention = '';
+    
+    if (hostUuid) {
+      const { data: mapData } = await supabase.from('player_discord_map').select('discord_user_id').eq('claimed_by', hostUuid).single();
+      if (mapData && mapData.discord_user_id) discordMention = ` <@${mapData.discord_user_id}>`;
+    }
+    hostMentionString = `**${hostName} 🌐**${discordMention}`;
   } else {
     hostMentionString = `**Web Player 🌐**`;
   }
@@ -958,11 +1005,9 @@ async function executeLobbyPing(lobby, channel) {
   const accurateEndEmoji = isLiveLobby ? (getEmoji(channel.guild, 'LiveDune', '⚔️')) : (getEmoji(channel.guild, 'AsyncDune', '🎲'));
   const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
 
-  // The universal tag message string
   const tagMessage = `${roleMention} ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}`;
   const allowedMentionsOptions = { roles: [roleId] };
 
-  // Check if message got buried
   let historyCountMet = false;
   try {
     const fetchedHistory = await channel.messages.fetch({ after: msg.id, limit: 12 }).catch(() => null);
@@ -972,7 +1017,6 @@ async function executeLobbyPing(lobby, channel) {
   } catch (err) { console.error(err); }
 
   if (historyCountMet) {
-    // Repost at the bottom
     const activeEmbed = EmbedBuilder.from(msg.embeds[0]);
     const newLobbyMsg = await channel.send({ content: tagMessage, embeds: [activeEmbed], allowedMentions: allowedMentionsOptions });
 
@@ -996,11 +1040,10 @@ async function executeLobbyPing(lobby, channel) {
     const moveRefLink = `https://discord.com/channels/${channel.guild.id}/${channel.id}/${newLobbyMsg.id}`;
     await msg.edit({ content: `➡️ **This lobby has moved to the bottom of the chat:** ${moveRefLink}`, embeds: [] }).catch(() => {});
   } else {
-    // Just post the tag above
     await channel.send({ content: tagMessage, allowedMentions: allowedMentionsOptions });
   }
 
-  return true; // Success
+  return true;
 }
 
 async function handleWebQuickChat(chatRow) {
@@ -1526,12 +1569,21 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   let notifications = [...(lobbyRecord.notify_user_ids || [])];
   const guestPlayers = [...(lobbyRecord.guest_players || [])];
   const webNames = [...(lobbyRecord.web_player_names || [])];
+  const webIds = [...(lobbyRecord.web_player_ids || [])];
+  
   const totalCount = players.length + guestPlayers.length + webNames.length;
+
+  const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
 
   const embed = EmbedBuilder.from(targetMsg.embeds[0]);
   const mentionsList = players.map(id => `• <@${id}>${notifications.includes(id) ? ' 🔔' : ''}`);
   const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-  const webList = webNames.map(name => `• ${name} 🌐`);
+  const webList = webNames.map((name, idx) => {
+    const wId = webIds[idx];
+    const mention = wId && webMentionsMap[wId] ? webMentionsMap[wId] : '';
+    return `• ${name} 🌐${mention}`;
+  });
+  
   const finalRosterDisplay = [...mentionsList, ...guestsList, ...webList].join('\n');
 
   const originalDetailsSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0];
@@ -2207,7 +2259,6 @@ discordClient.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // --- BUTTON INTERACTION: ONE-CLICK ASYNC GAME START ---
   if (interaction.isButton() && interaction.customId.startsWith('async_start_')) {
     const matchId = interaction.customId.replace('async_start_', '');
     const { data: schedule, error } = await supabase
@@ -2330,7 +2381,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const { data: lobby, error: fetchErr } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (fetchErr || !lobby || lobby.status !== 'searching') return;
 
-    const embedTitle = message.embeds[0]?.title || '';
     const emoji = reaction.emoji.name || reaction.emoji;
     const isJoinEmoji = emoji === 'AsyncDune' || emoji === 'LiveDune' || 
                         reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune') ||
