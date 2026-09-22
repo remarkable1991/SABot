@@ -840,8 +840,9 @@ async function handleWebLobbyCreation(lobby) {
     const roleMention = `<@&${roleId}>`;
     
     const expStrings = lobby.expansions || [];
-    const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
-    const statusSentence = `**${hostName} 🌐** created a lobby for ${lobby.board_type \vert{}\vert{} 'Base Game'}${expText}.`;
+   const expText = expStrings.length > 0 ? ` with ${expStrings.join(', ')}` : '';
+    const boardDisplay = lobby.board_type ? lobby.board_type : 'Base Game';
+    const statusSentence = `**${hostName} 🌐** created a lobby for ${boardDisplay}${expText}.`;
 
     // Ghost ping sentence logic
     let customPingSentence = `**${hostName} 🌐** is looking for ${isLive ? 'live' : 'async'} players ${roleMention}`;
