@@ -188,7 +188,7 @@ module.exports = {
           }
         }
 
-       // Handle IGN (Web Player)
+        // Handle IGN (Web Player)
         if (ignInput) {
           if (players.length + guestPlayers.length + webNames.length >= 4) return interaction.reply({ content: `❌ Lobby full (4/4).`, ephemeral: true });
           
@@ -198,7 +198,7 @@ module.exports = {
           
           const { data: mapData } = await supabase
             .from('player_discord_map')
-            .select('player_key, claimed_by, discord_user_id') // Fetch Discord ID
+            .select('player_key, claimed_by, discord_user_id')
             .ilike('player_key', `%${ignInput}%`)
             .limit(1);
 
@@ -219,6 +219,66 @@ module.exports = {
              logMessages.push(`❌ "${resolvedIgn}" is already a Web Player in this lobby.`);
           }
         }
+      }
+
+      if (action === 'remove') {
+        if (targetInput) {
+          const mentionMatch = targetInput.match(/<@!?(\d+)>/);
+          if (mentionMatch) {
+            const tId = mentionMatch[1];
+            if (tId === lobby.host_id) return interaction.reply({ content: `❌ The host cannot be removed.`, ephemeral: true });
+            if (players.includes(tId)) {
+              players = players.filter(id => id !== tId);
+              notifications = notifications.filter(id => id !== tId);
+              logMessages.push(`Removed <@${tId}>.`);
+            }
+          } else {
+            let bestMatch = null, bestScore = 0, targetType = '';
+            for (const pid of players) {
+              if (pid === lobby.host_id) continue;
+              const u = interaction.guild.members.cache.get(pid)?.user;
+              for (const n of [u?.username, u?.globalName].filter(Boolean)) {
+                const sc = calculateSimilarity(targetInput, n);
+                if (sc > bestScore) { bestScore = sc; bestMatch = pid; targetType = 'player'; }
+              }
+            }
+            for (let i = 0; i < guestPlayers.length; i++) {
+              const sc = calculateSimilarity(targetInput, guestPlayers[i]);
+              if (sc > bestScore) { bestScore = sc; bestMatch = i; targetType = 'guest'; }
+            }
+            if (bestScore >= 0.60) {
+              if (targetType === 'player') {
+                players = players.filter(id => id !== bestMatch);
+                notifications = notifications.filter(id => id !== bestMatch);
+                logMessages.push(`Removed <@${bestMatch}>.`);
+              } else {
+                logMessages.push(`Removed guest "${guestPlayers[bestMatch]}".`);
+                guestPlayers.splice(bestMatch, 1);
+              }
+            } else {
+              logMessages.push(`Could not match "${targetInput}" to a Discord/Guest player.`);
+            }
+          }
+        }
+
+        if (ignInput) {
+          const lowerIgn = ignInput.toLowerCase();
+          const wIdx = webNames.findIndex(n => n.toLowerCase().includes(lowerIgn));
+          if (wIdx > -1) {
+            if (lobby.web_host_id && webIds[wIdx] === lobby.web_host_id) {
+              return interaction.reply({ content: `❌ The Web Host cannot be removed.`, ephemeral: true });
+            }
+            const removed = webNames[wIdx];
+            webNames.splice(wIdx, 1);
+            if (webIds[wIdx]) webIds.splice(wIdx, 1);
+            logMessages.push(`Removed Web Player "${removed}".`);
+          } else {
+            logMessages.push(`Web Player "${ignInput}" not found in lobby.`);
+          }
+        }
+      }
+    }
+
     // --- GAME SETTINGS MODIFICATIONS ---
     let newBoardText = lobby.board_type || 'Base Game';
     let newExpansions = lobby.expansions || [];
