@@ -1,16 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { TOURNAMENTS_CONFIG } = require('./tournament-config');
 
 const LOOKUP_THRESHOLD = 0.72;
-
-// --- CONFIGURATION PER TOURNAMENT ---
-const TOURNAMENTS_CONFIG = {
-  17: {
-    registeredRoleId: '1546458221928124426',
-    checkInRoleId: '1546458821231116349',
-    checkInStartTimestamp: 1788775200,
-    tournamentStartTimestamp: 1788861600
-  }
-};
 
 const TARGET_TOURNAMENT_NUMS = Object.keys(TOURNAMENTS_CONFIG).map(Number);
 
@@ -160,7 +151,7 @@ module.exports = {
 
         if (reg) {
           const hasCheckInRole = config.checkInRoleId ? interaction.member.roles.cache.has(config.checkInRoleId) : false;
-          
+
           const checkInStatus = hasCheckInRole
             ? '✅ **Checked In**'
             : '❌ **Not Checked In** (Check <#1224323203011186728> when check-ins open)';
