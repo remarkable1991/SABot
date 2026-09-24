@@ -437,7 +437,109 @@ async function getDiscordMentionsForWebPlayers(webIds) {
   if (data) data.forEach(row => { if (row.discord_user_id) map[row.claimed_by] = ` <@${row.discord_user_id}>`; });
   return map;
 }
+// -------------------------------------------------------------
+// 🔍 AI SCAN STATUS ANNOUNCEMENT
+// -------------------------------------------------------------
+function buildFactionLine(row) {
+  const factions = [
+    ['Emperor', row.emperor_level, row.emperor_alliance],
+    ['Guild', row.spacing_guild_level, row.spacing_guild_alliance],
+    ['Bene Gesserit', row.bene_gesserit_level, row.bene_gesserit_alliance],
+    ['Fremen', row.fremen_level, row.fremen_alliance]
+  ];
+  const parts = factions
+    .filter(([, level]) => level > 0)
+    .map(([name, level, alliance]) => `${name} Lv${level}${alliance ? ' 👑' : ''}`);
+  return parts.length ? parts.join(' · ') : null;
+}
 
+function buildScanResultEmbed(game, results) {
+  const sorted = [...results].sort((a, b) => (a.player_slot ?? 0) - (b.player_slot ?? 0));
+
+  const lines = sorted.map((row) => {
+    const placementLabel = { 1: '🥇', 2: '🥈', 3: '🥉', 4: '4️⃣' }[row.placement] || row.placement;
+
+    const badges = [
+      row.has_first_player ? '✅' : '',
+      row.has_high_council ? '🏛️ High Council' : '',
+      row.has_swordmaster ? '⚔️ Swordmaster' : ''
+    ].filter(Boolean).join('  ');
+
+    let block = `${placementLabel} **${row.player_name}** — ${row.leader_name || 'Unknown Leader'}\n`;
+    block += `${row.points ?? '?'} pts · Slot ${row.player_slot ?? '?'} · Turn ${row.turn_order ?? '?'}\n`;
+    block += `🌶️ ${row.spice ?? 0}  💰 ${row.solaris ?? 0}  💧 ${row.water ?? 0}`;
+    if (badges) block += `   ${badges}`;
+
+    const factionLine = buildFactionLine(row);
+    if (factionLine) block += `\n${factionLine}`;
+
+    return block;
+  });
+
+  const matchUrl = game.public_match_id ? `https://dunestats.cc/match/${game.public_match_id}` : null;
+  const imageUrl = game.public_match_id
+    ? `${R2_MATCHES_BASE}/matches/${game.public_match_id}/${game.public_match_id}-content-area.png`
+    : null;
+
+  const titleBase = SCAN_STATUS_TITLES[game.ai_scan_status] || 'Match Scan Result';
+  const color = SCAN_STATUS_COLORS[game.ai_scan_status] || 0x95A5A6;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`${titleBase}${game.public_match_id ? ` — #${game.public_match_id}` : ''}`)
+    .setDescription(lines.join('\n\n'))
+    .setColor(color)
+    .setFooter({ text: `Status: ${game.ai_scan_status}` })
+    .setTimestamp(new Date());
+
+  if (matchUrl) embed.setURL(matchUrl);
+  if (imageUrl) embed.setImage(imageUrl);
+
+  return embed;
+}
+
+async function announceOrUpdateScanResult(gameId) {
+  const { data: game, error: gameError } = await supabase
+    .from('games')
+    .select('id, public_match_id, ai_scan_status, ai_scan_discord_message_id')
+    .eq('id', gameId)
+    .single();
+
+  if (gameError || !game) { console.error('Failed to fetch game for scan announcement', gameId, gameError); return; }
+  if (!game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+
+  const { data: results, error: resultsError } = await supabase
+    .from('game_results')
+    .select('*')
+    .eq('game_id', gameId)
+    .order('player_slot', { ascending: true });
+
+  if (resultsError || !results || !results.length) { console.error('Failed to fetch results for scan announcement', gameId, resultsError); return; }
+
+  const channel = await discordClient.channels.fetch(SCAN_RESULTS_CHANNEL_ID).catch(() => null);
+  if (!channel) { console.error('Could not find scan results channel', SCAN_RESULTS_CHANNEL_ID); return; }
+
+  const embed = buildScanResultEmbed(game, results);
+
+  if (game.ai_scan_discord_message_id) {
+    const existingMsg = await channel.messages.fetch(game.ai_scan_discord_message_id).catch(() => null);
+    if (existingMsg) {
+      await existingMsg.edit({ embeds: [embed] }).catch((err) => console.error('Failed to edit scan result message for game', gameId, err));
+      console.log('Edited existing scan result message for game:', gameId, '-> status:', game.ai_scan_status);
+      return;
+    }
+    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game ${gameId} no longer exists. Posting a new one.`);
+  }
+
+  const sentMessage = await channel.send({ embeds: [embed] });
+
+  const { error: updateErr } = await supabase
+    .from('games')
+    .update({ ai_scan_discord_message_id: sentMessage.id })
+    .eq('id', gameId);
+
+  if (updateErr) console.error(`Failed to store ai_scan_discord_message_id for game ${gameId}:`, updateErr);
+  else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
+}
 function scheduleScanRefresh(gameId) {
   if (!gameId || pendingScanRefresh.has(gameId)) return;
   pendingScanRefresh.add(gameId);
