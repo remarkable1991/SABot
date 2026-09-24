@@ -58,15 +58,21 @@ const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 // --- AI SCAN STATUS ANNOUNCEMENT CONFIG ---
 const SCAN_RESULTS_CHANNEL_ID = '1519019834011160576';
 const AI_SCAN_IGNORED_STATUS = 'No'; 
+
 const SCAN_STATUS_TITLES = {
-  'Yes': '✅ Match Verified',
+  'Yes': '🤖 AI Verified',
+  'Manually reviewed': '🔍 Manually Reviewed',
+  'Manually verified': '✅ Manually Verified',
   'Issue detected': '⚠️ Issue Detected',
-  'Manually reviewed': '🔍 Manually Reviewed'
+  'Roster mismatch': '🚨 Roster Mismatch'
 };
+
 const SCAN_STATUS_COLORS = {
-  'Yes': 0x2ECC71,
-  'Issue detected': 0xE74C3C,
-  'Manually reviewed': 0x9B59B6
+  'Yes': 0xF39C12,               // Orange
+  'Manually reviewed': 0xF39C12, // Orange
+  'Manually verified': 0x2ECC71, // Green
+  'Issue detected': 0xE74C3C,    // Red
+  'Roster mismatch': 0xE74C3C    // Red
 };
 
 const TOURNAMENT_ROLE_MAP = Object.fromEntries(
