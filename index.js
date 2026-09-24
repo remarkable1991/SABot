@@ -307,7 +307,7 @@ async function buildGameResultPayload(gameId) {
       if (matchRows && matchRows.length > 0) {
         const tablesMap = new Map();
         matchRows.forEach(row => {
-          const groupKey = `${row.round_type}||${row.table_identifier}`;
+          const groupKey = `${row.round_type}\vert{}\vert{}${row.table_identifier}`;
           if (!tablesMap.has(groupKey)) tablesMap.set(groupKey, { roundType: row.round_type, tableIdentifier: row.table_identifier, players: [] });
           tablesMap.get(groupKey).players.push(normalizeName(row.player_name));
         });
@@ -344,7 +344,7 @@ async function buildEmbed(payload, guild) {
   const lines = [];
   
   let titleString = `Game Finished - ${modeLabel}`;
-  if (game.tournament_num) titleString = tourney ? `🏆 Tournament ${game.tournament_num} | ${tourney.roundType} ${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
+  if (game.tournament_num) titleString = tourney ? `🏆 Tournament ${game.tournament_num} | ${tourney.roundType}${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
 
   for (const row of results) {
     const place = getPlacementEmoji(guild, row.placement); 
@@ -353,10 +353,10 @@ async function buildEmbed(payload, guild) {
     const mention = await resolveMentionForName(guild, row.player_name);
     const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
 
-    let text = `${place} **${row.player_name}** ${mention || ''} - ${leaderEmoji}${row.leader_name || 'Unknown Leader'} - ${row.points ?? '?'} pts`;
+    let text = `${place} **${row.player_name}** ${mention \vert{}\vert{} ''} -${leaderEmoji}${row.leader_name \vert{}\vert{} 'Unknown Leader'} -${row.points ?? '?'} pts`;
     text += `\nOverall: ${formatDelta(row.elo_delta_overall)}`;
     if (ratingsMap[playerKey]?.overall !== undefined) text += ` (-> ${Number(ratingsMap[playerKey].overall).toFixed(1)})`;
-    text += ` | ${modeLabel}: ${formatDelta(row.elo_delta)}`;
+    text += ` | ${modeLabel}:${formatDelta(row.elo_delta)}`;
     if (ratingsMap[playerKey]?.[game.game_version] !== undefined) text += ` (-> ${Number(ratingsMap[playerKey][game.game_version]).toFixed(1)})`;
     if (sandboxDeltaMap[normalizedKey] !== undefined) {
       text += ` | All VP: ${formatDelta(sandboxDeltaMap[normalizedKey])}`;
@@ -471,7 +471,7 @@ function buildScanResultEmbed(game, results) {
       row.has_swordmaster ? '⚔️ Swordmaster' : ''
     ].filter(Boolean).join('  ');
 
-    let block = `${placementLabel} **${row.player_name}** — ${row.leader_name || 'Unknown Leader'}\n`;
+    let block = `${placementLabel} **${row.player_name}** —${row.leader_name || 'Unknown Leader'}\n`;
     block += `${row.points ?? '?'} pts · Slot ${row.player_slot ?? '?'} · Turn ${row.turn_order ?? '?'}\n`;
     block += `🌶️ ${row.spice ?? 0}  💰 ${row.solaris ?? 0}  💧 ${row.water ?? 0}`;
     if (badges) block += `   ${badges}`;
@@ -533,7 +533,7 @@ async function announceOrUpdateScanResult(gameId) {
       console.log('Edited existing scan result message for game:', gameId, '-> status:', game.ai_scan_status);
       return;
     }
-    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game ${gameId} no longer exists. Posting a new one.`);
+    console.log(`Stored scan message ${game.ai_scan_discord_message_id} for game${gameId} no longer exists. Posting a new one.`);
   }
 
   const sentMessage = await channel.send({ embeds: [embed] });
@@ -546,26 +546,7 @@ async function announceOrUpdateScanResult(gameId) {
   if (updateErr) console.error(`Failed to store ai_scan_discord_message_id for game ${gameId}:`, updateErr);
   else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
 }
-function scheduleScanRefresh(gameId) {
-  if (!gameId || pendingScanRefresh.has(gameId)) return;
-  pendingScanRefresh.add(gameId);
-  setTimeout(async () => {
-    pendingScanRefresh.delete(gameId);
-    try {
-      const { data: game, error } = await supabase
-        .from('games')
-        .select('ai_scan_status')
-        .eq('id', gameId)
-        .single();
 
-      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
-
-      await announceOrUpdateScanResult(gameId);
-    } catch (err) {
-      console.error('Error refreshing scan result after game_results change', gameId, err);
-    }
-  }, GAME_ROWS_WAIT_MS);
-}
 // Universal unified roster renderer that prevents duplicates and fetches IGNs automatically
 async function buildRosterDisplay(lobby) {
   const pIds = lobby.player_ids || [];
@@ -646,7 +627,7 @@ async function syncLobbyEmbed(lobby) {
   const expText = (lobby.expansions && lobby.expansions.length > 0) ? ` with ${lobby.expansions.join(', ')}` : '';
   const boardText = lobby.board_type || 'Base Game';
   
-  const newDetailsLine = `${hostDisplay} ${verb} ${boardText}${expText}.`;
+  const newDetailsLine = `${hostDisplay}${verb} ${boardText}${expText}.`;
   const timerLine = oldDetails.split('\n')[1] || `*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`;
 
   const embed = EmbedBuilder.from(msg.embeds[0]);
@@ -884,9 +865,51 @@ function startGlobalDatabaseListener() {
             await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
           }
         }
-        if (table === 'games' && eventType === 'UPDATE' && newRecord) {
-          if (newRecord.ai_scan_status && newRecord.ai_scan_status !== AI_SCAN_IGNORED_STATUS && newRecord.ai_scan_status !== (oldRecord ? oldRecord.ai_scan_status : undefined)) {
-            try { await announceOrUpdateScanResult(newRecord.id); } catch (scanErr) {}
+ // --- REAL-TIME TOURNAMENT REGISTRATION & CHECK-IN SYNC ---
+        if (table === 'tournament_registrations') {
+          const rec = newRecord || oldRecord;
+          if (rec && TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)]) {
+            await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
+          }
+
+          // Handle Website Check-ins
+          if (eventType === 'UPDATE' && newRecord?.has_checked_in === true) {
+            const isFreshWebsiteCheckin = (oldRecord?.has_checked_in !== true && newRecord.check_in_method === 'website');
+            const isDualConfirmed = (oldRecord?.check_in_method === 'discord' && newRecord.check_in_method === 'discord/website');
+
+            if (isFreshWebsiteCheckin || isDualConfirmed) {
+              try {
+                const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+                if (guild && newRecord.discord_username) {
+                  const member = await searchGuildMemberByNames(guild, [newRecord.discord_username]);
+                  const dbMatch = await getDatabasePlayerMap(newRecord.discord_username);
+                  const discordId = member?.id || dbMatch?.discord_user_id;
+
+                  if (discordId) {
+                    const tNum = Number(newRecord.tournament_num);
+                    const config = TOURNAMENTS_CONFIG[tNum];
+
+                    // Automatically assign Check-In role on Discord
+                    if (member && config?.checkInRoleId && !member.roles.cache.has(config.checkInRoleId)) {
+                      await member.roles.add(config.checkInRoleId).catch(() => {});
+                    }
+
+                    // Announce in Check-In Channel
+                    const reminderChannel = await discordClient.channels.fetch(CHECKIN_REMINDER_CHANNEL_ID).catch(() => null);
+                    if (reminderChannel) {
+                      let messageContent = `🌐 <@${discordId}> has successfully checked in via the website for **Tournament #${tNum}**!`;
+                      if (isDualConfirmed) {
+                        messageContent = `🌐 <@${discordId}> has confirmed their check-in on the website for **Tournament #${tNum}** (Discord & Website ✅)!`;
+                      }
+
+                      await reminderChannel.send({ content: messageContent }).catch(() => {});
+                    }
+                  }
+                }
+              } catch (webCheckinErr) {
+                console.error('Error processing website check-in announcement:', webCheckinErr);
+              }
+            }
           }
         }
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
@@ -1099,6 +1122,38 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
   if (member.roles.cache.has(config.registeredRoleId)) {
     if (!member.roles.cache.has(config.checkInRoleId)) {
       await member.roles.add(config.checkInRoleId).catch(() => {});
+      
+      // --- NEW LOGIC: SYNC CHECK-IN STATUS TO REGISTRATION DB ---
+      try {
+        const { data: reg } = await supabase
+          .from('tournament_registrations')
+          .select('id, check_in_method')
+          .eq('tournament_num', checkin.tournament_num)
+          .ilike('discord_username', member.user.username)
+          .maybeSingle();
+
+        if (reg) {
+          let newMethod = 'discord';
+          if (reg.check_in_method === 'website') {
+            newMethod = 'website/discord';
+          } else if (reg.check_in_method && reg.check_in_method.includes('discord')) {
+            newMethod = reg.check_in_method;
+          }
+
+          await supabase
+            .from('tournament_registrations')
+            .update({
+              has_checked_in: true,
+              check_in_method: newMethod,
+              checked_in_at: new Date().toISOString()
+            })
+            .eq('id', reg.id);
+        }
+      } catch (syncErr) {
+        console.error('Failed to sync check-in to registration DB:', syncErr);
+      }
+      // --------------------------------------------------------
+
       if (reminderChannel) await reminderChannel.send({ content: `✅ <@${user.id}> has successfully checked in for **Tournament #${checkin.tournament_num}**!` }).catch(() => {});
     }
     return;
