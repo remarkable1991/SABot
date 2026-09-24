@@ -307,7 +307,7 @@ async function buildGameResultPayload(gameId) {
       if (matchRows && matchRows.length > 0) {
         const tablesMap = new Map();
         matchRows.forEach(row => {
-          const groupKey = `${row.round_type}\vert{}\vert{}${row.table_identifier}`;
+          const groupKey = row.round_type + '_' + row.table_identifier;
           if (!tablesMap.has(groupKey)) tablesMap.set(groupKey, { roundType: row.round_type, tableIdentifier: row.table_identifier, players: [] });
           tablesMap.get(groupKey).players.push(normalizeName(row.player_name));
         });
@@ -344,7 +344,9 @@ async function buildEmbed(payload, guild) {
   const lines = [];
   
   let titleString = `Game Finished - ${modeLabel}`;
-  if (game.tournament_num) titleString = tourney ? `🏆 Tournament ${game.tournament_num} | ${tourney.roundType}${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
+  if (game.tournament_num) {
+    titleString = tourney ? `🏆 Tournament ${game.tournament_num} | ${tourney.roundType}${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
+  }
 
   for (const row of results) {
     const place = getPlacementEmoji(guild, row.placement); 
@@ -353,7 +355,11 @@ async function buildEmbed(payload, guild) {
     const mention = await resolveMentionForName(guild, row.player_name);
     const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
 
-    let text = `${place} **${row.player_name}** ${mention \vert{}\vert{} ''} -${leaderEmoji}${row.leader_name \vert{}\vert{} 'Unknown Leader'} -${row.points ?? '?'} pts`;
+    const safeMention = mention ? mention : '';
+    const safeLeader = row.leader_name ? row.leader_name : 'Unknown Leader';
+    const safePoints = row.points !== null && row.points !== undefined ? row.points : '?';
+
+    let text = `${place} **${row.player_name}** ${safeMention} -${leaderEmoji}${safeLeader} -${safePoints} pts`;
     text += `\nOverall: ${formatDelta(row.elo_delta_overall)}`;
     if (ratingsMap[playerKey]?.overall !== undefined) text += ` (-> ${Number(ratingsMap[playerKey].overall).toFixed(1)})`;
     text += ` | ${modeLabel}:${formatDelta(row.elo_delta)}`;
@@ -474,8 +480,13 @@ function buildScanResultEmbed(game, results) {
       row.has_swordmaster ? '⚔️ Swordmaster' : ''
     ].filter(Boolean).join('  ');
 
-    let block = `${placementLabel} **${row.player_name}** —${row.leader_name || 'Unknown Leader'}\n`;
-    block += `${row.points ?? '?'} pts · Slot ${row.player_slot ?? '?'} · Turn ${row.turn_order ?? '?'}\n`;
+    const safeLeader = row.leader_name ? row.leader_name : 'Unknown Leader';
+    const safePoints = row.points !== null && row.points !== undefined ? row.points : '?';
+    const safeSlot = row.player_slot !== null && row.player_slot !== undefined ? row.player_slot : '?';
+    const safeTurn = row.turn_order !== null && row.turn_order !== undefined ? row.turn_order : '?';
+
+    let block = `${placementLabel} **${row.player_name}** —${safeLeader}\n`;
+    block += `${safePoints} pts · Slot ${safeSlot} · Turn ${safeTurn}\n`;
     block += `🌶️ ${row.spice ?? 0}  💰 ${row.solaris ?? 0}  💧 ${row.water ?? 0}`;
     if (badges) block += `   ${badges}`;
 
@@ -493,8 +504,13 @@ function buildScanResultEmbed(game, results) {
   const titleBase = SCAN_STATUS_TITLES[game.ai_scan_status] || 'Match Scan Result';
   const color = SCAN_STATUS_COLORS[game.ai_scan_status] || 0x95A5A6;
 
+  let finalTitle = titleBase;
+  if (game.public_match_id) {
+    finalTitle = `${titleBase} — #${game.public_match_id}`;
+  }
+
   const embed = new EmbedBuilder()
-    .setTitle(`${titleBase}${game.public_match_id ? ` — #${game.public_match_id}` : ''}`)
+    .setTitle(finalTitle)
     .setDescription(lines.join('\n\n'))
     .setColor(color)
     .setFooter({ text: `Status: ${game.ai_scan_status}` })
@@ -600,7 +616,8 @@ async function buildRosterDisplay(lobby) {
     actualCount++;
   }
 
-  return { display: rosterLines.join('\n') || 'None', count: actualCount };
+  const finalDisplay = rosterLines.length > 0 ? rosterLines.join('\n') : 'None';
+  return { display: finalDisplay, count: actualCount };
 }
 
 async function syncLobbyEmbed(lobby) {
@@ -631,7 +648,11 @@ async function syncLobbyEmbed(lobby) {
   const boardText = lobby.board_type || 'Base Game';
   
   const newDetailsLine = `${hostDisplay}${verb} ${boardText}${expText}.`;
-  const timerLine = oldDetails.split('\n')[1] || `*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`;
+  
+  let timerLine = oldDetails.split('\n')[1];
+  if (!timerLine) {
+    timerLine = `*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`;
+  }
 
   const embed = EmbedBuilder.from(msg.embeds[0]);
   if (lobby.message_text) embed.setDescription(`"${lobby.message_text}"`);
@@ -1073,7 +1094,9 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
 
   const { display, count } = await buildRosterDisplay(lobbyRecord);
   const cleanStartedSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
-  const matchTypeTitle = (targetMsg.embeds[0].title || '').includes('Live Match') || !(targetMsg.embeds[0].title || '').includes('Async Match') ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+  
+  const embedTitle = targetMsg.embeds[0].title || '';
+  const matchTypeTitle = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match') ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
 
   const embed = EmbedBuilder.from(targetMsg.embeds[0])
     .setTitle(matchTypeTitle).setColor(0x2ecc71).setFooter(null) 
