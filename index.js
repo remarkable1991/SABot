@@ -413,6 +413,7 @@ function scheduleAnnouncement(gameId) {
     try { await announceGame(gameId); } catch (err) {}
   }, GAME_ROWS_WAIT_MS);
 }
+
 function scheduleScanRefresh(gameId) {
   if (!gameId || pendingScanRefresh.has(gameId)) return;
   pendingScanRefresh.add(gameId);
@@ -433,6 +434,7 @@ function scheduleScanRefresh(gameId) {
     }
   }, GAME_ROWS_WAIT_MS);
 }
+
 // -------------------------------------------------------------
 // 🌐 WEB LOBBIES / QUICK CHAT / ROSTER RENDERING HANDLERS
 // -------------------------------------------------------------
@@ -443,6 +445,7 @@ async function getDiscordMentionsForWebPlayers(webIds) {
   if (data) data.forEach(row => { if (row.discord_user_id) map[row.claimed_by] = ` <@${row.discord_user_id}>`; });
   return map;
 }
+
 // -------------------------------------------------------------
 // 🔍 AI SCAN STATUS ANNOUNCEMENT
 // -------------------------------------------------------------
@@ -859,13 +862,7 @@ function startGlobalDatabaseListener() {
     .on('postgres_changes', { event: '*', schema: 'public' }, async (payload) => {
         const { table, eventType, new: newRecord, old: oldRecord } = payload;
         
-        if (table === 'tournament_registrations') {
-          const rec = newRecord || oldRecord;
-          if (rec && TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)]) {
-            await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
-          }
-        }
- // --- REAL-TIME TOURNAMENT REGISTRATION & CHECK-IN SYNC ---
+        // --- REAL-TIME TOURNAMENT REGISTRATION & CHECK-IN SYNC ---
         if (table === 'tournament_registrations') {
           const rec = newRecord || oldRecord;
           if (rec && TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)]) {
@@ -910,6 +907,12 @@ function startGlobalDatabaseListener() {
                 console.error('Error processing website check-in announcement:', webCheckinErr);
               }
             }
+          }
+        }
+
+        if (table === 'games' && eventType === 'UPDATE' && newRecord) {
+          if (newRecord.ai_scan_status && newRecord.ai_scan_status !== AI_SCAN_IGNORED_STATUS && newRecord.ai_scan_status !== (oldRecord ? oldRecord.ai_scan_status : undefined)) {
+            try { await announceOrUpdateScanResult(newRecord.id); } catch (scanErr) {}
           }
         }
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
