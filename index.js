@@ -438,6 +438,26 @@ async function getDiscordMentionsForWebPlayers(webIds) {
   return map;
 }
 
+function scheduleScanRefresh(gameId) {
+  if (!gameId || pendingScanRefresh.has(gameId)) return;
+  pendingScanRefresh.add(gameId);
+  setTimeout(async () => {
+    pendingScanRefresh.delete(gameId);
+    try {
+      const { data: game, error } = await supabase
+        .from('games')
+        .select('ai_scan_status')
+        .eq('id', gameId)
+        .single();
+
+      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+
+      await announceOrUpdateScanResult(gameId);
+    } catch (err) {
+      console.error('Error refreshing scan result after game_results change', gameId, err);
+    }
+  }, GAME_ROWS_WAIT_MS);
+}
 // Universal unified roster renderer that prevents duplicates and fetches IGNs automatically
 async function buildRosterDisplay(lobby) {
   const pIds = lobby.player_ids || [];
