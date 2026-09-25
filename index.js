@@ -590,7 +590,8 @@ async function buildRosterDisplay(lobby) {
     seenDiscordIds.add(id);
     const ign = discordIgnMap[id];
     const bell = notifies.includes(id) ? ' 🔔' : '';
-    rosterLines.push(ign ? `• **${ign}** <@${id}>${bell}` : `• <@${id}>${bell}`);
+    const nameLine = ign ? `**${ign}** <@${id}>` : `<@${id}>`;
+    rosterLines.push(`• ${nameLine}${bell}`);
     actualCount++;
   }
 
@@ -645,7 +646,7 @@ async function syncLobbyEmbed(lobby) {
   const oldDetails = msg.embeds[0].fields[0].value;
   const verb = oldDetails.includes('created a lobby') ? 'created a lobby for' : 'is looking for players for';
   const expText = (lobby.expansions && lobby.expansions.length > 0) ? ` with ${lobby.expansions.join(', ')}` : '';
-  const boardText = lobby.board_type || 'Base Game';
+  const boardText = lobby.board_type ? lobby.board_type : 'Base Game';
   
   const newDetailsLine = `${hostDisplay}${verb} ${boardText}${expText}.`;
   
@@ -716,10 +717,12 @@ async function handleWebLobbyCreation(lobby) {
     const embedTitle = hostName !== 'Web Player' ? `${emojiTarget} ${hostName}'s Game [ID:${generatedMatchId}]` : `${emojiTarget} New Match Open! [ID:${generatedMatchId}]`;
     const tempLobby = { ...lobby, web_player_names: [hostName], web_player_ids: [lobby.web_host_id] };
     const { display: rosterStr } = await buildRosterDisplay(tempLobby);
+    
+    const msgText = lobby.message_text ? lobby.message_text : 'Looking for players via the Website!';
 
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
-      .setDescription(`"${lobby.message_text || 'Looking for players via the Website!'}"`)
+      .setDescription(`"${msgText}"`)
       .setColor(embedColor)
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime()/1000)}:R>.*`, inline: false },
@@ -1106,7 +1109,10 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
       { name: `👥 Final Roster (${count}/4)`, value: display, inline: false }
     );
 
-  await targetMsg.edit({ content: `🚀 **The match${lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : ''} has officially begun! Good luck, commanders!**\nPlayers: ${(lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ')}`, embeds: [embed] }).catch(() => {});
+  const safeMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
+  const playerTags = (lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ');
+  
+  await targetMsg.edit({ content: `🚀 **The match${safeMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${playerTags}`, embeds: [embed] }).catch(() => {});
 
   const now = new Date(), startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
   const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - (now.getUTCDay() * 24 * 60 * 60 * 1000)).toISOString();
@@ -1131,7 +1137,8 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   }
 
   if (unlinkedPlayers.length > 0) {
-    await channel.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Missed Strategy Points!').setDescription(`${unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n')}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`).setColor(0xe74c3c)] }).catch(() => {});
+    const lines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n');
+    await channel.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Missed Strategy Points!').setDescription(`${lines}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`).setColor(0xe74c3c)] }).catch(() => {});
   }
 }
 
@@ -1145,25 +1152,39 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
   if (!member) return;
 
   const reminderChannel = await discordClient.channels.fetch(CHECKIN_REMINDER_CHANNEL_ID).catch(() => null);
+  
   if (member.roles.cache.has(config.registeredRoleId)) {
     if (!member.roles.cache.has(config.checkInRoleId)) {
       await member.roles.add(config.checkInRoleId).catch(() => {});
       
-      // --- NEW LOGIC: SYNC CHECK-IN STATUS TO REGISTRATION DB ---
+      // --- NEW LOGIC: FUZZY SYNC CHECK-IN STATUS TO REGISTRATION DB ---
       try {
-        const { data: reg } = await supabase
+        const { data: regs } = await supabase
           .from('tournament_registrations')
-          .select('id, check_in_method')
-          .eq('tournament_num', checkin.tournament_num)
-          .ilike('discord_username', member.user.username)
-          .maybeSingle();
+          .select('id, check_in_method, discord_username')
+          .eq('tournament_num', checkin.tournament_num);
 
-        if (reg) {
+        let bestReg = null;
+        let bestScore = 0;
+        const candidateNames = [member.user.username, member.user.globalName, member.displayName, member.nickname].filter(Boolean);
+
+        if (regs) {
+          for (const r of regs) {
+            if (!r.discord_username) continue;
+            const score = Math.max(...candidateNames.map(name => similarity(name, r.discord_username)));
+            if (score > bestScore) {
+              bestScore = score;
+              bestReg = r;
+            }
+          }
+        }
+
+        if (bestReg && bestScore >= DB_MATCH_THRESHOLD) {
           let newMethod = 'discord';
-          if (reg.check_in_method === 'website') {
+          if (bestReg.check_in_method === 'website') {
             newMethod = 'website/discord';
-          } else if (reg.check_in_method && reg.check_in_method.includes('discord')) {
-            newMethod = reg.check_in_method;
+          } else if (bestReg.check_in_method && bestReg.check_in_method.includes('discord')) {
+            newMethod = bestReg.check_in_method;
           }
 
           await supabase
@@ -1173,7 +1194,7 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
               check_in_method: newMethod,
               checked_in_at: new Date().toISOString()
             })
-            .eq('id', reg.id);
+            .eq('id', bestReg.id);
         }
       } catch (syncErr) {
         console.error('Failed to sync check-in to registration DB:', syncErr);
@@ -1259,11 +1280,18 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     const updatedEmbed = EmbedBuilder.from(originalEmbed);
     const slotLines = (schedule.suggested_slots || []).map((slot) => {
       const votersForSlot = schedule.player_discord_ids.filter(id => currentVotes[id] && currentVotes[id].includes(slot.label));
-      return `${slot.label} ${slot.time_text}${votersForSlot.length > 0 ? ` — ${votersForSlot.map(id => `<@${id}>`).join(' ')}` : ''}`;
+      const mentions = votersForSlot.length > 0 ? ` — ${votersForSlot.map(id => `<@${id}>`).join(' ')}` : '';
+      return `${slot.label} ${slot.time_text}${mentions}`;
     });
     const nonVoters = schedule.player_discord_ids.filter(id => !votedUserIds.includes(id));
+    
+    let voteString = `\n\n**✅ All 4 players have voted!**`;
+    if (nonVoters.length > 0) {
+      voteString = `\n\n**⏳ Did not vote yet (${votesCount}/4):**\n${nonVoters.map(id => `<@${id}>`).join(', ')}`;
+    }
+    
     const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
-    updatedFields.push({ name: '📅 Suggested Time Slots & Votes', value: `${slotLines.join('\n')}${nonVoters.length > 0 ? `\n\n**⏳ Did not vote yet (${votesCount}/4):**\n${nonVoters.map(id => `<@${id}>`).join(', ')}` : `\n\n**✅ All 4 players have voted!**`}`, inline: false });
+    updatedFields.push({ name: '📅 Suggested Time Slots & Votes', value: `${slotLines.join('\n')}${voteString}`, inline: false });
     updatedEmbed.setFields(updatedFields);
     await fetchedMsg.edit({ embeds: [updatedEmbed] }).catch(() => {});
   }
@@ -1303,16 +1331,23 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
 
       await supabase.from('tournament_match_schedules').update({ confirmed_slot: finalWinSlot, confirmed_time_text: confirmedTimeText, confirmed_timestamp: confirmedTimestamp, reminders_sent: [], updated_at: new Date().toISOString() }).eq('id', fresh.id);
 
-      const calUrl = confirmedDate ? generateGoogleCalendarUrl(`[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`, confirmedDate) : null;
-      const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${fresh.match_code && fresh.match_code.includes('G') ? fresh.match_code.slice(fresh.match_code.indexOf('G')) : 'table'}`;
+      const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
+      const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
       
-      const confirmEmbed = new EmbedBuilder().setTitle(`📅 Match Time Confirmed: [${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`).setColor(0x2ECC71).setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`).setTimestamp();
+      let tablePath = 'table';
+      if (fresh.match_code && fresh.match_code.includes('G')) tablePath = fresh.match_code.slice(fresh.match_code.indexOf('G'));
+      const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${tablePath}`;
+      
+      const confirmEmbed = new EmbedBuilder().setTitle(`📅 Match Time Confirmed: ${matchTitle}`).setColor(0x2ECC71).setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`).setTimestamp();
       
       const components = calUrl ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Add to Google Calendar').setStyle(ButtonStyle.Link).setURL(calUrl).setEmoji('📅'))] : [];
       await fetchedMsg.channel.send({ content: `👥 ${fresh.player_discord_ids.map(id => `<@${id}>`).join(' ')}`, embeds: [confirmEmbed], components: components }).catch(() => {});
     }, 60 * 1000));
   } else if (newStatus === 'conflict' && previousStatus !== 'conflict') {
-    const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${schedule.match_code && schedule.match_code.includes('G') ? schedule.match_code.slice(schedule.match_code.indexOf('G')) : 'table'}`;
+    let tablePath = 'table';
+    if (schedule.match_code && schedule.match_code.includes('G')) tablePath = schedule.match_code.slice(schedule.match_code.indexOf('G'));
+    const webUrl = `https://dunestats.cc/tournament/${schedule.tournament_num}/${tablePath}`;
+    
     const rankedSlots = (schedule.suggested_slots || []).map((slot) => {
       const backers = schedule.player_discord_ids.filter(id => currentVotes[id] && currentVotes[id].includes(slot.label));
       return { ...slot, count: backers.length, backers, missing: schedule.player_discord_ids.filter(id => !backers.includes(id)) };
@@ -1338,7 +1373,8 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
       breakdownLines.push('');
     }
 
-    const conflictEmbed = new EmbedBuilder().setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`).setColor(0xE74C3C).setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}**💡 How to Resolve & Propose Solutions:**\n1. [Jump to the pinned voting post](https://discord.com/channels/${DISCORD_GUILD_ID}/${schedule.thread_id}/${schedule.message_id}) to check or update your votes.\n2. Check mutual 2-hour free windows on the live map:\n   👉 **[Availability Map for Table ${schedule.table_identifier}](${webUrl})** *(Click any slot to copy its Discord timestamp)*\n3. Use \`/confirm\` to propose an adjustment:\n   • **Shift by minutes:** \`/confirm slot: B offset_minutes: 60\` *(Creates a new option **🇩** shifted +1h)*\n   • **Custom time code:** \`/confirm custom_time: <t:1787814000:F>\`\n4. Once proposed, everyone can vote on the new option above!`).setTimestamp();
+    const instructions = `**💡 How to Resolve & Propose Solutions:**\n1. [Jump to the pinned voting post](https://discord.com/channels/${DISCORD_GUILD_ID}/${schedule.thread_id}/${schedule.message_id}) to check or update your votes.\n2. Check mutual 2-hour free windows on the live map:\n   👉 **[Availability Map for Table ${schedule.table_identifier}](${webUrl})** *(Click any slot to copy its Discord timestamp)*\n3. Use \`/confirm\` to propose an adjustment:\n   • **Shift by minutes:** \`/confirm slot: B offset_minutes: 60\` *(Creates a new option **🇩** shifted +1h)*\n   • **Custom time code:** \`/confirm custom_time: <t:1787814000:F>\`\n4. Once proposed, everyone can vote on the new option above!`;
+    const conflictEmbed = new EmbedBuilder().setTitle(`⚠️ Scheduling Conflict: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`).setColor(0xE74C3C).setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}${instructions}`).setTimestamp();
     await fetchedMsg.channel.send({ content: `👥 ${schedule.player_discord_ids.map(id => `<@${id}>`).join(' ')}\n🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}>`, embeds: [conflictEmbed] }).catch(() => {});
   }
 }
