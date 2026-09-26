@@ -190,6 +190,13 @@ function getEmoji(guild, name, fallback) {
   const emoji = guild.emojis.cache.find((e) => e.name === name);
   return emoji ? emoji.toString() : fallback;
 }
+function generateGoogleCalendarUrl(title, dateObj) {
+  if (!dateObj) return null;
+  const start = dateObj.toISOString().replace(/-|:|\.\d\d\d/g, "");
+  const endObj = new Date(dateObj.getTime() + 2 * 60 * 60 * 1000); // Assumes a 2-hour block
+  const end = endObj.toISOString().replace(/-|:|\.\d\d\d/g, "");
+  return `https://www.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${start}/${end}`;
+}
 function getLeaderEmoji(guild, leaderName) { return getEmoji(guild, LEADER_EMOJI_MAP[leaderName], ''); }
 function getPlacementEmoji(guild, placement) {
   const map = { 1: { name: 'Tournament', fallback: '1st' }, 2: { name: '2ndTrophy', fallback: '2nd' }, 3: { name: '3rdTrophy', fallback: '3rd' }, 4: { name: '4thTrophy', fallback: '4th' } };
