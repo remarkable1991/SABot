@@ -897,7 +897,12 @@ function startGlobalDatabaseListener() {
         if (table === 'tournament_registrations') {
           const rec = newRecord || oldRecord;
           if (rec && TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)]) {
-            await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
+            const member = await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
+            // SELF HEAL (Both Registrations and Player Map)
+            if (member && eventType !== 'DELETE' && member.user.username !== rec.discord_username && rec.id) {
+               await supabase.from('tournament_registrations').update({ discord_username: member.user.username }).eq('id', rec.id);
+               await supabase.from('player_discord_map').update({ discord_username: member.user.username, discord_user_id: member.id, updated_at: new Date().toISOString() }).eq('discord_username', rec.discord_username);
+            }
           }
 
           // Handle Website Check-ins
@@ -941,6 +946,82 @@ function startGlobalDatabaseListener() {
           }
         }
 
+        // --- REAL-TIME WEBSITE VOTING SYNC ---
+        if (table === 'tournament_match_schedules' && eventType === 'UPDATE' && newRecord && oldRecord) {
+          // Rebuild Discord embed if votes or status change (supports website voting logic updating Discord)
+          if (JSON.stringify(newRecord.votes) !== JSON.stringify(oldRecord.votes) || newRecord.status !== oldRecord.status) {
+            try {
+              const thread = await discordClient.channels.fetch(newRecord.thread_id).catch(() => null);
+              if (thread) {
+                const fetchedMsg = await thread.messages.fetch(newRecord.message_id).catch(() => null);
+                if (fetchedMsg && fetchedMsg.embeds.length > 0) {
+                  const originalEmbed = fetchedMsg.embeds[0];
+                  const updatedEmbed = EmbedBuilder.from(originalEmbed);
+                  const currentVotes = newRecord.votes || {};
+                  const votedUserIds = Object.keys(currentVotes);
+                  const votesCount = votedUserIds.length;
+                  const slotLines = (newRecord.suggested_slots || []).map((slot) => {
+                    const votersForSlot = newRecord.player_discord_ids.filter(id => currentVotes[id] && currentVotes[id].includes(slot.label));
+                    const mentions = votersForSlot.length > 0 ? ` — ${votersForSlot.map(id => `<@${id}>`).join(' ')}` : '';
+                    return `${slot.label} ${slot.time_text}${mentions}`;
+                  });
+                  const nonVoters = newRecord.player_discord_ids.filter(id => !votedUserIds.includes(id));
+                  let voteString = `\n\n**✅ All 4 players have voted!**`;
+                  if (nonVoters.length > 0) {
+                    voteString = `\n\n**⏳ Did not vote yet (${votesCount}/4):**\n${nonVoters.map(id => `<@${id}>`).join(', ')}`;
+                  }
+                  const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
+                  updatedFields.push({ name: '📅 Suggested Time Slots & Votes', value: `${slotLines.join('\n')}${voteString}`, inline: false });
+                  updatedEmbed.setFields(updatedFields);
+                  await fetchedMsg.edit({ embeds: [updatedEmbed] }).catch(() => {});
+                }
+              }
+            } catch (e) { console.error('DB Sync Embed Error:', e); }
+          }
+
+          // Trigger 60-second Confirmation Sequence if status changes to confirmed
+          if (newRecord.status === 'confirmed' && oldRecord.status !== 'confirmed') {
+            const debounceKey = `schedule_${newRecord.id}`;
+            if (scheduleDebounceTimers.has(debounceKey)) { clearTimeout(scheduleDebounceTimers.get(debounceKey)); scheduleDebounceTimers.delete(debounceKey); }
+
+            scheduleDebounceTimers.set(debounceKey, setTimeout(async () => {
+              scheduleDebounceTimers.delete(debounceKey);
+              const { data: fresh } = await supabase.from('tournament_match_schedules').select('*').eq('id', newRecord.id).single();
+              if (!fresh || fresh.status !== 'confirmed') return;
+
+              const freshVotes = fresh.votes || {};
+              const freshSlots = (fresh.suggested_slots || []).map(s => s.label);
+              const freshScores = {};
+              for (const slot of freshSlots) freshScores[slot] = 0;
+              for (const uid of Object.keys(freshVotes)) for (const slot of freshVotes[uid]) if (freshScores[slot] !== undefined) freshScores[slot]++;
+              const finalWinSlot = freshSlots.find(s => freshScores[s] >= 4);
+              if (!finalWinSlot) return;
+
+              const matchedSlot = (fresh.suggested_slots || []).find(s => s.label === finalWinSlot);
+              let confirmedTimestamp = null, confirmedDate = null;
+              const confirmedTimeText = matchedSlot ? matchedSlot.time_text : 'Agreed Time';
+              const matchDiscord = String(confirmedTimeText).match(/<t:(\d+)/);
+              if (matchDiscord) { confirmedDate = new Date(parseInt(matchDiscord[1], 10) * 1000); confirmedTimestamp = confirmedDate.toISOString(); } 
+              else { const parsed = Date.parse(confirmedTimeText); if (!isNaN(parsed)) { confirmedDate = new Date(parsed); confirmedTimestamp = confirmedDate.toISOString(); } }
+
+              await supabase.from('tournament_match_schedules').update({ confirmed_slot: finalWinSlot, confirmed_time_text: confirmedTimeText, confirmed_timestamp: confirmedTimestamp, reminders_sent: [], updated_at: new Date().toISOString() }).eq('id', fresh.id);
+
+              const matchTitle = `[${fresh.match_code}] ${fresh.round_type}${fresh.table_identifier}`;
+              const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
+              
+              let tablePath = 'table';
+              if (fresh.match_code && fresh.match_code.includes('G')) tablePath = fresh.match_code.slice(fresh.match_code.indexOf('G'));
+              const webUrl = `https://dunestats.cc/tournament/${fresh.tournament_num}/${tablePath}`;
+              
+              const confirmEmbed = new EmbedBuilder().setTitle(`📅 Match Time Confirmed: ${matchTitle}`).setColor(0x2ECC71).setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`).setTimestamp();
+              
+              const components = calUrl ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Add to Google Calendar').setStyle(ButtonStyle.Link).setURL(calUrl).setEmoji('📅'))] : [];
+              const thread = await discordClient.channels.fetch(fresh.thread_id).catch(() => null);
+              if (thread) await thread.send({ content: `👥 ${fresh.player_discord_ids.map(id => `<@${id}>`).join(' ')}`, embeds: [confirmEmbed], components: components }).catch(() => {});
+            }, 60 * 1000));
+          }
+        }
+
         if (table === 'games' && eventType === 'UPDATE' && newRecord) {
           if (newRecord.ai_scan_status && newRecord.ai_scan_status !== AI_SCAN_IGNORED_STATUS && newRecord.ai_scan_status !== (oldRecord ? oldRecord.ai_scan_status : undefined)) {
             try { await announceOrUpdateScanResult(newRecord.id); } catch (scanErr) {}
@@ -971,17 +1052,18 @@ function startGlobalDatabaseListener() {
 }
 
 async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
-  if (!discordUsername) return;
+  if (!discordUsername) return null;
   try {
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID);
     const role = guild.roles.cache.get(roleId);
-    if (!guild || !role) return;
+    if (!guild || !role) return null;
     const member = await searchGuildMemberByNames(guild, [discordUsername]);
-    if (!member) return;
+    if (!member) return null;
     const hasRole = member.roles.cache.has(roleId);
     if (shouldHaveRole && !hasRole) await member.roles.add(role);
     else if (!shouldHaveRole && hasRole) await member.roles.remove(role);
-  } catch (err) {}
+    return member;
+  } catch (err) { return null; }
 }
 
 async function syncPlayerSpRole(discordUserId, lifetimeSp) {
@@ -1013,7 +1095,7 @@ async function executeGlobalSpAuditSweep() {
       if (!discordId && mapRecord) {
         const searchNames = [mapRecord.discord_username, mapRecord.display_name, mapRecord.username, record.player_key].filter(Boolean);
         const member = await searchGuildMemberByNames(guild, searchNames);
-        if (member) { discordId = member.id; await persistDiscordUserId(mapRecord, member.id); }
+        if (member) { discordId = member.id; await persistDiscordUserId(mapRecord, member.id, member.user.username); }
       }
       if (discordId) await syncPlayerSpRole(discordId, Number(record.lifetime_sp));
     }
@@ -1024,7 +1106,7 @@ async function runInitialDatabaseSync() {
   try {
     const activeTournamentNums = Object.keys(TOURNAMENT_ROLE_MAP).map(Number);
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
-    const { data: activeRegs } = await supabase.from('tournament_registrations').select('discord_username, tournament_num').in('tournament_num', activeTournamentNums).eq('active_on_discord', true);
+    const { data: activeRegs } = await supabase.from('tournament_registrations').select('id, discord_username, tournament_num').in('tournament_num', activeTournamentNums).eq('active_on_discord', true);
     const activeUserMap = new Map();
     if (activeRegs && activeRegs.length) {
       for (const reg of activeRegs) {
@@ -1032,7 +1114,11 @@ async function runInitialDatabaseSync() {
         if (roleId) {
           if (!activeUserMap.has(roleId)) activeUserMap.set(roleId, new Set());
           activeUserMap.get(roleId).add(reg.discord_username.toLowerCase());
-          await syncSingleUserRole(reg.discord_username, roleId, true);
+          const member = await syncSingleUserRole(reg.discord_username, roleId, true);
+          if (member && member.user.username !== reg.discord_username) {
+              await supabase.from('tournament_registrations').update({ discord_username: member.user.username }).eq('id', reg.id);
+              await supabase.from('player_discord_map').update({ discord_username: member.user.username, discord_user_id: member.id, updated_at: new Date().toISOString() }).eq('discord_username', reg.discord_username);
+          }
         }
       }
     }
@@ -1079,7 +1165,7 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
   }
 
   if (bestMatch && bestScore >= DB_MATCH_THRESHOLD) {
-    await persistDiscordUserId(bestMatch, discordUserId);
+    await persistDiscordUserId(bestMatch, discordUserId, member ? member.user.username : null);
     return { playerKey: bestMatch.player_key, userId: bestMatch.claimed_by };
   }
   return null;
@@ -1199,9 +1285,12 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
             .update({
               has_checked_in: true,
               check_in_method: newMethod,
-              checked_in_at: new Date().toISOString()
+              checked_in_at: new Date().toISOString(),
+              discord_username: member.user.username // SELF HEAL
             })
             .eq('id', bestReg.id);
+            
+          await supabase.from('player_discord_map').update({ discord_username: member.user.username, discord_user_id: member.id, updated_at: new Date().toISOString() }).eq('discord_username', bestReg.discord_username);
         }
       } catch (syncErr) {
         console.error('Failed to sync check-in to registration DB:', syncErr);
