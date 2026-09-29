@@ -1731,13 +1731,21 @@ discordClient.once('clientReady', async () => {
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
 
-  // Pick up any unannounced SP events
+  // Pick up any unannounced SP events (STRICT LIMIT TO PREVENT SPAM)
   try {
-    const { data: unannouncedSp } = await supabase.from('sp_events').select('id').eq('announced_to_discord', false).lt('created_at', new Date(Date.now() - 10000).toISOString()).order('created_at', { ascending: true });
-    if (unannouncedSp && unannouncedSp.length > 0) unannouncedSp.forEach(e => setTimeout(() => announceSpEvent(e.id), 2000));
-  } catch (err) {}
+    const { data: unannouncedSp } = await supabase.from('sp_events')
+      .select('id')
+      .eq('announced_to_discord', false)
+      .lt('created_at', new Date(Date.now() - 10000).toISOString())
+      .order('created_at', { ascending: false })
+      .limit(15);
+      
+    if (unannouncedSp && unannouncedSp.length > 0) {
+      unannouncedSp.forEach((e, index) => setTimeout(() => announceSpEvent(e.id), index * 2500 + 2000));
+    }
+  } catch (err) { console.error('Boot SP check error', err); }
 
-  // Recover missed AI Scans
+  // Recover missed AI Scans (STRICT LIMIT)
   try {
     const { data: unannouncedScans } = await supabase.from('games')
       .select('id')
@@ -1745,9 +1753,10 @@ discordClient.once('clientReady', async () => {
       .not('ai_scan_status', 'is', null)
       .neq('ai_scan_status', AI_SCAN_IGNORED_STATUS)
       .order('created_at', { ascending: false })
-      .limit(20);
+      .limit(15);
+      
     if (unannouncedScans && unannouncedScans.length > 0) {
-      unannouncedScans.forEach((g, index) => setTimeout(() => announceOrUpdateScanResult(g.id), index * 2000 + 5000));
+      unannouncedScans.forEach((g, index) => setTimeout(() => announceOrUpdateScanResult(g.id), index * 2500 + 5000));
     }
   } catch (err) { console.error('Error recovering missed AI Scans on boot:', err); }
 
