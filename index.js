@@ -427,25 +427,60 @@ function scheduleAnnouncement(gameId) {
   }, GAME_ROWS_WAIT_MS);
 }
 
-function scheduleScanRefresh(gameId) {
-  if (!gameId || pendingScanRefresh.has(gameId)) return;
-  pendingScanRefresh.add(gameId);
-  setTimeout(async () => {
-    pendingScanRefresh.delete(gameId);
-    try {
-      const { data: game, error } = await supabase
-        .from('games')
-        .select('ai_scan_status')
-        .eq('id', gameId)
-        .single();
+// -------------------------------------------------------------
+// NEW: SP EVENT ANNOUNCEMENT HANDLER
+// -------------------------------------------------------------
+async function announceSpEvent(eventId) {
+  try {
+    const { data: event, error } = await supabase.from('sp_events').select('*').eq('id', eventId).single();
+    if (error || !event || event.announced_to_discord) return;
 
-      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+    const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id, sp_alerts_opt_out').eq('player_key', event.player_key).limit(1).maybeSingle();
+    if (!mapRecord || !mapRecord.discord_user_id) return;
 
-      await announceOrUpdateScanResult(gameId);
-    } catch (err) {
-      console.error('Error refreshing scan result after game_results change', gameId, err);
+    const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
+    if (notificationChannel) {
+      const displayAction = event.action_type === 'image_upload' ? 'Recruitment Proof Posted' : event.action_type.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+      
+      let rewardClarity = 'Standard Reward';
+      if (event.action_type === 'daily_first_message') rewardClarity = 'Daily Bonus (First message of the day)';
+      else if (event.action_type === 'first_live_game') rewardClarity = 'Daily Bonus (First live game of the day)';
+      else if (event.action_type === 'first_weekly_async') rewardClarity = 'Weekly Bonus (First async game of the week)';
+      else if (event.action_type === 'match_participation') rewardClarity = 'Match Participation';
+
+      // The Ghost Ping (skipped if opted out)
+      if (!mapRecord.sp_alerts_opt_out) {
+        const ghostMsg = await notificationChannel.send(`💬 You gained **${event.amount} SP** for ${rewardClarity.toLowerCase()} <@${mapRecord.discord_user_id}>!`).catch(() => null);
+        if (ghostMsg) {
+          setTimeout(() => ghostMsg.delete().catch(() => {}), 1500);
+        }
+      }
+
+      const alertEmbed = new EmbedBuilder()
+        .setTitle('🪙 Strategy Points Earned!')
+        .setDescription(`Congratulations <@${mapRecord.discord_user_id}>!\nYou've earned a **${rewardClarity}**!`)
+        .setColor(0xf1c40f)
+        .addFields(
+          { name: '✨ Action', value: `\`${displayAction}\``, inline: true },
+          { name: '💰 Reward', value: `**+${event.amount} SP**`, inline: true }
+        )
+        .setTimestamp();
+        
+      const components = [];
+      if (!mapRecord.sp_alerts_opt_out) {
+        components.push(new ActionRowBuilder().addComponents(
+          new ButtonBuilder().setCustomId(`disable_sp_${mapRecord.discord_user_id}`).setLabel('Disable Alerts').setStyle(ButtonStyle.Secondary).setEmoji('🔕')
+        ));
+      }
+        
+      await notificationChannel.send({ embeds: [alertEmbed], components: components.length > 0 ? components : undefined });
     }
-  }, GAME_ROWS_WAIT_MS);
+    
+    // Mark as announced
+    await supabase.from('sp_events').update({ announced_to_discord: true }).eq('id', eventId);
+  } catch (err) {
+    console.error('Error announcing SP event:', err);
+  }
 }
 
 // -------------------------------------------------------------
@@ -573,7 +608,27 @@ async function announceOrUpdateScanResult(gameId) {
   else console.log('Posted new scan result message for game:', gameId, '-> status:', game.ai_scan_status);
 }
 
-// Universal unified roster renderer that prevents duplicates and fetches IGNs automatically
+function scheduleScanRefresh(gameId) {
+  if (!gameId || pendingScanRefresh.has(gameId)) return;
+  pendingScanRefresh.add(gameId);
+  setTimeout(async () => {
+    pendingScanRefresh.delete(gameId);
+    try {
+      const { data: game, error } = await supabase
+        .from('games')
+        .select('ai_scan_status')
+        .eq('id', gameId)
+        .single();
+
+      if (error || !game || !game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+
+      await announceOrUpdateScanResult(gameId);
+    } catch (err) {
+      console.error('Error refreshing scan result after game_results change', gameId, err);
+    }
+  }, GAME_ROWS_WAIT_MS);
+}
+
 async function buildRosterDisplay(lobby) {
   const pIds = lobby.player_ids || [];
   const guests = lobby.guest_players || [];
@@ -849,6 +904,11 @@ function startRealtimeListener() {
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'lobby_quick_chats' }, (payload) => {
       if (payload.new) handleWebQuickChat(payload.new);
     })
+    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sp_events' }, (payload) => {
+      if (payload.new && payload.new.id) {
+        setTimeout(() => announceSpEvent(payload.new.id), 2000);
+      }
+    })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'active_async_matches' }, async (payload) => {
       const { eventType, new: newRecord, old: oldRecord } = payload;
       if (!newRecord) return;
@@ -1034,18 +1094,6 @@ function startGlobalDatabaseListener() {
           const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id').eq('player_key', newRecord.player_key).single();
           if (mapRecord?.discord_user_id) await syncPlayerSpRole(mapRecord.discord_user_id, Number(newRecord.lifetime_sp));
         }
-        if (table === 'sp_events' && eventType === 'INSERT') {
-          try {
-            const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id').eq('player_key', newRecord.player_key).single();
-            const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
-            if (notificationChannel && mapRecord?.discord_user_id) {
-              const displayAction = newRecord.action_type === 'image_upload' ? 'Recruitment Proof Posted' : newRecord.action_type.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
-              const rewardClarity = newRecord.action_type === 'daily_first_message' ? 'Daily Bonus (First message of the day)' : newRecord.action_type === 'first_live_game' ? 'Daily Bonus (First live game of the day)' : newRecord.action_type === 'first_weekly_async' ? 'Weekly Bonus (First async game of the week)' : 'Standard Reward';
-              const alertEmbed = new EmbedBuilder().setTitle('🪙 Strategy Points Earned!').setDescription(`Congratulations <@${mapRecord.discord_user_id}>!\nYou've earned a **${rewardClarity}**!`).setColor(0xf1c40f).addFields({ name: '✨ Action', value: `\`${displayAction}\``, inline: true }, { name: '💰 Reward', value: `**+${newRecord.amount} SP**`, inline: true }).setTimestamp();
-              await notificationChannel.send({ content: `<@${mapRecord.discord_user_id}>`, embeds: [alertEmbed] });
-            }
-          } catch (err) {}
-        }
       }
     )
     .subscribe((status) => { if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') supabase.realtime.setAuth(SUPABASE_SECRET_KEY); });
@@ -1173,10 +1221,23 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
 
 async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   try {
-    await supabase.from('sp_events').insert({ player_key: playerKey, user_id: userId || null, action_type: actionType, amount: amount, metadata: metadata });
+    const { error: insertErr } = await supabase.from('sp_events').insert({ 
+      player_key: playerKey, 
+      user_id: userId || null, 
+      action_type: actionType, 
+      amount: amount, 
+      metadata: metadata 
+    });
+    
+    if (insertErr) {
+      console.error('Failed to insert SP event into database:', insertErr);
+    }
+
     const { data: currentSp } = await supabase.from('player_sp').select('lifetime_sp, seasonal_sp').eq('player_key', playerKey).single();
     await supabase.from('player_sp').update({ lifetime_sp: (currentSp?.lifetime_sp || 0) + amount, seasonal_sp: (currentSp?.seasonal_sp || 0) + amount, updated_at: new Date().toISOString() }).eq('player_key', playerKey);
-  } catch (err) {}
+  } catch (err) {
+    console.error('Error executing awardSP function:', err);
+  }
 }
 
 async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
@@ -1534,6 +1595,16 @@ discordClient.on('interactionCreate', async (interaction) => {
     return;
   }
 
+  // Handle SP Alerts Opt-Out Button
+  if (interaction.isButton() && interaction.customId.startsWith('disable_sp_')) {
+    const targetId = interaction.customId.replace('disable_sp_', '');
+    if (interaction.user.id !== targetId) {
+      return await interaction.reply({ content: '❌ You can only disable your own notifications.', flags: MessageFlags.Ephemeral }).catch(() => {});
+    }
+    await supabase.from('player_discord_map').update({ sp_alerts_opt_out: true }).eq('discord_user_id', targetId);
+    return await interaction.reply({ content: '🔕 **SP Notifications Disabled.** You will no longer be pinged for SP gains.\n*(If you want them back later, you can ask an admin to re-enable them in the database).*', flags: MessageFlags.Ephemeral }).catch(() => {});
+  }
+
   if (interaction.isButton() && interaction.customId.startsWith('async_start_')) {
     const matchId = interaction.customId.replace('async_start_', '');
     const { data: schedule } = await supabase.from('tournament_match_schedules').select('*').eq('id', matchId).single();
@@ -1659,6 +1730,26 @@ discordClient.once('clientReady', async () => {
   startRealtimeListener();
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
+
+  // Pick up any unannounced SP events
+  try {
+    const { data: unannouncedSp } = await supabase.from('sp_events').select('id').eq('announced_to_discord', false).lt('created_at', new Date(Date.now() - 10000).toISOString()).order('created_at', { ascending: true });
+    if (unannouncedSp && unannouncedSp.length > 0) unannouncedSp.forEach(e => setTimeout(() => announceSpEvent(e.id), 2000));
+  } catch (err) {}
+
+  // Recover missed AI Scans
+  try {
+    const { data: unannouncedScans } = await supabase.from('games')
+      .select('id')
+      .is('ai_scan_discord_message_id', null)
+      .not('ai_scan_status', 'is', null)
+      .neq('ai_scan_status', AI_SCAN_IGNORED_STATUS)
+      .order('created_at', { ascending: false })
+      .limit(20);
+    if (unannouncedScans && unannouncedScans.length > 0) {
+      unannouncedScans.forEach((g, index) => setTimeout(() => announceOrUpdateScanResult(g.id), index * 2000 + 5000));
+    }
+  } catch (err) { console.error('Error recovering missed AI Scans on boot:', err); }
 
   setInterval(async () => { await executeGlobalSpAuditSweep(); }, 24 * 60 * 60 * 1000);
   setInterval(async () => {
