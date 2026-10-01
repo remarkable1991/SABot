@@ -447,6 +447,7 @@ async function announceSpEvent(eventId) {
       else if (event.action_type === 'first_live_game') rewardClarity = 'Daily Bonus (First live game of the day)';
       else if (event.action_type === 'first_weekly_async') rewardClarity = 'Weekly Bonus (First async game of the week)';
       else if (event.action_type === 'match_participation') rewardClarity = 'Match Participation';
+      else if (event.action_type === 'match_start_base') rewardClarity = 'Match Started';
 
       // The Ghost Ping (skipped if opted out)
       if (!mapRecord.sp_alerts_opt_out) {
@@ -1221,16 +1222,30 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
 
 async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   try {
+    const nowIso = new Date().toISOString();
+    
+    // Automatically find the active season!
+    const { data: seasonData } = await supabase
+      .from('sp_seasons')
+      .select('id')
+      .lte('starts_at', nowIso)
+      .gt('ends_at', nowIso)
+      .maybeSingle();
+
+    const currentSeasonId = seasonData?.id || 1;
+
     const { error: insertErr } = await supabase.from('sp_events').insert({ 
       player_key: playerKey, 
       user_id: userId || null, 
       action_type: actionType, 
       amount: amount, 
+      season_id: currentSeasonId, 
       metadata: metadata 
     });
     
     if (insertErr) {
       console.error('Failed to insert SP event into database:', insertErr);
+      return; 
     }
 
     const { data: currentSp } = await supabase.from('player_sp').select('lifetime_sp, seasonal_sp').eq('player_key', playerKey).single();
@@ -1247,13 +1262,11 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   const targetMsg = await channel.messages.fetch(lobbyRecord.message_id).catch(() => null);
   if (!targetMsg || !targetMsg.embeds[0]) return;
 
-  await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
-
   const { display, count } = await buildRosterDisplay(lobbyRecord);
   const cleanStartedSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
   
-  const embedTitle = targetMsg.embeds[0].title || '';
-  const matchTypeTitle = embedTitle.includes('Live Match') || !embedTitle.includes('Async Match') ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+  const isLive = lobbyRecord.mode === 'live';
+  const matchTypeTitle = isLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
 
   const embed = EmbedBuilder.from(targetMsg.embeds[0])
     .setTitle(matchTypeTitle).setColor(0x2ecc71).setFooter(null) 
@@ -1275,13 +1288,13 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
   for (const playerId of (lobbyRecord.player_ids || [])) {
     const profile = await getPlayerProfileFromDiscord(playerId);
     if (!profile) {
-      unlinkedPlayers.push({ id: playerId, points: SP_REWARDS_CONFIG.MATCH_START_BASE.amount + (matchTypeTitle.includes('Live') ? SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount : SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount) });
+      unlinkedPlayers.push({ id: playerId, points: SP_REWARDS_CONFIG.MATCH_START_BASE.amount + (isLive ? SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount : SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount) });
       continue;
     }
     const { data: hourlyMatchEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'match_start_base').gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString());
     if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'match_start_base', SP_REWARDS_CONFIG.MATCH_START_BASE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
 
-    if (matchTypeTitle.includes('Live')) {
+    if (isLive) {
       const { data: dailyLiveEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'first_live_game').gte('created_at', startOfToday);
       if (!dailyLiveEvents || dailyLiveEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'first_live_game', SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
     } else {
@@ -1665,7 +1678,11 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         }
       }
     } else if (emojiName === '🎮') {
-      if (players.includes(user.id) && players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) >= 2) return await executeLobbyStartSequence(lobby, message.channel);
+      if (players.includes(user.id) && players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) >= 2) {
+        // Only update the database here. The real-time listener will safely pick it up and process SP exactly once.
+        await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobby.id);
+        return;
+      }
     } else if (emojiName === '❌' && user.id === lobby.host_id) {
       await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
       await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [EmbedBuilder.from(message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${user.username}`)] }).catch(() => {});
@@ -1764,7 +1781,12 @@ discordClient.once('clientReady', async () => {
   setInterval(async () => {
     try {
       const { data: expiredLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').not('auto_start_at', 'is', null).lte('auto_start_at', new Date().toISOString());
-      if (expiredLobbies && expiredLobbies.length > 0) for (const targetLobby of expiredLobbies) await executeLobbyStartSequence(targetLobby).catch(() => {});
+      if (expiredLobbies && expiredLobbies.length > 0) {
+        for (const targetLobby of expiredLobbies) {
+          // Simply update to started, let the safe listener take care of SP and messaging!
+          await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', targetLobby.id);
+        }
+      }
     } catch (cronErr) {}
   }, 30 * 1000);
   setInterval(async () => { await checkAndSendMatchReminders(); }, 60 * 1000);
