@@ -10,7 +10,7 @@
 
 const TOURNAMENTS_CONFIG = {
   19: {
-    registeredRoleId: 1551614208280494170, // TODO: T19's Registered role ID wasn't provided yet
+    registeredRoleId: '1551614208280494170', // TODO: T19's Registered role ID wasn't provided yet
     checkInRoleId: '1551614087098667180',
     checkInStartTimestamp: 1791115200,   // Oct 4, 2026 10:00 CEST
     tournamentStartTimestamp: 1791115200 // Oct 5, 2026 10:00 CEST
