@@ -809,10 +809,20 @@ async function syncLobbyEmbed(lobby) {
 async function handleWebLobbyCreation(lobby) {
   try {
     const isLive = lobby.mode === 'live';
-    const isLeague = lobby.is_league;
-    const channelId = isLive ? WEB_LFG_LIVE_CHANNEL : WEB_LFG_ASYNC_CHANNEL;
+    
+    // Bulletproof check: catches true, "true", or any weird format Supabase sends
+    const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
+    
+    // Route to the dedicated League channel if true
+    let channelId = isLive ? WEB_LFG_LIVE_CHANNEL : WEB_LFG_ASYNC_CHANNEL;
+    if (isLeague) {
+        channelId = '1557473551227818024';
+    }
+
+    console.log(`[New Web Lobby] ID: ${lobby.id} | is_league: ${lobby.is_league} \vert{} Target Channel:${channelId}`);
+
     const channel = await discordClient.channels.fetch(channelId).catch(() => null);
-    if (!channel) return console.error('LFG channel not found for Web Lobby Creation.');
+    if (!channel) return console.error(`LFG channel ${channelId} not found for Web Lobby Creation.`);
 
     let hostName = 'Web Player';
     let discordMention = '';
@@ -849,7 +859,7 @@ async function handleWebLobbyCreation(lobby) {
     let statusSentence = `**${hostName} 🌐**${discordMention} created a lobby for ${boardDisplay}${expText}.`;
 
     if (isLeague) {
-       statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${lobby.season_id || 2} League standings.`;
+       statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${lobby.season_id || await getCurrentSeasonId()} League standings.`;
     }
 
     let customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${isLive ? 'live' : 'async'} players <@&${roleId}>`;
@@ -910,7 +920,6 @@ async function handleWebLobbyCreation(lobby) {
 
   } catch (err) { console.error('Error creating Discord Lobby from Web Event:', err); }
 }
-
 async function executeLobbyPing(lobby, channel) {
   const now = new Date();
   const lastTagged = lobby.last_prompted_at ? new Date(lobby.last_prompted_at) : null;
