@@ -161,9 +161,32 @@ const slashCommands = new Map([
 const pendingGames = new Set();
 const pendingScanRefresh = new Set();
 const scheduleDebounceTimers = new Map();
+const activeStartLocks = new Set();
 let realtimeRetryCount = 0;
 let realtimeChannel = null;
 let reconnectTimer = null;
+
+let cachedSeasonId = 2;
+let lastSeasonCheck = 0;
+
+async function getCurrentSeasonId() {
+  const now = Date.now();
+  if (now - lastSeasonCheck < 60 * 60 * 1000) return cachedSeasonId;
+  try {
+    const nowIso = new Date().toISOString();
+    const { data } = await supabase
+      .from('sp_seasons')
+      .select('id')
+      .lte('starts_at', nowIso)
+      .gt('ends_at', nowIso)
+      .maybeSingle();
+    if (data?.id) cachedSeasonId = data.id;
+    lastSeasonCheck = now;
+  } catch (e) {
+    console.error('Error fetching current season:', e);
+  }
+  return cachedSeasonId;
+}
 
 function capitalize(word) { return word ? word.charAt(0).toUpperCase() + word.slice(1) : ''; }
 function normalizeName(value) { return String(value || '').trim().toLowerCase().replace(/^[.\s]+|[.\s]+$/g, '').replace(/[^a-z0-9]/g, ''); }
@@ -193,7 +216,7 @@ function getEmoji(guild, name, fallback) {
 function generateGoogleCalendarUrl(title, dateObj) {
   if (!dateObj) return null;
   const start = dateObj.toISOString().replace(/-|:|\.\d\d\d/g, "");
-  const endObj = new Date(dateObj.getTime() + 2 * 60 * 60 * 1000); // Assumes a 2-hour block
+  const endObj = new Date(dateObj.getTime() + 2 * 60 * 60 * 1000);
   const end = endObj.toISOString().replace(/-|:|\.\d\d\d/g, "");
   return `https://www.google.com/calendar/render?action=TEMPLATE&text=${encodeURIComponent(title)}&dates=${start}/${end}`;
 }
@@ -428,7 +451,7 @@ function scheduleAnnouncement(gameId) {
 }
 
 // -------------------------------------------------------------
-// NEW: SP EVENT ANNOUNCEMENT HANDLER
+// SP EVENT ANNOUNCEMENT HANDLER
 // -------------------------------------------------------------
 async function announceSpEvent(eventId) {
   try {
@@ -436,7 +459,10 @@ async function announceSpEvent(eventId) {
     if (error || !event || event.announced_to_discord) return;
 
     const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id, sp_alerts_opt_out').eq('player_key', event.player_key).limit(1).maybeSingle();
-    if (!mapRecord || !mapRecord.discord_user_id) return;
+    if (!mapRecord || !mapRecord.discord_user_id) {
+      await supabase.from('sp_events').update({ announced_to_discord: true }).eq('id', eventId);
+      return;
+    }
 
     const notificationChannel = await discordClient.channels.fetch(SP_NOTIFICATION_CHANNEL_ID).catch(() => null);
     if (notificationChannel) {
@@ -477,7 +503,6 @@ async function announceSpEvent(eventId) {
       await notificationChannel.send({ embeds: [alertEmbed], components: components.length > 0 ? components : undefined });
     }
     
-    // Mark as announced
     await supabase.from('sp_events').update({ announced_to_discord: true }).eq('id', eventId);
   } catch (err) {
     console.error('Error announcing SP event:', err);
@@ -905,11 +930,6 @@ function startRealtimeListener() {
     .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'lobby_quick_chats' }, (payload) => {
       if (payload.new) handleWebQuickChat(payload.new);
     })
-    .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'sp_events' }, (payload) => {
-      if (payload.new && payload.new.id) {
-        setTimeout(() => announceSpEvent(payload.new.id), 2000);
-      }
-    })
     .on('postgres_changes', { event: '*', schema: 'public', table: 'active_async_matches' }, async (payload) => {
       const { eventType, new: newRecord, old: oldRecord } = payload;
       if (!newRecord) return;
@@ -927,7 +947,11 @@ function startRealtimeListener() {
         ) {
           await syncLobbyEmbed(newRecord);
         }
-        if (oldRecord.status === 'searching' && newRecord.status === 'started') await executeLobbyStartSequence(newRecord);
+        
+        // Handle games started from the website (or anywhere outside Discord)
+        if (newRecord.status === 'started') {
+          await executeLobbyStartSequence(newRecord);
+        }
       }
     })
     .subscribe(async (status, err) => {
@@ -959,14 +983,12 @@ function startGlobalDatabaseListener() {
           const rec = newRecord || oldRecord;
           if (rec && TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)]) {
             const member = await syncSingleUserRole(rec.discord_username, TOURNAMENT_ROLE_MAP[Number(rec.tournament_num)], (eventType !== 'DELETE') && (newRecord?.active_on_discord === true));
-            // SELF HEAL (Both Registrations and Player Map)
             if (member && eventType !== 'DELETE' && member.user.username !== rec.discord_username && rec.id) {
                await supabase.from('tournament_registrations').update({ discord_username: member.user.username }).eq('id', rec.id);
                await supabase.from('player_discord_map').update({ discord_username: member.user.username, discord_user_id: member.id, updated_at: new Date().toISOString() }).eq('discord_username', rec.discord_username);
             }
           }
 
-          // Handle Website Check-ins
           if (eventType === 'UPDATE' && newRecord?.has_checked_in === true) {
             const isFreshWebsiteCheckin = (oldRecord?.has_checked_in !== true && newRecord.check_in_method === 'website');
             const isDualConfirmed = (oldRecord?.check_in_method === 'discord' && newRecord.check_in_method === 'discord/website');
@@ -983,19 +1005,16 @@ function startGlobalDatabaseListener() {
                     const tNum = Number(newRecord.tournament_num);
                     const config = TOURNAMENTS_CONFIG[tNum];
 
-                    // Automatically assign Check-In role on Discord
                     if (member && config?.checkInRoleId && !member.roles.cache.has(config.checkInRoleId)) {
                       await member.roles.add(config.checkInRoleId).catch(() => {});
                     }
 
-                    // Announce in Check-In Channel
                     const reminderChannel = await discordClient.channels.fetch(CHECKIN_REMINDER_CHANNEL_ID).catch(() => null);
                     if (reminderChannel) {
                       let messageContent = `🌐 <@${discordId}> has successfully checked in via the website for **Tournament #${tNum}**!`;
                       if (isDualConfirmed) {
                         messageContent = `🌐 <@${discordId}> has confirmed their check-in on the website for **Tournament #${tNum}** (Discord & Website ✅)!`;
                       }
-
                       await reminderChannel.send({ content: messageContent }).catch(() => {});
                     }
                   }
@@ -1009,7 +1028,6 @@ function startGlobalDatabaseListener() {
 
         // --- REAL-TIME WEBSITE VOTING SYNC ---
         if (table === 'tournament_match_schedules' && eventType === 'UPDATE' && newRecord && oldRecord) {
-          // Rebuild Discord embed if votes or status change (supports website voting logic updating Discord)
           if (JSON.stringify(newRecord.votes) !== JSON.stringify(oldRecord.votes) || newRecord.status !== oldRecord.status) {
             try {
               const thread = await discordClient.channels.fetch(newRecord.thread_id).catch(() => null);
@@ -1040,7 +1058,6 @@ function startGlobalDatabaseListener() {
             } catch (e) { console.error('DB Sync Embed Error:', e); }
           }
 
-          // Trigger 60-second Confirmation Sequence if status changes to confirmed
           if (newRecord.status === 'confirmed' && oldRecord.status !== 'confirmed') {
             const debounceKey = `schedule_${newRecord.id}`;
             if (scheduleDebounceTimers.has(debounceKey)) { clearTimeout(scheduleDebounceTimers.get(debounceKey)); scheduleDebounceTimers.delete(debounceKey); }
@@ -1089,6 +1106,10 @@ function startGlobalDatabaseListener() {
           }
         }
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
+
+        if (table === 'sp_events' && eventType === 'INSERT' && newRecord?.id) {
+          setTimeout(() => announceSpEvent(newRecord.id), 1500);
+        }
 
         if (!newRecord) return;
         if (table === 'player_sp' && eventType === 'UPDATE' && newRecord.is_claimed === true) {
@@ -1222,17 +1243,7 @@ async function getPlayerProfileFromDiscord(discordUserId, memberObject = null) {
 
 async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
   try {
-    const nowIso = new Date().toISOString();
-    
-    // Automatically find the active season!
-    const { data: seasonData } = await supabase
-      .from('sp_seasons')
-      .select('id')
-      .lte('starts_at', nowIso)
-      .gt('ends_at', nowIso)
-      .maybeSingle();
-
-    const currentSeasonId = seasonData?.id || 1;
+    const currentSeasonId = await getCurrentSeasonId();
 
     const { error: insertErr } = await supabase.from('sp_events').insert({ 
       player_key: playerKey, 
@@ -1240,72 +1251,115 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
       action_type: actionType, 
       amount: amount, 
       season_id: currentSeasonId, 
-      metadata: metadata 
+      metadata: metadata,
+      announced_to_discord: false
     });
     
     if (insertErr) {
-      console.error('Failed to insert SP event into database:', insertErr);
+      console.error(`[awardSP] Failed to insert ${actionType} for${playerKey}:`, insertErr);
       return; 
     }
+    console.log(`[awardSP] Successfully awarded ${amount} SP (${actionType}) to ${playerKey} (Season${currentSeasonId})`);
 
-    const { data: currentSp } = await supabase.from('player_sp').select('lifetime_sp, seasonal_sp').eq('player_key', playerKey).single();
-    await supabase.from('player_sp').update({ lifetime_sp: (currentSp?.lifetime_sp || 0) + amount, seasonal_sp: (currentSp?.seasonal_sp || 0) + amount, updated_at: new Date().toISOString() }).eq('player_key', playerKey);
+    const { data: currentSp } = await supabase.from('player_sp').select('lifetime_sp, seasonal_sp').eq('player_key', playerKey).maybeSingle();
+    if (currentSp) {
+      await supabase.from('player_sp').update({ 
+        lifetime_sp: (currentSp.lifetime_sp || 0) + amount, 
+        seasonal_sp: (currentSp.seasonal_sp || 0) + amount, 
+        updated_at: new Date().toISOString() 
+      }).eq('player_key', playerKey);
+    }
   } catch (err) {
-    console.error('Error executing awardSP function:', err);
+    console.error(`[awardSP] Error executing awardSP for ${playerKey}:`, err);
   }
 }
 
 async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
-  let channel = targetChannel || await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
-  if (!channel) return;
+  if (!lobbyRecord || !lobbyRecord.id) return;
+  if (activeStartLocks.has(lobbyRecord.id)) return;
+  activeStartLocks.add(lobbyRecord.id);
 
-  const targetMsg = await channel.messages.fetch(lobbyRecord.message_id).catch(() => null);
-  if (!targetMsg || !targetMsg.embeds[0]) return;
+  try {
+    let channel = targetChannel || await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
+    if (!channel) return;
 
-  const { display, count } = await buildRosterDisplay(lobbyRecord);
-  const cleanStartedSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
-  
-  const isLive = lobbyRecord.mode === 'live';
-  const matchTypeTitle = isLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+    const targetMsg = await channel.messages.fetch(lobbyRecord.message_id).catch(() => null);
+    if (!targetMsg || !targetMsg.embeds[0]) return;
 
-  const embed = EmbedBuilder.from(targetMsg.embeds[0])
-    .setTitle(matchTypeTitle).setColor(0x2ecc71).setFooter(null) 
-    .setFields(
-      { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
-      { name: '🔑 Password', value: lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None' ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
-      { name: `👥 Final Roster (${count}/4)`, value: display, inline: false }
-    );
-
-  const safeMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
-  const playerTags = (lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ');
-  
-  await targetMsg.edit({ content: `🚀 **The match${safeMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${playerTags}`, embeds: [embed] }).catch(() => {});
-
-  const now = new Date(), startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
-  const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - (now.getUTCDay() * 24 * 60 * 60 * 1000)).toISOString();
-  const unlinkedPlayers = [];
-
-  for (const playerId of (lobbyRecord.player_ids || [])) {
-    const profile = await getPlayerProfileFromDiscord(playerId);
-    if (!profile) {
-      unlinkedPlayers.push({ id: playerId, points: SP_REWARDS_CONFIG.MATCH_START_BASE.amount + (isLive ? SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount : SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount) });
-      continue;
+    if (targetMsg.embeds[0].title && targetMsg.embeds[0].title.includes('Started!')) {
+      return;
     }
-    const { data: hourlyMatchEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'match_start_base').gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString());
-    if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'match_start_base', SP_REWARDS_CONFIG.MATCH_START_BASE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
 
-    if (isLive) {
-      const { data: dailyLiveEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'first_live_game').gte('created_at', startOfToday);
-      if (!dailyLiveEvents || dailyLiveEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'first_live_game', SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
-    } else {
-      const { data: weeklyAsyncEvents } = await supabase.from('sp_events').select('id').eq('player_key', profile.playerKey).eq('action_type', 'first_weekly_async').gte('created_at', startOfThisWeek);
-      if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) await awardSP(profile.playerKey, profile.userId, 'first_weekly_async', SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
+    await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
+
+    const { display, count } = await buildRosterDisplay(lobbyRecord);
+    const cleanStartedSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
+    
+    const isLive = String(lobbyRecord.mode || '').trim().toLowerCase() === 'live';
+    const matchTypeTitle = isLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
+
+    const embed = EmbedBuilder.from(targetMsg.embeds[0])
+      .setTitle(matchTypeTitle).setColor(0x2ecc71).setFooter(null) 
+      .setFields(
+        { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
+        { name: '🔑 Password', value: lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None' ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
+        { name: `👥 Final Roster (${count}/4)`, value: display, inline: false }
+      );
+
+    const safeMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
+    const playerTags = (lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ');
+    
+    await targetMsg.edit({ content: `🚀 **The match${safeMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${playerTags}`, embeds: [embed] }).catch(() => {});
+
+    const now = new Date();
+    const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
+    const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - (now.getUTCDay() * 24 * 60 * 60 * 1000)).toISOString();
+    const unlinkedPlayers = [];
+
+    for (const playerId of (lobbyRecord.player_ids || [])) {
+      const profile = await getPlayerProfileFromDiscord(playerId);
+      if (!profile) {
+        unlinkedPlayers.push({ id: playerId, points: SP_REWARDS_CONFIG.MATCH_START_BASE.amount + (isLive ? SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount : SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount) });
+        continue;
+      }
+      
+      const { data: hourlyMatchEvents } = await supabase.from('sp_events')
+        .select('id')
+        .eq('player_key', profile.playerKey)
+        .eq('action_type', 'match_start_base')
+        .gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString());
+      
+      if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
+        await awardSP(profile.playerKey, profile.userId, 'match_start_base', SP_REWARDS_CONFIG.MATCH_START_BASE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
+      }
+
+      if (isLive) {
+        const { data: dailyLiveEvents } = await supabase.from('sp_events')
+          .select('id')
+          .eq('player_key', profile.playerKey)
+          .eq('action_type', 'first_live_game')
+          .gte('created_at', startOfToday);
+        if (!dailyLiveEvents || dailyLiveEvents.length === 0) {
+          await awardSP(profile.playerKey, profile.userId, 'first_live_game', SP_REWARDS_CONFIG.FIRST_DAILY_LIVE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
+        }
+      } else {
+        const { data: weeklyAsyncEvents } = await supabase.from('sp_events')
+          .select('id')
+          .eq('player_key', profile.playerKey)
+          .eq('action_type', 'first_weekly_async')
+          .gte('created_at', startOfThisWeek);
+        if (!weeklyAsyncEvents || weeklyAsyncEvents.length === 0) {
+          await awardSP(profile.playerKey, profile.userId, 'first_weekly_async', SP_REWARDS_CONFIG.FIRST_WEEKLY_ASYNC.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
+        }
+      }
     }
-  }
 
-  if (unlinkedPlayers.length > 0) {
-    const lines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n');
-    await channel.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Missed Strategy Points!').setDescription(`${lines}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`).setColor(0xe74c3c)] }).catch(() => {});
+    if (unlinkedPlayers.length > 0) {
+      const lines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n');
+      await channel.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Missed Strategy Points!').setDescription(`${lines}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`).setColor(0xe74c3c)] }).catch(() => {});
+    }
+  } finally {
+    setTimeout(() => activeStartLocks.delete(lobbyRecord.id), 15000);
   }
 }
 
@@ -1324,7 +1378,6 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
     if (!member.roles.cache.has(config.checkInRoleId)) {
       await member.roles.add(config.checkInRoleId).catch(() => {});
       
-      // --- NEW LOGIC: FUZZY SYNC CHECK-IN STATUS TO REGISTRATION DB ---
       try {
         const { data: regs } = await supabase
           .from('tournament_registrations')
@@ -1360,7 +1413,7 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
               has_checked_in: true,
               check_in_method: newMethod,
               checked_in_at: new Date().toISOString(),
-              discord_username: member.user.username // SELF HEAL
+              discord_username: member.user.username
             })
             .eq('id', bestReg.id);
             
@@ -1369,7 +1422,6 @@ async function handleTournamentCheckinReaction(message, user, emojiName) {
       } catch (syncErr) {
         console.error('Failed to sync check-in to registration DB:', syncErr);
       }
-      // --------------------------------------------------------
 
       if (reminderChannel) await reminderChannel.send({ content: `✅ <@${user.id}> has successfully checked in for **Tournament #${checkin.tournament_num}**!` }).catch(() => {});
     }
@@ -1679,9 +1731,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       }
     } else if (emojiName === '🎮') {
       if (players.includes(user.id) && players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) >= 2) {
-        // Only update the database here. The real-time listener will safely pick it up and process SP exactly once.
-        await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobby.id);
-        return;
+        return await executeLobbyStartSequence(lobby, message.channel);
       }
     } else if (emojiName === '❌' && user.id === lobby.host_id) {
       await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
@@ -1748,7 +1798,7 @@ discordClient.once('clientReady', async () => {
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
 
-  // Pick up any unannounced SP events (STRICT LIMIT TO PREVENT SPAM)
+  // Pick up any unannounced SP events (STRICT LIMIT TO PREVENT FLOOD)
   try {
     const { data: unannouncedSp } = await supabase.from('sp_events')
       .select('id')
@@ -1783,8 +1833,7 @@ discordClient.once('clientReady', async () => {
       const { data: expiredLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').not('auto_start_at', 'is', null).lte('auto_start_at', new Date().toISOString());
       if (expiredLobbies && expiredLobbies.length > 0) {
         for (const targetLobby of expiredLobbies) {
-          // Simply update to started, let the safe listener take care of SP and messaging!
-          await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', targetLobby.id);
+          await executeLobbyStartSequence(targetLobby).catch(() => {});
         }
       }
     } catch (cronErr) {}
