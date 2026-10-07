@@ -1985,4 +1985,49 @@ discordClient.once('clientReady', async () => {
       .limit(15);
       
     if (unannouncedSp && unannouncedSp.length > 0) {
-      unannouncedSp.forEach((e, index) => setTimeout(() => announceSpEvent(e.id), index * 2500 + 200
+      unannouncedSp.forEach((e, index) => setTimeout(() => announceSpEvent(e.id), index * 2500 + 2000));
+    }
+  } catch (err) { console.error('Boot SP check error', err); }
+
+  // Recover missed AI Scans (STRICT LIMIT)
+  try {
+    const { data: unannouncedScans } = await supabase.from('games')
+      .select('id')
+      .is('ai_scan_discord_message_id', null)
+      .not('ai_scan_status', 'is', null)
+      .neq('ai_scan_status', AI_SCAN_IGNORED_STATUS)
+      .order('created_at', { ascending: false })
+      .limit(15);
+      
+    if (unannouncedScans && unannouncedScans.length > 0) {
+      unannouncedScans.forEach((g, index) => setTimeout(() => announceOrUpdateScanResult(g.id), index * 2500 + 5000));
+    }
+  } catch (err) { console.error('Error recovering missed AI Scans on boot:', err); }
+
+  setInterval(async () => { await executeGlobalSpAuditSweep(); }, 24 * 60 * 60 * 1000);
+  setInterval(async () => {
+    try {
+      const { data: expiredLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').not('auto_start_at', 'is', null).lte('auto_start_at', new Date().toISOString());
+      if (expiredLobbies && expiredLobbies.length > 0) {
+        for (const targetLobby of expiredLobbies) {
+          // Simply update to started, let the safe listener take care of SP and messaging!
+          await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', targetLobby.id);
+        }
+      }
+    } catch (cronErr) {}
+  }, 30 * 1000);
+  setInterval(async () => { await checkAndSendMatchReminders(); }, 60 * 1000);
+  setInterval(async () => { await checkAndExpireCheckins(); }, 5 * 60 * 1000);
+  setInterval(async () => { await checkAndExpireLobbies(); }, 5 * 60 * 1000);
+
+  if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
+    try {
+      const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
+      const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
+      await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), { body: commands });
+      console.log('Successfully registered all commands internally.');
+    } catch (error) {}
+  }
+});
+
+discordClient.login(DISCORD_BOT_TOKEN);
