@@ -261,10 +261,12 @@ module.exports = {
       }
     }
 
-    // Capture Web IGN mapping metadata for League games
+    // Capture Web IGN mapping metadata for League games & Fetch ELOs
     const expectedPlayerKeys = [];
     const discordUsernames = [];
     let currentSeasonId = 2;
+    const elos = {};
+    const ignMap = {}; // Maps Discord ID to player_key
 
     if (isLeague) {
       try {
@@ -275,11 +277,23 @@ module.exports = {
         const { data: mapData } = await supabase.from('player_discord_map').select('discord_user_id, player_key, discord_username').in('discord_user_id', playerIds);
         if (mapData) {
           mapData.forEach(row => {
+            ignMap[row.discord_user_id] = row.player_key;
             if (row.player_key) expectedPlayerKeys.push(row.player_key);
             if (row.discord_username) discordUsernames.push(row.discord_username);
           });
         }
-      } catch (err) { console.error('Failed to map league players:', err); }
+        
+        // Fetch Elo for mapped players and guests
+        const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
+        if (keysToFetch.length > 0) {
+          const [{ data: oData }, { data: lData }] = await Promise.all([
+            supabase.from('player_ratings').select('player_key, elo').in('player_key', keysToFetch).eq('game_version', 'overall'),
+            supabase.from('player_league_ratings').select('player_key, elo').in('player_key', keysToFetch).eq('season', currentSeasonId)
+          ]);
+          oData?.forEach(r => { if (!elos[r.player_key]) elos[r.player_key] = {}; elos[r.player_key].overall = r.elo; });
+          lData?.forEach(r => { if (!elos[r.player_key]) elos[r.player_key] = {}; elos[r.player_key].league = r.elo; });
+        }
+      } catch (err) { console.error('Failed to map league players/elos:', err); }
       
       statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
     }
@@ -316,8 +330,29 @@ module.exports = {
     }
 
     const totalSlotCount = playerIds.length + guestPlayers.length;
-    const mentionsList = playerIds.map(id => `• <@${id}>`);
-    const guestsList = guestPlayers.map(name => `• ${name} 👥`);
+    
+    // Format Display with Elo (if League)
+    const mentionsList = playerIds.map(id => {
+      let str = `• <@${id}>`;
+      if (isLeague) {
+        const pk = ignMap[id];
+        const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
+        const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
+      }
+      return str;
+    });
+    
+    const guestsList = guestPlayers.map(name => {
+      let str = `• ${name} 👥`;
+      if (isLeague) {
+        const pk = normalize(name);
+        const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
+        const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
+      }
+      return str;
+    });
     const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
     // Dynamic Title & Color for League
@@ -340,6 +375,7 @@ module.exports = {
             `${liveDuneEmoji} • **Join / Leave** the lobby`,
             `🎮 • **Start Game** (Requires 2+ players)`,
             `❌ • **Cancel Lobby** (Host only)`,
+            `🥾 • **Kick Player** (Host/Admin only)`,
             `🔔 • **Toggle Ping Alerts** to get notified when someone joins`,
             `📢 • **Ping Lobby Role** (45m cooldown)`
           ].join('\n'), 
@@ -373,6 +409,7 @@ module.exports = {
       }
       await message.react('🎮').catch(() => {});
       await message.react('❌').catch(() => {});
+      await message.react('🥾').catch(() => {}); // KICK EMOJI
       await message.react('🔔').catch(() => {});
       await message.react('📢').catch(() => {});
     } catch (reactErr) { console.error(reactErr); }
