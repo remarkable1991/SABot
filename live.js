@@ -338,7 +338,7 @@ module.exports = {
         const pk = ignMap[id];
         const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
+        str += ` [🏆 ${leagueElo} \🌍 ${overallElo}]`;
       }
       return str;
     });
