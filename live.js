@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -53,10 +53,25 @@ module.exports = {
           { name: 'CHOAM Module', value: 'CHOAM' },
           { name: 'Base Leaders + CHOAM', value: 'Leaders_CHOAM' }
         )
+    )
+    .addBooleanOption(option =>
+      option.setName('league')
+        .setDescription('Official Season League Game (Admins only)')
+        .setRequired(false)
     ),
 
   async execute(interaction, { supabase }) {
-    const notes = interaction.options.getString('text') || 'Looking for a live match!';
+    const isLeague = interaction.options.getBoolean('league') || false;
+    const LFG_ADMIN_ROLE = '1557469534133162045';
+
+    // League Match Authorization Guard
+    if (isLeague) {
+      if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
+        return interaction.reply({ content: '❌ Only LFG Admins can host official League matches during the testing phase.', flags: MessageFlags.Ephemeral });
+      }
+    }
+
+    const notes = interaction.options.getString('text') || (isLeague ? 'Looking for players for an Official League match!' : 'Looking for a live match!');
     const customMinutes = interaction.options.getInteger('minutes');
     const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
@@ -126,7 +141,7 @@ module.exports = {
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
+    if (expansion === 'Ix_Immo') expansionText = `${ixText} and${immoText}`;
 
     let modeText = '';
     if (activeMode === 'Epic') modeText = epicText;
@@ -146,7 +161,7 @@ module.exports = {
 
     let statusSentence = `${host} is looking for players`;
     if (board && board !== 'Base' && expansionText) {
-      statusSentence += ` for ${boardText} with ${expansionText}`;
+      statusSentence += ` for ${boardText} with${expansionText}`;
     } else if (board && board !== 'Base') {
       statusSentence += ` for ${boardText}`;
     } else if (board === 'Base' && expansionText) {
@@ -167,7 +182,7 @@ module.exports = {
 
     let customPingSentence = `**${interaction.user.username}** is looking for live players ${roleMention}`;
     if (board && board !== 'Base' && expansionText) {
-      customPingSentence += ` for ${boardText} with ${expansionText}`;
+      customPingSentence += ` for ${boardText} with${expansionText}`;
     } else if (board && board !== 'Base') {
       customPingSentence += ` for ${boardText}`;
     } else if (board === 'Base' && expansionText) {
@@ -246,6 +261,29 @@ module.exports = {
       }
     }
 
+    // Capture Web IGN mapping metadata for League games
+    const expectedPlayerKeys = [];
+    const discordUsernames = [];
+    let currentSeasonId = 2;
+
+    if (isLeague) {
+      try {
+        const nowIso = new Date().toISOString();
+        const { data: seasonData } = await supabase.from('sp_seasons').select('id').lte('starts_at', nowIso).gt('ends_at', nowIso).maybeSingle();
+        if (seasonData?.id) currentSeasonId = seasonData.id;
+
+        const { data: mapData } = await supabase.from('player_discord_map').select('discord_user_id, player_key, discord_username').in('discord_user_id', playerIds);
+        if (mapData) {
+          mapData.forEach(row => {
+            if (row.player_key) expectedPlayerKeys.push(row.player_key);
+            if (row.discord_username) discordUsernames.push(row.discord_username);
+          });
+        }
+      } catch (err) { console.error('Failed to map league players:', err); }
+      
+      statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
+    }
+
     // --- SEQUENTIAL HOST MATCH ID CREATION ENGINE (HostName-L#) ---
     const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
     const prefixPattern = `${cleanHostName}-L`;
@@ -282,10 +320,16 @@ module.exports = {
     const guestsList = guestPlayers.map(name => `• ${name} 👥`);
     const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
+    // Dynamic Title & Color for League
+    const embedTitle = isLeague 
+      ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
+      : `${liveDuneEmoji} New Live Match Open! [ID:${generatedMatchId}]`;
+    const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
+
     const embed = new EmbedBuilder()
-      .setTitle(`${liveDuneEmoji} New Live Match Open! [ID: ${generatedMatchId}]`)
+      .setTitle(embedTitle)
       .setDescription(`"${notes}"`)
-      .setColor(0xe74c3c) 
+      .setColor(embedColor) 
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
         { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
@@ -342,6 +386,7 @@ module.exports = {
       pingMessage.delete().catch(() => {});
     }, 1500);
 
+    // Database Insert (Now fully supports League and explicit mode)
     await supabase
       .from('active_async_matches')
       .insert({
@@ -358,7 +403,13 @@ module.exports = {
         board_type: boardDisplay,
         expansions: expansionsStored,
         status: 'searching',
-        expires_at: expiresAtISO 
+        expires_at: expiresAtISO,
+        mode: 'live',
+        is_league: isLeague,
+        season_id: isLeague ? currentSeasonId : null,
+        league_status: isLeague ? 'open' : null,
+        expected_player_keys: expectedPlayerKeys,
+        discord_usernames: discordUsernames
       });
   }
 };
