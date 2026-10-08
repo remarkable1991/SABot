@@ -753,7 +753,7 @@ async function buildRosterDisplay(lobby) {
     actualCount++;
   }
 
-  const finalDisplay = rosterLines.length > 0 ? rosterLines.join('\n') : 'None';
+  const finalDisplay = rosterLines.length > 0 ? rosterLines.join('\n') : '\u200B';
   return { display: finalDisplay, count: actualCount };
 }
 
@@ -831,18 +831,28 @@ async function handleWebLobbyCreation(lobby) {
       }
     }
 
-    const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
-    const prefixPattern = `${cleanHostName}-${isLive ? 'L' : 'A'}`;
-    let generatedMatchId = `${prefixPattern}1`;
+    // --- FIX: USE EXISTING MATCH ID IF PROVIDED ---
+    let generatedMatchId = lobby.match_id;
+    if (!generatedMatchId) {
+      const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+      const prefixPattern = `${cleanHostName}-${isLive ? 'L' : 'A'}`;
+      generatedMatchId = `${prefixPattern}1`;
 
-    const { data: existingHostLobbies } = await supabase.from('active_async_matches').select('match_id').ilike('match_id', `${prefixPattern}%`);
-    if (existingHostLobbies && existingHostLobbies.length > 0) {
-      let maxNumber = 0;
-      existingHostLobbies.forEach((row) => {
-        const match = row.match_id ? row.match_id.match(new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i')) : null;
-        if (match && parseInt(match[1], 10) > maxNumber) maxNumber = parseInt(match[1], 10);
-      });
-      generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
+      const { data: existingHostLobbies } = await supabase.from('active_async_matches').select('match_id').ilike('match_id', `${prefixPattern}%`);
+      if (existingHostLobbies && existingHostLobbies.length > 0) {
+        let maxNumber = 0;
+        const numberRegex = new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i');
+        existingHostLobbies.forEach((row) => {
+          const match = row.match_id ? row.match_id.match(numberRegex) : null;
+          if (match && match[1]) {
+            const num = parseInt(match[1], 10);
+            if (!isNaN(num) && num > maxNumber) {
+              maxNumber = num;
+            }
+          }
+        });
+        generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
+      }
     }
 
     const emojiTarget = isLive ? '⚔️' : '🎲';
@@ -958,7 +968,7 @@ async function executeLobbyPing(lobby, channel) {
   const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
   const manageLink = `\n🔗 **Manage Lobby:** https://dunestats.cc/LFG/${lobby.id}`;
 
-  const tagMessage = `<@&${roleId}>${hostMentionString} (${totalCount}/4) is looking for players for${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}${manageLink}`;
+  const tagMessage = `<@&${roleId}> ${hostMentionString} (${totalCount}/4) is looking for players for ${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}${manageLink}`;
 
   let historyCountMet = false;
   try {
@@ -1871,8 +1881,11 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       const wIds = lobby.web_player_ids || [];
       const guests = lobby.guest_players || [];
 
+      // Align array lengths securely in case /fix pushed a name without an ID
+      while (wIds.length < wNames.length) wIds.push(null);
+
       for (const p of pIds) targets.push({ type: 'discord', id: p, label: `<@${p}>`, emoji: letters[idx++] });
-      for (let i = 0; i < wNames.length; i++) targets.push({ type: 'web', name: wNames[i], id: wIds[i], label: `🌐 ${wNames[i]}`, emoji: letters[idx++] });
+      for (let i = 0; i < wNames.length; i++) targets.push({ type: 'web', name: wNames[i], index: i, id: wIds[i], label: `🌐 ${wNames[i]}`, emoji: letters[idx++] });
       for (let i = 0; i < guests.length; i++) targets.push({ type: 'guest', name: guests[i], index: i, label: `👥 ${guests[i]}`, emoji: letters[idx++] });
 
       if (targets.length === 0) {
@@ -1897,34 +1910,44 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         let newWIds = [...wIds];
         let newGuests = [...guests];
 
-        if (pickedTarget.type === 'discord') newPIds = newPIds.filter(id => id !== pickedTarget.id);
-        else if (pickedTarget.type === 'web') {
-          const wIdx = newWIds.indexOf(pickedTarget.id);
-          if (wIdx > -1) { newWIds.splice(wIdx, 1); newWNames.splice(wIdx, 1); }
+        // Slice out by array index so it flawlessly handles null UUIDs
+        if (pickedTarget.type === 'discord') {
+            newPIds = newPIds.filter(id => id !== pickedTarget.id);
+        } else if (pickedTarget.type === 'web') {
+            newWNames.splice(pickedTarget.index, 1);
+            newWIds.splice(pickedTarget.index, 1);
         } else if (pickedTarget.type === 'guest') {
-          newGuests.splice(pickedTarget.index, 1);
+            newGuests.splice(pickedTarget.index, 1);
         }
 
-        await supabase.from('active_async_matches').update({
+        // Clean any accidental empty strings into true nulls to prevent UUID DB rejection
+        const cleanWIds = newWIds.map(id => (id && String(id).trim() !== '') ? id : null);
+
+        const { error: updateErr } = await supabase.from('active_async_matches').update({
           player_ids: newPIds,
           web_player_names: newWNames,
-          web_player_ids: newWIds,
+          web_player_ids: cleanWIds,
           guest_players: newGuests,
-          status: 'searching', // Reverts lobby back to searching in case it was starting
+          status: 'searching', 
           auto_start_at: null
         }).eq('id', lobby.id);
 
-        let kickedName = pickedTarget.type === 'discord' ? `<@${pickedTarget.id}>` : pickedTarget.name;
-        let kickNotice = `🥾 <@${user.id}> removed **${kickedName}** from the lobby.`;
-        
-        if (lobby.auto_start_at) kickNotice += `\n⚠️ **Roster drop verified.** Match countdown aborted.`;
-        await message.channel.send({ content: kickNotice }).catch(() => {});
+        if (updateErr) {
+            console.error("Failed to kick player:", updateErr);
+            await message.channel.send(`❌ Database Error: Could not remove player (${updateErr.message})`).catch(()=>{});
+        } else {
+            let kickedName = pickedTarget.type === 'discord' ? `<@${pickedTarget.id}>` : pickedTarget.name;
+            let kickNotice = `🥾 <@${user.id}> removed **${kickedName}** from the lobby.`;
+            
+            if (lobby.auto_start_at) kickNotice += `\n⚠️ **Roster drop verified.** Match countdown aborted.`;
+            await message.channel.send({ content: kickNotice }).catch(() => {});
 
-        if (pickedTarget.type === 'discord') {
-          const joinReaction = message.reactions.cache.find(r => ['LiveDune', 'AsyncDune', '⚔️', '🎲'].includes(r.emoji.name));
-          if (joinReaction) await joinReaction.users.remove(pickedTarget.id).catch(() => {});
+            if (pickedTarget.type === 'discord') {
+              const joinReaction = message.reactions.cache.find(r => ['LiveDune', 'AsyncDune', '⚔️', '🎲'].includes(r.emoji.name));
+              if (joinReaction) await joinReaction.users.remove(pickedTarget.id).catch(() => {});
+            }
         }
-      } catch (err) { } 
+      } catch (err) {} 
 
       await promptMsg.delete().catch(() => {});
       await reaction.users.remove(user.id).catch(() => {}); 
