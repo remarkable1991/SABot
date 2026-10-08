@@ -72,6 +72,13 @@ module.exports = {
       }
     }
 
+    // Acknowledge the command instantly so Discord doesn't timeout the request
+    if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    } else {
+      await interaction.deferReply();
+    }
+
     const notes = interaction.options.getString('text') || (isLeague ? 'Looking for players for an Official League match!' : 'Looking for a live match!');
     const customMinutes = interaction.options.getInteger('minutes');
     const password = interaction.options.getString('password') || 'None';
@@ -142,7 +149,7 @@ module.exports = {
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
+    if (expansion === 'Ix_Immo') expansionText = `${ixText} and${immoText}`;
 
     let modeText = '';
     if (activeMode === 'Epic') modeText = epicText;
@@ -291,7 +298,7 @@ module.exports = {
     // Display sentences using mapped IGN
     const hostDisplayName = displayMap[host.id] || host.username;
     let statusSentence = `**${hostDisplayName}** <@${host.id}> is looking for players`;
-    if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with ${expansionText}`;
+    if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with${expansionText}`;
     else if (board && board !== 'Base') statusSentence += ` for ${boardText}`;
     else if (board === 'Base' && expansionText) statusSentence += ` for Base Game with ${expansionText}`;
     else if (expansionText) statusSentence += ` playing with ${expansionText}`;
@@ -301,8 +308,8 @@ module.exports = {
        statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
     }
 
-    let customPingSentence = `**${hostDisplayName}** <@${host.id}> is looking for live players ${roleMention}`;
-    if (board && board !== 'Base' && expansionText) customPingSentence += ` for ${boardText} with ${expansionText}`;
+    let customPingSentence = `**${hostDisplayName}** <@${host.id}> is looking for live players${roleMention}`;
+    if (board && board !== 'Base' && expansionText) customPingSentence += ` for ${boardText} with${expansionText}`;
     else if (board && board !== 'Base') customPingSentence += ` for ${boardText}`;
     else if (board === 'Base' && expansionText) customPingSentence += ` for Base Game with ${expansionText}`;
     else if (expansionText) customPingSentence += ` playing with ${expansionText}`;
@@ -317,7 +324,7 @@ module.exports = {
         const pk = pkMap[id];
         const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} | 🌍 ${overallElo}]`;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
       }
       return `• ${str}`;
     });
@@ -328,7 +335,7 @@ module.exports = {
         const pk = normalize(name);
         const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} | 🌍 ${overallElo}]`;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
       }
       return `• ${str}`;
     });
@@ -353,6 +360,7 @@ module.exports = {
 
       if (existingHostLobbies && existingHostLobbies.length > 0) {
         let maxNumber = 0;
+        // Adjusted Regex to strictly extract the numeric portion reliably
         const numberRegex = new RegExp(`^${cleanHostName}-L(\\d+)$`, 'i');
 
         existingHostLobbies.forEach((row) => {
@@ -373,40 +381,11 @@ module.exports = {
 
     const totalSlotCount = playerIds.length + guestPlayers.length;
 
-    // Dynamic Title & Color for League
-    const embedTitle = isLeague 
-      ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
-      : `${liveDuneEmoji} New Live Match Open! [ID: ${generatedMatchId}]`;
-    const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
-
-    const embed = new EmbedBuilder()
-      .setTitle(embedTitle)
-      .setDescription(`"${notes}"`)
-      .setColor(embedColor) 
-      .addFields(
-        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
-        { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
-        { name: `👥 Players (${totalSlotCount}/4)`, value: fullRosterDisplay, inline: false },
-        { 
-          name: 'Reaction Legend', 
-          value: [
-            `${liveDuneEmoji} • **Join / Leave** the lobby`,
-            `🎮 • **Start Game** (Requires 2+ players)`,
-            `❌ • **Cancel Lobby** (Host only)`,
-            `🥾 • **Kick Player** (Host/Admin only)`,
-            `🔔 • **Toggle Ping Alerts** to get notified when someone joins`,
-            `📢 • **Ping Lobby Role** (45m cooldown)`
-          ].join('\n'), 
-          inline: false 
-        }
-      )
-      .setFooter({ text: `Lobbies time out automatically if unstarted after ${minutesToExpiry} minutes.` })
-      .setTimestamp();
-
-    // -------------------------------------------------------------
-    // DATABASE INSERT (MUST HAPPEN FIRST TO GET THE LOBBY ID)
-    // -------------------------------------------------------------
+    // --- DATABASE INSERT FIRST TO GET THE ID ---
     let actualChannelId = interaction.channelId;
+    let targetMessage;
+    let targetMessageId;
+
     if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
       actualChannelId = LEAGUE_CHANNEL_ID;
     }
@@ -437,48 +416,69 @@ module.exports = {
       .select('id')
       .single();
 
-    const numericLobbyId = insertedMatch?.id || 'unknown';
+    if (insertError) {
+        console.error('Failed to insert lobby into Supabase:', insertError);
+        return interaction.editReply({ content: '❌ Failed to connect to database. Please try again.' });
+    }
 
-    // Tap-to-copy code blocks placed outside the embed, now with the real web URL
+    const numericLobbyId = insertedMatch.id;
+
+    // Dynamic Title & Color for League
+    const embedTitle = isLeague 
+      ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
+      : `${liveDuneEmoji} New Live Match Open! [ID:${generatedMatchId}]`;
+    const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
+
+    const embed = new EmbedBuilder()
+      .setTitle(embedTitle)
+      .setDescription(`"${notes}"`)
+      .setColor(embedColor) 
+      .addFields(
+        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
+        { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
+        { name: `👥 Players (${totalSlotCount}/4)`, value: fullRosterDisplay, inline: false },
+        { 
+          name: 'Reaction Legend', 
+          value: [
+            `${liveDuneEmoji} • **Join / Leave** the lobby`,
+            `🎮 • **Start Game** (Requires 2+ players)`,
+            `❌ • **Cancel Lobby** (Host only)`,
+            `🥾 • **Kick Player** (Host/Admin only)`,
+            `🔔 • **Toggle Ping Alerts** to get notified when someone joins`,
+            `📢 • **Ping Lobby Role** (45m cooldown)`
+          ].join('\n'), 
+          inline: false 
+        }
+      )
+      .setFooter({ text: `Lobbies time out automatically if unstarted after ${minutesToExpiry} minutes.` })
+      .setTimestamp();
+
     let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
     if (password !== 'None') {
       copyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
     }
     copyableContent += `\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
 
-    // --- NEW ROUTING LOGIC: POST IN TARGET CHANNEL ---
-    let targetMessage;
-    let targetMessageId;
-
     if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
-      // If it's a league game but they typed the command somewhere else, send it to the League channel
       const leagueChannel = await interaction.client.channels.fetch(LEAGUE_CHANNEL_ID).catch(() => null);
       if (leagueChannel) {
         targetMessage = await leagueChannel.send({ content: copyableContent, embeds: [embed] });
         targetMessageId = targetMessage.id;
         
-        // Let the user know it was moved ephemerally
-        await interaction.reply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!`, flags: MessageFlags.Ephemeral });
+        await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!` });
       }
     }
 
     if (!targetMessage) {
-      // Fallback: It's not a league game, OR they already typed it in the League channel
-      const response = await interaction.reply({
-        content: copyableContent,
-        embeds: [embed],
-        withResponse: true
-      });
-      targetMessageId = response.resource?.message?.id || response.id;
-      targetMessage = response.resource?.message || await interaction.channel.messages.fetch(targetMessageId);
+      const response = await interaction.editReply({ content: copyableContent, embeds: [embed] });
+      targetMessageId = response.id;
+      targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
     // Now securely link the newly generated Discord Message back to the Supabase record
-    if (insertedMatch && targetMessageId) {
-       await supabase.from('active_async_matches')
-         .update({ message_id: targetMessageId })
-         .eq('id', numericLobbyId);
-    }
+    await supabase.from('active_async_matches')
+      .update({ message_id: targetMessageId })
+      .eq('id', numericLobbyId);
 
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
