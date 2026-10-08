@@ -127,7 +127,6 @@ module.exports = {
       activeMode = null; 
     }
 
-    // Clean list for Supabase (NO EMOJIS)
     const dbExpansions = [];
     if (expansion === 'Ix' || expansion === 'Ix_Immo') dbExpansions.push('Rise of IX');
     if (expansion === 'Immortality' || expansion === 'Ix_Immo') dbExpansions.push('Immortality');
@@ -137,7 +136,6 @@ module.exports = {
 
     const dbBoardType = board === 'Uprising' ? 'Uprising' : 'Base Game';
 
-    // Rich display versions for Discord Embeds
     let boardDisplay = 'Base Game';
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
 
@@ -167,7 +165,6 @@ module.exports = {
     }
 
     let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
-
     const liveDuneEmoji = getCustomEmoji('LiveDune', '⚔️');
     
     const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180;
@@ -280,17 +277,36 @@ module.exports = {
         });
       }
       
-      if (isLeague) {
-        const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
-        if (keysToFetch.length > 0) {
-          const [{ data: oData }, { data: lData }] = await Promise.all([
-            supabase.from('player_ratings').select('player_key, elo').in('player_key', keysToFetch).eq('game_version', 'overall'),
-            supabase.from('player_league_ratings').select('player_key, elo').in('player_key', keysToFetch).eq('season', currentSeasonId)
-          ]);
-          oData?.forEach(r => { if (!elos[r.player_key]) elos[r.player_key] = {}; elos[r.player_key].overall = r.elo; });
-          lData?.forEach(r => { if (!elos[r.player_key]) elos[r.player_key] = {}; elos[r.player_key].league = r.elo; });
+      // Look up ratings for players & guests to resolve case-sensitive leaderboard names & ELO
+      const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
+      const guestRatingsLookup = {};
+
+      if (keysToFetch.length > 0) {
+        const [{ data: oData }, { data: lData }] = await Promise.all([
+          supabase.from('player_ratings').select('player_key, display_name, elo').in('player_key', keysToFetch).eq('game_version', 'overall'),
+          isLeague ? supabase.from('player_league_ratings').select('player_key, elo').in('player_key', keysToFetch).eq('season', currentSeasonId) : Promise.resolve({ data: [] })
+        ]);
+        oData?.forEach(r => { 
+          if (!elos[r.player_key]) elos[r.player_key] = {}; 
+          elos[r.player_key].overall = r.elo;
+          if (r.display_name) guestRatingsLookup[r.player_key] = r.display_name;
+        });
+        lData?.forEach(r => { 
+          if (!elos[r.player_key]) elos[r.player_key] = {}; 
+          elos[r.player_key].league = r.elo; 
+        });
+      }
+
+      // Check if guests match player_ratings to update discord map
+      for (const guest of guestPlayers) {
+        const normKey = normalize(guest);
+        if (guestRatingsLookup[normKey]) {
+          // Keep their exact case-sensitive name from player_ratings
+          guestRatingsLookup[guest] = guestRatingsLookup[normKey];
         }
       }
+
+      this.guestRatingsLookup = guestRatingsLookup;
     } catch (err) { console.error('Failed to map players/elos:', err); }
 
     const hostDisplayName = displayMap[host.id] || host.username;
@@ -312,26 +328,39 @@ module.exports = {
     else if (expansionText) customPingSentence += ` playing with ${expansionText}`;
     customPingSentence += '.';
 
+    const guestLookup = this.guestRatingsLookup || {};
+
+    // Format roster with Leaderboard Hyperlinks
     const mentionsList = playerIds.map(id => {
-      const dName = displayMap[id];
-      let str = dName ? `**${dName}** <@${id}>` : `<@${id}>`;
+      const dName = displayMap[id] || (pkMap[id] ? pkMap[id] : null);
+      let nameStr = dName ? `[${dName}](https://dunestats.cc/players/${encodeURIComponent(dName)}) <@${id}>` : `<@${id}>`;
       
       if (isLeague) {
         const pk = pkMap[id];
         const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo}  | 🌍 ${overallElo}]`;
+        nameStr += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
       }
-      return `• ${str}`;
+      return `• ${nameStr}`;
     });
     
     const guestsList = guestPlayers.map(name => {
-      let str = `**${name}** 👥`;
+      const normKey = normalize(name);
+      const isKnownOnBoard = guestLookup[normKey] || guestLookup[name];
+      let str = '';
+
+      if (isKnownOnBoard) {
+        const realCaseName = isKnownOnBoard;
+        str = `[${realCaseName}](https://dunestats.cc/players/${encodeURIComponent(realCaseName)}) 📊`;
+      } else {
+        str = name.toLowerCase().startsWith('friend of') ? `${name} 👥` : `**${name}** 👥`;
+      }
+
       if (isLeague) {
-        const pk = normalize(name);
+        const pk = normKey;
         const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo}  | 🌍 ${overallElo}]`;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
       }
       return `• ${str}`;
     });
@@ -427,7 +456,7 @@ module.exports = {
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
-    // Insert to DB using clean strings (no emojis) and the actual message ID
+    // Insert to DB using clean plain strings (no raw emojis) and valid message_id
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
