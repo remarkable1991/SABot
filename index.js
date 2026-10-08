@@ -312,80 +312,137 @@ async function persistDiscordUserId(dbMatch, discordUserId, discordUsername = nu
 }
 
 // -------------------------------------------------------------
-// 🔄 BULK GUILD ROSTER SYNC TO SUPABASE
+// 📋 DISCORD GUILD DIRECTORY SYNC (Secondary Discovery Table)
 // -------------------------------------------------------------
-async function syncAllGuildMembersToDatabase() {
+async function syncGuildDirectory() {
   try {
     const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
     if (!guild) return;
 
-    console.log(`[Sync] Fetching all members from guild: ${guild.name}...`);
+    console.log(`[Directory] Fetching all guild members for ${guild.name}...`);
     const members = await guild.members.fetch();
     const validMembers = members.filter(m => !m.user.bot);
 
-    console.log(`[Sync] Found ${validMembers.size} non-bot members to sync with Supabase.`);
+    // 1. Fetch existing verified mappings so we don't guess for already linked users
+    const { data: verifiedMaps } = await supabase
+      .from('player_discord_map')
+      .select('discord_user_id, player_key');
+    const verifiedSet = new Set((verifiedMaps || []).map(m => m.discord_user_id).filter(Boolean));
 
-    // 1. Fetch all existing ratings to connect known leaderboard IGNs immediately
-    const { data: allRatings } = await supabase.from('player_ratings').select('player_key, display_name').eq('game_version', 'overall');
-    const ratingsMap = new Map();
-    if (allRatings) {
-      allRatings.forEach(r => ratingsMap.set(r.player_key, r.display_name));
-    }
+    // 2. Fetch all known player_ratings for fuzzy comparison
+    const { data: allRatings } = await supabase
+      .from('player_ratings')
+      .select('player_key, display_name')
+      .eq('game_version', 'overall');
+    
+    const ratingsList = allRatings || [];
 
-    // 2. Fetch existing mappings
-    const { data: existingMaps } = await supabase.from('player_discord_map').select('id, discord_user_id, player_key');
-    const mappedUserIds = new Map();
-    if (existingMaps) {
-      existingMaps.forEach(m => {
-        if (m.discord_user_id) mappedUserIds.set(m.discord_user_id, m);
-      });
-    }
-
-    const rowsToUpsert = [];
-
+    const rows = [];
     for (const [, member] of validMembers) {
-      const existing = mappedUserIds.get(member.id);
-      const discordUsername = member.user.username;
-      const displayName = member.nickname || member.displayName || member.user.globalName || discordUsername;
+      const dId = member.id;
+      const username = member.user.username;
+      const globalName = member.user.globalName || null;
+      const displayName = member.nickname || member.displayName || username;
+      const isVerified = verifiedSet.has(dId);
 
-      // Determine best player_key if not already set
-      let assignedPlayerKey = existing?.player_key || null;
-      if (!assignedPlayerKey) {
-        const normNick = normalizeName(displayName);
-        const normUser = normalizeName(discordUsername);
-        if (ratingsMap.has(normNick)) assignedPlayerKey = normNick;
-        else if (ratingsMap.has(normUser)) assignedPlayerKey = normUser;
+      let suggestedKey = null;
+      let bestScore = 0;
+
+      // Only attempt automated guessing if they aren't already verified
+      if (!isVerified) {
+        for (const rating of ratingsList) {
+          const score = Math.max(
+            similarity(displayName, rating.display_name),
+            similarity(displayName, rating.player_key),
+            similarity(username, rating.player_key)
+          );
+          if (score > bestScore) {
+            bestScore = score;
+            suggestedKey = rating.player_key;
+          }
+        }
       }
 
-      rowsToUpsert.push({
-        discord_user_id: member.id,
-        discord_username: discordUsername,
+      rows.push({
+        discord_user_id: dId,
+        discord_username: username,
+        global_name: globalName,
         display_name: displayName,
-        player_key: assignedPlayerKey,
+        suggested_player_key: bestScore >= DB_MATCH_THRESHOLD ? suggestedKey : null,
+        similarity_score: bestScore >= DB_MATCH_THRESHOLD ? parseFloat(bestScore.toFixed(3)) : null,
+        has_verified_map: isVerified,
+        joined_at: member.joinedAt ? member.joinedAt.toISOString() : null,
         updated_at: new Date().toISOString()
       });
     }
 
-    // Bulk upsert in chunks of 100
     const chunkSize = 100;
-    for (let i = 0; i < rowsToUpsert.length; i += chunkSize) {
-      const chunk = rowsToUpsert.slice(i, i + chunkSize);
-      await supabase.from('player_discord_map').upsert(chunk, { onConflict: 'discord_user_id', ignoreDuplicates: false });
+    for (let i = 0; i < rows.length; i += chunkSize) {
+      const chunk = rows.slice(i, i + chunkSize);
+      await supabase
+        .from('discord_guild_members')
+        .upsert(chunk, { onConflict: 'discord_user_id' });
     }
 
-    console.log(`[Sync] Successfully synchronized ${rowsToUpsert.length} Discord users into player_discord_map.`);
+    console.log(`[Directory] Successfully synced ${rows.length} members into discord_guild_members.`);
   } catch (err) {
-    console.error('[Sync] Error during bulk guild member sync:', err);
+    console.error('[Directory] Error syncing guild directory:', err);
   }
 }
 
 async function resolveMentionForName(guild, playerName) {
-  const dbMatch = await getDatabasePlayerMap(playerName);
+  // Step A: Check verified player_discord_map
+  let dbMatch = await getDatabasePlayerMap(playerName);
   const mappedDiscordId = normalizeDiscordId(dbMatch && dbMatch.discord_user_id);
   if (mappedDiscordId) return userMention(mappedDiscordId);
+
+  // Step B: Check secondary directory discord_guild_members
+  const norm = normalizeName(playerName);
+  const safeName = String(playerName || '').trim().replace(/[,%()]/g, ' ').replace(/\s+/g, ' ').trim();
+  const { data: directoryMatches } = await supabase
+    .from('discord_guild_members')
+    .select('discord_user_id, display_name, discord_username, suggested_player_key, similarity_score')
+    .or(`display_name.ilike.*${safeName}*,discord_username.ilike.*${safeName}*,suggested_player_key.eq.${norm}`)
+    .limit(5);
+
+  if (directoryMatches && directoryMatches.length > 0) {
+    let bestDir = null;
+    let bestScore = 0;
+    for (const d of directoryMatches) {
+      const score = Math.max(
+        similarity(playerName, d.display_name),
+        similarity(playerName, d.discord_username),
+        similarity(playerName, d.suggested_player_key)
+      );
+      if (score > bestScore) {
+        bestScore = score;
+        bestDir = d;
+      }
+    }
+
+    // Step C: If confident, promote to player_discord_map and return mention
+    if (bestDir && bestScore >= DB_MATCH_THRESHOLD) {
+      const targetKey = bestDir.suggested_player_key || norm;
+      await supabase.from('player_discord_map').upsert({
+        discord_user_id: bestDir.discord_user_id,
+        discord_username: bestDir.discord_username,
+        display_name: bestDir.display_name,
+        player_key: targetKey,
+        updated_at: new Date().toISOString()
+      }, { onConflict: 'discord_user_id' }).catch(() => {});
+
+      await supabase.from('discord_guild_members').update({ has_verified_map: true }).eq('discord_user_id', bestDir.discord_user_id).catch(() => {});
+      return userMention(bestDir.discord_user_id);
+    }
+  }
+
+  // Guild live search fallback
   const searchNames = [dbMatch && dbMatch.discord_username, dbMatch && dbMatch.display_name, dbMatch && dbMatch.username, dbMatch && dbMatch.player_key, playerName].filter(Boolean);
   const member = await searchGuildMemberByNames(guild, searchNames);
-  if (member && member.id) { await persistDiscordUserId(dbMatch, member.id, member.user.username); return userMention(member.id); }
+  if (member && member.id) { 
+    await persistDiscordUserId(dbMatch, member.id, member.user.username); 
+    return userMention(member.id); 
+  }
   if (dbMatch && dbMatch.discord_username) return '(' + dbMatch.discord_username + ')';
   return null;
 }
@@ -1311,7 +1368,7 @@ function startGlobalDatabaseListener() {
 
               await supabase.from('tournament_match_schedules').update({ confirmed_slot: finalWinSlot, confirmed_time_text: confirmedTimeText, confirmed_timestamp: confirmedTimestamp, reminders_sent: [], updated_at: new Date().toISOString() }).eq('id', fresh.id);
 
-              const matchTitle = `[${fresh.match_code}] ${fresh.round_type}${fresh.table_identifier}`;
+              const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
               const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
               
               let tablePath = 'table';
@@ -1340,12 +1397,12 @@ function startGlobalDatabaseListener() {
             
             if (threeVoterSlots.length > 0) {
               breakdownLines.push('**🔥 Closest Options (3/4 Players Agreed):**');
-              for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label}${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
+              for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
               breakdownLines.push('');
             }
             if (twoVoterSlots.length > 0) {
               breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
-              for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed:${s.backers.map(id => `<@${id}>`).join(', ')})`);
+              for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')})`);
               breakdownLines.push('');
             }
             if (threeVoterSlots.length === 0 && twoVoterSlots.length === 0) {
@@ -1964,6 +2021,31 @@ discordClient.on('messageCreate', async (message) => {
   } catch (err) {}
 });
 
+// Update directory immediately when a user changes their server nickname or username
+discordClient.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    if (newMember.user.bot) return;
+    const username = newMember.user.username;
+    const displayName = newMember.nickname || newMember.displayName || username;
+
+    await supabase.from('discord_guild_members').upsert({
+      discord_user_id: newMember.id,
+      discord_username: username,
+      global_name: newMember.user.globalName || null,
+      display_name: displayName,
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'discord_user_id' });
+  } catch (e) {}
+});
+
+// Clean up directory entry when someone leaves the server
+discordClient.on('guildMemberRemove', async (member) => {
+  try {
+    if (member.user.bot) return;
+    await supabase.from('discord_guild_members').delete().eq('discord_user_id', member.id);
+  } catch (e) {}
+});
+
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
@@ -2172,7 +2254,9 @@ discordClient.once('clientReady', async () => {
   startRealtimeListener();
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
-  await syncAllGuildMembersToDatabase(); // Automatically populates and links all server members!
+
+  // Populate & update the secondary guild directory table cleanly on boot
+  await syncGuildDirectory();
 
   try {
     const { data: unannouncedSp } = await supabase.from('sp_events')
