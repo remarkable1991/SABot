@@ -65,14 +65,12 @@ module.exports = {
     const LFG_ADMIN_ROLE = '1557469534133162045';
     const LEAGUE_CHANNEL_ID = '1557473551227818024';
 
-    // League Match Authorization Guard
     if (isLeague) {
       if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
         return interaction.reply({ content: '❌ Only LFG Admins can host official League matches during the testing phase.', flags: MessageFlags.Ephemeral });
       }
     }
 
-    // Acknowledge the command instantly so Discord doesn't timeout the request
     if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
     } else {
@@ -245,7 +243,6 @@ module.exports = {
       }
     }
 
-    // --- IGN MAPPING & ELO FETCHING FOR DISPLAY ---
     const expectedPlayerKeys = [];
     const discordUsernames = [];
     const pkMap = {};
@@ -260,7 +257,6 @@ module.exports = {
         if (seasonData?.id) currentSeasonId = seasonData.id;
       }
 
-      // Fetch mappings so we can display real IGNs next to Discord tags
       const { data: mapData } = await supabase.from('player_discord_map')
         .select('discord_user_id, player_key, discord_username, display_name')
         .in('discord_user_id', playerIds);
@@ -281,7 +277,6 @@ module.exports = {
         });
       }
       
-      // Fetch Elo for mapped players and guests (if league)
       if (isLeague) {
         const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
         if (keysToFetch.length > 0) {
@@ -295,7 +290,6 @@ module.exports = {
       }
     } catch (err) { console.error('Failed to map players/elos:', err); }
 
-    // Display sentences using mapped IGN
     const hostDisplayName = displayMap[host.id] || host.username;
     let statusSentence = `**${hostDisplayName}** <@${host.id}> is looking for players`;
     if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with${expansionText}`;
@@ -315,7 +309,6 @@ module.exports = {
     else if (expansionText) customPingSentence += ` playing with ${expansionText}`;
     customPingSentence += '.';
 
-    // Format Display with IGN and Elo (if League)
     const mentionsList = playerIds.map(id => {
       const dName = displayMap[id];
       let str = dName ? `**${dName}** <@${id}>` : `<@${id}>`;
@@ -340,14 +333,11 @@ module.exports = {
       return `• ${str}`;
     });
     
-    // SAFE FALLBACK: If roster is completely empty, supply a Zero-Width Space to satisfy Discord.js requirements.
     let fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
     if (!fullRosterDisplay || fullRosterDisplay.trim() === '') {
        fullRosterDisplay = '\u200B'; 
     }
 
-    // --- SEQUENTIAL HOST MATCH ID CREATION ENGINE (HostName-L#) ---
-    // Fix: We now use hostDisplayName instead of host.username so Discord sequences merge flawlessly with Website sequences
     const cleanHostName = hostDisplayName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
     const prefixPattern = `${cleanHostName}-L`;
     let generatedMatchId = `${prefixPattern}1`;
@@ -360,7 +350,6 @@ module.exports = {
 
       if (existingHostLobbies && existingHostLobbies.length > 0) {
         let maxNumber = 0;
-        // Adjusted Regex to strictly extract the numeric portion reliably
         const numberRegex = new RegExp(`^${cleanHostName}-L(\\d+)$`, 'i');
 
         existingHostLobbies.forEach((row) => {
@@ -381,49 +370,6 @@ module.exports = {
 
     const totalSlotCount = playerIds.length + guestPlayers.length;
 
-    // --- DATABASE INSERT FIRST TO GET THE ID ---
-    let actualChannelId = interaction.channelId;
-    let targetMessage;
-    let targetMessageId;
-
-    if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
-      actualChannelId = LEAGUE_CHANNEL_ID;
-    }
-
-    const { data: insertedMatch, error: insertError } = await supabase
-      .from('active_async_matches')
-      .insert({
-        match_id: generatedMatchId,
-        channel_id: actualChannelId,
-        guild_id: interaction.guildId,
-        host_id: host.id,
-        player_ids: playerIds,
-        notify_user_ids: [],
-        guest_players: guestPlayers,
-        message_text: notes,
-        lobby_password: password !== 'None' ? password : null,
-        board_type: boardDisplay,
-        expansions: expansionsStored,
-        status: 'searching',
-        expires_at: expiresAtISO,
-        mode: 'live',
-        is_league: isLeague,
-        season_id: isLeague ? currentSeasonId : null,
-        league_status: isLeague ? 'open' : null,
-        expected_player_keys: expectedPlayerKeys,
-        discord_usernames: discordUsernames
-      })
-      .select('id')
-      .single();
-
-    if (insertError) {
-        console.error('Failed to insert lobby into Supabase:', insertError);
-        return interaction.editReply({ content: '❌ Failed to connect to database. Please try again.' });
-    }
-
-    const numericLobbyId = insertedMatch.id;
-
-    // Dynamic Title & Color for League
     const embedTitle = isLeague 
       ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
       : `${liveDuneEmoji} New Live Match Open! [ID:${generatedMatchId}]`;
@@ -453,32 +399,66 @@ module.exports = {
       .setFooter({ text: `Lobbies time out automatically if unstarted after ${minutesToExpiry} minutes.` })
       .setTimestamp();
 
-    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    let initialCopyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
     if (password !== 'None') {
-      copyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
+      initialCopyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
     }
-    copyableContent += `\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
+
+    let actualChannelId = interaction.channelId;
+    let targetMessage;
+    let targetMessageId;
 
     if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
       const leagueChannel = await interaction.client.channels.fetch(LEAGUE_CHANNEL_ID).catch(() => null);
-      if (leagueChannel) {
-        targetMessage = await leagueChannel.send({ content: copyableContent, embeds: [embed] });
-        targetMessageId = targetMessage.id;
-        
-        await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!` });
+      if (!leagueChannel) {
+        return interaction.editReply({ content: `❌ Could not find target channel <#${LEAGUE_CHANNEL_ID}>.` });
       }
-    }
+      targetMessage = await leagueChannel.send({ content: initialCopyableContent, embeds: [embed] });
+      targetMessageId = targetMessage.id;
+      actualChannelId = LEAGUE_CHANNEL_ID;
 
-    if (!targetMessage) {
-      const response = await interaction.editReply({ content: copyableContent, embeds: [embed] });
+      await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!` });
+    } else {
+      const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
       targetMessageId = response.id;
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
-    // Now securely link the newly generated Discord Message back to the Supabase record
-    await supabase.from('active_async_matches')
-      .update({ message_id: targetMessageId })
-      .eq('id', numericLobbyId);
+    const { data: insertedMatch, error: insertError } = await supabase
+      .from('active_async_matches')
+      .insert({
+        message_id: targetMessageId,
+        match_id: generatedMatchId,
+        channel_id: actualChannelId,
+        guild_id: interaction.guildId,
+        host_id: host.id,
+        player_ids: playerIds,
+        notify_user_ids: [],
+        guest_players: guestPlayers,
+        message_text: notes,
+        lobby_password: password !== 'None' ? password : null,
+        board_type: boardDisplay,
+        expansions: expansionsStored,
+        status: 'searching',
+        expires_at: expiresAtISO,
+        mode: 'live',
+        is_league: isLeague,
+        season_id: isLeague ? currentSeasonId : null,
+        league_status: isLeague ? 'open' : null,
+        expected_player_keys: expectedPlayerKeys,
+        discord_usernames: discordUsernames
+      })
+      .select('id')
+      .single();
+
+    if (insertError) {
+      console.error('Failed to insert lobby into Supabase:', insertError);
+      return;
+    }
+
+    const numericLobbyId = insertedMatch.id;
+    const finalizedContent = `${initialCopyableContent}\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
+    await targetMessage.edit({ content: finalizedContent });
 
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
@@ -489,7 +469,7 @@ module.exports = {
       }
       await targetMessage.react('🎮').catch(() => {});
       await targetMessage.react('❌').catch(() => {});
-      await targetMessage.react('🥾').catch(() => {}); // KICK EMOJI
+      await targetMessage.react('🥾').catch(() => {});
       await targetMessage.react('🔔').catch(() => {});
       await targetMessage.react('📢').catch(() => {});
     } catch (reactErr) { console.error(reactErr); }
@@ -502,6 +482,5 @@ module.exports = {
     setTimeout(() => {
       pingMessage.delete().catch(() => {});
     }, 1500);
-
   }
 };
