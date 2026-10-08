@@ -63,6 +63,7 @@ module.exports = {
   async execute(interaction, { supabase }) {
     const isLeague = interaction.options.getBoolean('league') || false;
     const LFG_ADMIN_ROLE = '1557469534133162045';
+    const LEAGUE_CHANNEL_ID = '1557473551227818024';
 
     // League Match Authorization Guard
     if (isLeague) {
@@ -141,7 +142,7 @@ module.exports = {
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo') expansionText = `${ixText} and${immoText}`;
+    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
 
     let modeText = '';
     if (activeMode === 'Epic') modeText = epicText;
@@ -159,18 +160,6 @@ module.exports = {
 
     let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
 
-    let statusSentence = `${host} is looking for players`;
-    if (board && board !== 'Base' && expansionText) {
-      statusSentence += ` for ${boardText} with${expansionText}`;
-    } else if (board && board !== 'Base') {
-      statusSentence += ` for ${boardText}`;
-    } else if (board === 'Base' && expansionText) {
-      statusSentence += ` for Base Game with ${expansionText}`;
-    } else if (expansionText) {
-      statusSentence += ` playing with ${expansionText}`;
-    }
-    statusSentence += '.';
-
     const liveDuneEmoji = getCustomEmoji('LiveDune', '⚔️');
     
     const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180;
@@ -179,18 +168,6 @@ module.exports = {
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
 
     const roleMention = `<@&1219666679764877424>`;
-
-    let customPingSentence = `**${interaction.user.username}** is looking for live players ${roleMention}`;
-    if (board && board !== 'Base' && expansionText) {
-      customPingSentence += ` for ${boardText} with${expansionText}`;
-    } else if (board && board !== 'Base') {
-      customPingSentence += ` for ${boardText}`;
-    } else if (board === 'Base' && expansionText) {
-      customPingSentence += ` for Base Game with ${expansionText}`;
-    } else if (expansionText) {
-      customPingSentence += ` playing with ${expansionText}`;
-    }
-    customPingSentence += '.';
 
     const playerIds = [host.id];
     const guestPlayers = [];
@@ -261,29 +238,44 @@ module.exports = {
       }
     }
 
-    // Capture Web IGN mapping metadata for League games & Fetch ELOs
+    // --- IGN MAPPING & ELO FETCHING FOR DISPLAY ---
     const expectedPlayerKeys = [];
     const discordUsernames = [];
-    let currentSeasonId = 2;
+    const pkMap = {};
+    const displayMap = {};
     const elos = {};
-    const ignMap = {}; // Maps Discord ID to player_key
+    let currentSeasonId = 2;
 
-    if (isLeague) {
-      try {
+    try {
+      if (isLeague) {
         const nowIso = new Date().toISOString();
         const { data: seasonData } = await supabase.from('sp_seasons').select('id').lte('starts_at', nowIso).gt('ends_at', nowIso).maybeSingle();
         if (seasonData?.id) currentSeasonId = seasonData.id;
+      }
 
-        const { data: mapData } = await supabase.from('player_discord_map').select('discord_user_id, player_key, discord_username').in('discord_user_id', playerIds);
-        if (mapData) {
-          mapData.forEach(row => {
-            ignMap[row.discord_user_id] = row.player_key;
-            if (row.player_key) expectedPlayerKeys.push(row.player_key);
-            if (row.discord_username) discordUsernames.push(row.discord_username);
-          });
-        }
+      // Fetch mappings so we can display real IGNs next to Discord tags
+      const { data: mapData } = await supabase.from('player_discord_map')
+        .select('discord_user_id, player_key, discord_username, display_name')
+        .in('discord_user_id', playerIds);
         
-        // Fetch Elo for mapped players and guests
+      if (mapData) {
+        mapData.forEach(row => {
+          if (row.player_key) {
+             pkMap[row.discord_user_id] = row.player_key;
+             if (isLeague) expectedPlayerKeys.push(row.player_key);
+          }
+          if (row.display_name) {
+             displayMap[row.discord_user_id] = row.display_name;
+          } else if (row.player_key) {
+             displayMap[row.discord_user_id] = row.player_key.charAt(0).toUpperCase() + row.player_key.slice(1);
+          }
+          
+          if (isLeague && row.discord_username) discordUsernames.push(row.discord_username);
+        });
+      }
+      
+      // Fetch Elo for mapped players and guests (if league)
+      if (isLeague) {
         const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
         if (keysToFetch.length > 0) {
           const [{ data: oData }, { data: lData }] = await Promise.all([
@@ -293,10 +285,54 @@ module.exports = {
           oData?.forEach(r => { if (!elos[r.player_key]) elos[r.player_key] = {}; elos[r.player_key].overall = r.elo; });
           lData?.forEach(r => { if (!elos[r.player_key]) elos[r.player_key] = {}; elos[r.player_key].league = r.elo; });
         }
-      } catch (err) { console.error('Failed to map league players/elos:', err); }
-      
-      statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
+      }
+    } catch (err) { console.error('Failed to map players/elos:', err); }
+
+    // Display sentences using mapped IGN
+    const hostDisplayName = displayMap[host.id] || host.username;
+    let statusSentence = `**${hostDisplayName}** <@${host.id}> is looking for players`;
+    if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with ${expansionText}`;
+    else if (board && board !== 'Base') statusSentence += ` for ${boardText}`;
+    else if (board === 'Base' && expansionText) statusSentence += ` for Base Game with ${expansionText}`;
+    else if (expansionText) statusSentence += ` playing with ${expansionText}`;
+    statusSentence += '.';
+
+    if (isLeague) {
+       statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
     }
+
+    let customPingSentence = `**${hostDisplayName}** <@${host.id}> is looking for live players ${roleMention}`;
+    if (board && board !== 'Base' && expansionText) customPingSentence += ` for ${boardText} with ${expansionText}`;
+    else if (board && board !== 'Base') customPingSentence += ` for ${boardText}`;
+    else if (board === 'Base' && expansionText) customPingSentence += ` for Base Game with ${expansionText}`;
+    else if (expansionText) customPingSentence += ` playing with ${expansionText}`;
+    customPingSentence += '.';
+
+    // Format Display with IGN and Elo (if League)
+    const mentionsList = playerIds.map(id => {
+      const dName = displayMap[id];
+      let str = dName ? `**${dName}** <@${id}>` : `<@${id}>`;
+      
+      if (isLeague) {
+        const pk = pkMap[id];
+        const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
+        const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
+        str += ` [🏆 ${leagueElo} | 🌍 ${overallElo}]`;
+      }
+      return `• ${str}`;
+    });
+    
+    const guestsList = guestPlayers.map(name => {
+      let str = `**${name}** 👥`;
+      if (isLeague) {
+        const pk = normalize(name);
+        const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
+        const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
+        str += ` [🏆 ${leagueElo} | 🌍 ${overallElo}]`;
+      }
+      return `• ${str}`;
+    });
+    const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
     // --- SEQUENTIAL HOST MATCH ID CREATION ENGINE (HostName-L#) ---
     const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
@@ -330,35 +366,11 @@ module.exports = {
     }
 
     const totalSlotCount = playerIds.length + guestPlayers.length;
-    
-    // Format Display with Elo (if League)
-    const mentionsList = playerIds.map(id => {
-      let str = `• <@${id}>`;
-      if (isLeague) {
-        const pk = ignMap[id];
-        const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
-        const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} \🌍 ${overallElo}]`;
-      }
-      return str;
-    });
-    
-    const guestsList = guestPlayers.map(name => {
-      let str = `• ${name} 👥`;
-      if (isLeague) {
-        const pk = normalize(name);
-        const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
-        const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} \ 🌍 ${overallElo}]`;
-      }
-      return str;
-    });
-    const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
 
     // Dynamic Title & Color for League
     const embedTitle = isLeague 
       ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
-      : `${liveDuneEmoji} New Live Match Open! [ID:${generatedMatchId}]`;
+      : `${liveDuneEmoji} New Live Match Open! [ID: ${generatedMatchId}]`;
     const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
 
     const embed = new EmbedBuilder()
@@ -385,51 +397,19 @@ module.exports = {
       .setFooter({ text: `Lobbies time out automatically if unstarted after ${minutesToExpiry} minutes.` })
       .setTimestamp();
 
-    // Tap-to-copy code blocks placed outside the embed
-    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
-    if (password !== 'None') {
-      copyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
+    // -------------------------------------------------------------
+    // DATABASE INSERT (MUST HAPPEN FIRST TO GET THE LOBBY ID)
+    // -------------------------------------------------------------
+    let actualChannelId = interaction.channelId;
+    if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
+      actualChannelId = LEAGUE_CHANNEL_ID;
     }
 
-    const response = await interaction.reply({
-      content: copyableContent,
-      embeds: [embed],
-      withResponse: true
-    });
-
-    const messageId = response.resource?.message?.id || response.id;
-    const message = response.resource?.message || await interaction.channel.messages.fetch(messageId);
-
-    try {
-      const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
-      if (customJoinEmoji) {
-        await message.react(customJoinEmoji).catch(() => {});
-      } else {
-        await message.react('⚔️').catch(() => {});
-      }
-      await message.react('🎮').catch(() => {});
-      await message.react('❌').catch(() => {});
-      await message.react('🥾').catch(() => {}); // KICK EMOJI
-      await message.react('🔔').catch(() => {});
-      await message.react('📢').catch(() => {});
-    } catch (reactErr) { console.error(reactErr); }
-
-    const pingMessage = await interaction.followUp({
-      content: customPingSentence,
-      allowedMentions: { roles: ['1219666679764877424'] } 
-    });
-
-    setTimeout(() => {
-      pingMessage.delete().catch(() => {});
-    }, 1500);
-
-    // Database Insert (Now fully supports League and explicit mode)
-    await supabase
+    const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
-        message_id: messageId,
         match_id: generatedMatchId,
-        channel_id: interaction.channelId,
+        channel_id: actualChannelId,
         guild_id: interaction.guildId,
         host_id: host.id,
         player_ids: playerIds,
@@ -447,6 +427,75 @@ module.exports = {
         league_status: isLeague ? 'open' : null,
         expected_player_keys: expectedPlayerKeys,
         discord_usernames: discordUsernames
+      })
+      .select('id')
+      .single();
+
+    const numericLobbyId = insertedMatch?.id || 'unknown';
+
+    // Tap-to-copy code blocks placed outside the embed, now with the real web URL
+    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    if (password !== 'None') {
+      copyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
+    }
+    copyableContent += `\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
+
+    // --- NEW ROUTING LOGIC: POST IN TARGET CHANNEL ---
+    let targetMessage;
+    let targetMessageId;
+
+    if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
+      // If it's a league game but they typed the command somewhere else, send it to the League channel
+      const leagueChannel = await interaction.client.channels.fetch(LEAGUE_CHANNEL_ID).catch(() => null);
+      if (leagueChannel) {
+        targetMessage = await leagueChannel.send({ content: copyableContent, embeds: [embed] });
+        targetMessageId = targetMessage.id;
+        
+        // Let the user know it was moved ephemerally
+        await interaction.reply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!`, flags: MessageFlags.Ephemeral });
+      }
+    }
+
+    if (!targetMessage) {
+      // Fallback: It's not a league game, OR they already typed it in the League channel
+      const response = await interaction.reply({
+        content: copyableContent,
+        embeds: [embed],
+        withResponse: true
       });
+      targetMessageId = response.resource?.message?.id || response.id;
+      targetMessage = response.resource?.message || await interaction.channel.messages.fetch(targetMessageId);
+    }
+
+    // Now securely link the newly generated Discord Message back to the Supabase record
+    if (insertedMatch && targetMessageId) {
+       await supabase.from('active_async_matches')
+         .update({ message_id: targetMessageId })
+         .eq('id', numericLobbyId);
+    }
+
+    try {
+      const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
+      if (customJoinEmoji) {
+        await targetMessage.react(customJoinEmoji).catch(() => {});
+      } else {
+        await targetMessage.react('⚔️').catch(() => {});
+      }
+      await targetMessage.react('🎮').catch(() => {});
+      await targetMessage.react('❌').catch(() => {});
+      await targetMessage.react('🥾').catch(() => {}); // KICK EMOJI
+      await targetMessage.react('🔔').catch(() => {});
+      await targetMessage.react('📢').catch(() => {});
+    } catch (reactErr) { console.error(reactErr); }
+
+    const pingMessage = await targetMessage.channel.send({
+      content: customPingSentence,
+      allowedMentions: { roles: ['1219666679764877424'] } 
+    });
+
+    setTimeout(() => {
+      pingMessage.delete().catch(() => {});
+    }, 1500);
+
   }
 };
