@@ -142,7 +142,7 @@ module.exports = {
     let expansionText = '';
     if (expansion === 'Ix') expansionText = ixText;
     if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
+    if (expansion === 'Ix_Immo') expansionText = `${ixText} and${immoText}`;
 
     let modeText = '';
     if (activeMode === 'Epic') modeText = epicText;
@@ -291,7 +291,7 @@ module.exports = {
     // Display sentences using mapped IGN
     const hostDisplayName = displayMap[host.id] || host.username;
     let statusSentence = `**${hostDisplayName}** <@${host.id}> is looking for players`;
-    if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with ${expansionText}`;
+    if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with${expansionText}`;
     else if (board && board !== 'Base') statusSentence += ` for ${boardText}`;
     else if (board === 'Base' && expansionText) statusSentence += ` for Base Game with ${expansionText}`;
     else if (expansionText) statusSentence += ` playing with ${expansionText}`;
@@ -301,8 +301,8 @@ module.exports = {
        statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
     }
 
-    let customPingSentence = `**${hostDisplayName}** <@${host.id}> is looking for live players ${roleMention}`;
-    if (board && board !== 'Base' && expansionText) customPingSentence += ` for ${boardText} with ${expansionText}`;
+    let customPingSentence = `**${hostDisplayName}** <@${host.id}> is looking for live players${roleMention}`;
+    if (board && board !== 'Base' && expansionText) customPingSentence += ` for ${boardText} with${expansionText}`;
     else if (board && board !== 'Base') customPingSentence += ` for ${boardText}`;
     else if (board === 'Base' && expansionText) customPingSentence += ` for Base Game with ${expansionText}`;
     else if (expansionText) customPingSentence += ` playing with ${expansionText}`;
@@ -317,7 +317,7 @@ module.exports = {
         const pk = pkMap[id];
         const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} | 🌍 ${overallElo}]`;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
       }
       return `• ${str}`;
     });
@@ -328,11 +328,16 @@ module.exports = {
         const pk = normalize(name);
         const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
         const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} | 🌍 ${overallElo}]`;
+        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
       }
       return `• ${str}`;
     });
-    const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+    
+    // SAFE FALLBACK: If roster is completely empty, supply a Zero-Width Space to satisfy Discord.js requirements.
+    let fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+    if (!fullRosterDisplay || fullRosterDisplay.trim() === '') {
+       fullRosterDisplay = '\u200B'; 
+    }
 
     // --- SEQUENTIAL HOST MATCH ID CREATION ENGINE (HostName-L#) ---
     const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
@@ -347,11 +352,12 @@ module.exports = {
 
       if (existingHostLobbies && existingHostLobbies.length > 0) {
         let maxNumber = 0;
+        // Adjusted Regex to strictly extract the numeric portion reliably
         const numberRegex = new RegExp(`^${cleanHostName}-L(\\d+)$`, 'i');
 
         existingHostLobbies.forEach((row) => {
           const match = row.match_id ? row.match_id.match(numberRegex) : null;
-          if (match) {
+          if (match && match[1]) {
             const num = parseInt(match[1], 10);
             if (!isNaN(num) && num > maxNumber) {
               maxNumber = num;
@@ -370,7 +376,7 @@ module.exports = {
     // Dynamic Title & Color for League
     const embedTitle = isLeague 
       ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
-      : `${liveDuneEmoji} New Live Match Open! [ID: ${generatedMatchId}]`;
+      : `${liveDuneEmoji} New Live Match Open! [ID:${generatedMatchId}]`;
     const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
 
     const embed = new EmbedBuilder()
