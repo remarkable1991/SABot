@@ -127,16 +127,19 @@ module.exports = {
       activeMode = null; 
     }
 
-    const expansionsStored = [];
-    if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
-    if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
-    if (activeMode === 'Epic') expansionsStored.push(`${epicEmoji} Epic Mode`.trim());
-    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') expansionsStored.push('Base Leaders');
-    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') expansionsStored.push(`${choamEmoji} CHOAM Module`.trim());
+    // Clean list for Supabase (NO EMOJIS)
+    const dbExpansions = [];
+    if (expansion === 'Ix' || expansion === 'Ix_Immo') dbExpansions.push('Rise of IX');
+    if (expansion === 'Immortality' || expansion === 'Ix_Immo') dbExpansions.push('Immortality');
+    if (activeMode === 'Epic') dbExpansions.push('Epic Mode');
+    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') dbExpansions.push('Base Leaders');
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') dbExpansions.push('CHOAM Module');
 
-    let boardDisplay = board || 'Not Specified';
+    const dbBoardType = board === 'Uprising' ? 'Uprising' : 'Base Game';
+
+    // Rich display versions for Discord Embeds
+    let boardDisplay = 'Base Game';
     if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
-    if (board === 'Base') boardDisplay = 'Base Game';
 
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
@@ -424,6 +427,7 @@ module.exports = {
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
+    // Insert to DB using clean strings (no emojis) and the actual message ID
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
@@ -437,8 +441,8 @@ module.exports = {
         guest_players: guestPlayers,
         message_text: notes,
         lobby_password: password !== 'None' ? password : null,
-        board_type: boardDisplay,
-        expansions: expansionsStored,
+        board_type: dbBoardType,
+        expansions: dbExpansions,
         status: 'searching',
         expires_at: expiresAtISO,
         mode: 'live',
