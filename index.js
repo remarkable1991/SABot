@@ -162,9 +162,11 @@ const pendingGames = new Set();
 const pendingScanRefresh = new Set();
 const scheduleDebounceTimers = new Map();
 const activeStartLocks = new Set();
-const activeGameLocks = new Set(); // <-- ADD THIS
-const activeSpLocks = new Set();   // <-- ADD THIS
+const activeGameLocks = new Set(); // ADDED: prevents duplicate game announcements
+const activeSpLocks = new Set();   // ADDED: prevents duplicate SP event announcements
 let realtimeRetryCount = 0;
+let realtimeChannel = null;
+let reconnectTimer = null;
 
 let cachedSeasonId = 2;
 let lastSeasonCheck = 0;
@@ -565,7 +567,7 @@ async function buildEmbed(payload, guild) {
 }
 
 async function announceGame(gameId) {
-  // ATOMIC LOCK
+  // ATOMIC LOCK: Prevent duplicate game posts
   if (activeGameLocks.has(gameId)) return;
   activeGameLocks.add(gameId);
 
@@ -599,9 +601,10 @@ async function announceGame(gameId) {
   } catch (err) {
     console.error('Error in announceGame:', err);
   } finally {
-    setTimeout(() => activeGameLocks.delete(gameId), 30000); // clear lock after 30s
+    setTimeout(() => activeGameLocks.delete(gameId), 30000);
   }
 }
+
 function scheduleAnnouncement(gameId) {
   if (pendingGames.has(gameId)) return;
   pendingGames.add(gameId);
@@ -615,7 +618,7 @@ function scheduleAnnouncement(gameId) {
 // SP EVENT ANNOUNCEMENT HANDLER
 // -------------------------------------------------------------
 async function announceSpEvent(eventId) {
-  // ATOMIC LOCK
+  // ATOMIC LOCK: Prevent duplicate SP posts
   if (activeSpLocks.has(eventId)) return;
   activeSpLocks.add(eventId);
 
@@ -674,6 +677,7 @@ async function announceSpEvent(eventId) {
     setTimeout(() => activeSpLocks.delete(eventId), 30000);
   }
 }
+
 // -------------------------------------------------------------
 // 🌐 WEB LOBBIES / QUICK CHAT / ROSTER RENDERING HANDLERS
 // -------------------------------------------------------------
@@ -1246,7 +1250,7 @@ function startRealtimeListener() {
           JSON.stringify(oldRecord.expansions) !== JSON.stringify(newRecord.expansions) ||
           oldRecord.lobby_password !== newRecord.lobby_password ||
           oldRecord.message_text !== newRecord.message_text ||
-          oldRecord.status !== newRecord.status
+          oldRecord.status !== newRecord.status // Embed re-renders when kicked from started to searching
         ) {
           await syncLobbyEmbed(newRecord);
         }
@@ -1413,12 +1417,12 @@ function startGlobalDatabaseListener() {
             
             if (threeVoterSlots.length > 0) {
               breakdownLines.push('**🔥 Closest Options (3/4 Players Agreed):**');
-              for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
+              for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label}${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
               breakdownLines.push('');
             }
             if (twoVoterSlots.length > 0) {
               breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
-              for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')})`);
+              for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed:${s.backers.map(id => `<@${id}>`).join(', ')})`);
               breakdownLines.push('');
             }
             if (threeVoterSlots.length === 0 && twoVoterSlots.length === 0) {
@@ -1439,7 +1443,6 @@ function startGlobalDatabaseListener() {
           }
         }
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
-
 
         if (!newRecord) return;
         if (table === 'player_sp' && eventType === 'UPDATE' && newRecord.is_claimed === true) {
@@ -2034,31 +2037,6 @@ discordClient.on('messageCreate', async (message) => {
   } catch (err) {}
 });
 
-// Update directory immediately when a user changes their server nickname or username
-discordClient.on('guildMemberUpdate', async (oldMember, newMember) => {
-  try {
-    if (newMember.user.bot) return;
-    const username = newMember.user.username;
-    const displayName = newMember.nickname || newMember.displayName || username;
-
-    await supabase.from('discord_guild_members').upsert({
-      discord_user_id: newMember.id,
-      discord_username: username,
-      global_name: newMember.user.globalName || null,
-      display_name: displayName,
-      updated_at: new Date().toISOString()
-    }, { onConflict: 'discord_user_id' });
-  } catch (e) {}
-});
-
-// Clean up directory entry when someone leaves the server
-discordClient.on('guildMemberRemove', async (member) => {
-  try {
-    if (member.user.bot) return;
-    await supabase.from('discord_guild_members').delete().eq('discord_user_id', member.id);
-  } catch (e) {}
-});
-
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
@@ -2267,9 +2245,6 @@ discordClient.once('clientReady', async () => {
   startRealtimeListener();
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
-
-  // Populate & update the secondary guild directory table cleanly on boot
-  await syncGuildDirectory();
 
   try {
     const { data: unannouncedSp } = await supabase.from('sp_events')
