@@ -2679,7 +2679,21 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (!lobby || lobby.status !== 'searching') return;
 
-    const isJoinEmoji = emojiName === 'AsyncDune' || emojiName === 'LiveDune' || emojiName === '🎲' || emojiName === '⚔️' || reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune');
+    // --- In messageReactionRemove ---
+const emojiName = reaction.emoji.name;
+const emojiId = reaction.emoji.id;
+const emojiStr = reaction.emoji.toString();
+
+const isJoinEmoji = 
+  emojiName === 'AsyncDune' || 
+  emojiName === 'LiveDune' || 
+  emojiId === '1232049130151346216' || 
+  emojiId === '1232048177390289097' || 
+  emojiName === '🎲' || 
+  emojiName === '⚔️' || 
+  emojiStr.includes('AsyncDune') || 
+  emojiStr.includes('LiveDune');
+    
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
     let shouldUpdate = false;
