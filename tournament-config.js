@@ -9,11 +9,11 @@
 // /tournament and /checkin both degrade gracefully (skip what's missing) if they're null.
 
 const TOURNAMENTS_CONFIG = {
-  19: {
-    registeredRoleId: '1551614208280494170', // TODO: T19's Registered role ID wasn't provided yet
-    checkInRoleId: '1551614087098667180',
-    checkInStartTimestamp: 1791115200,   // Oct 4, 2026 10:00 CEST
-    tournamentStartTimestamp: 1791115200 // Oct 5, 2026 10:00 CEST
+  20: {
+    registeredRoleId: '1558089230209646712', // TODO: T19's Registered role ID wasn't provided yet
+    checkInRoleId: '1558089377094303794',
+    checkInStartTimestamp: 1792764000,   // Oct 4, 2026 10:00 CEST
+    tournamentStartTimestamp: 1792850400 // Oct 5, 2026 10:00 CEST
   }
 };
 
