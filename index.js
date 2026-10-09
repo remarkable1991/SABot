@@ -2490,12 +2490,25 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
     if (!lobby || lobby.status !== 'searching') return;
 
-    const isJoinEmoji = emojiName === 'AsyncDune' || emojiName === 'LiveDune' || emojiName === '🎲' || emojiName === '⚔️' || reaction.emoji.toString().includes('AsyncDune') || reaction.emoji.toString().includes('LiveDune');
+    // --- In messageReactionAdd ---
+const emojiName = reaction.emoji.name;
+const emojiId = reaction.emoji.id;
+const emojiStr = reaction.emoji.toString();
+
+const isJoinEmoji = 
+  emojiName === 'AsyncDune' || 
+  emojiName === 'LiveDune' || 
+  emojiId === '1232049130151346216' || // Live emoji ID
+  emojiId === '1232048177390289097' || // Async emoji ID
+  emojiName === '🎲' || 
+  emojiName === '⚔️' || 
+  emojiStr.includes('AsyncDune') || 
+  emojiStr.includes('LiveDune');
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
     let shouldUpdate = false;
 
-    if (isJoinEmoji) {
+    if (Emoji) {
       if (!players.includes(user.id)) {
         if (players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) < 4) {
           players.push(user.id);
