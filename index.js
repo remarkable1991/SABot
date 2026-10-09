@@ -162,9 +162,9 @@ const pendingGames = new Set();
 const pendingScanRefresh = new Set();
 const scheduleDebounceTimers = new Map();
 const activeStartLocks = new Set();
+const activeGameLocks = new Set(); // <-- ADD THIS
+const activeSpLocks = new Set();   // <-- ADD THIS
 let realtimeRetryCount = 0;
-let realtimeChannel = null;
-let reconnectTimer = null;
 
 let cachedSeasonId = 2;
 let lastSeasonCheck = 0;
@@ -565,32 +565,43 @@ async function buildEmbed(payload, guild) {
 }
 
 async function announceGame(gameId) {
-  const { data: checkGame } = await supabase.from('games').select('announced_to_discord').eq('id', gameId).single();
-  if (checkGame && checkGame.announced_to_discord) return;
+  // ATOMIC LOCK
+  if (activeGameLocks.has(gameId)) return;
+  activeGameLocks.add(gameId);
 
-  const payload = await buildGameResultPayload(gameId); 
-  if (!payload) return;
+  try {
+    const { data: checkGame } = await supabase.from('games').select('announced_to_discord').eq('id', gameId).single();
+    if (checkGame && checkGame.announced_to_discord) return;
 
-  const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); 
-  if (!channel) return; 
+    // UPDATE DB IMMEDIATELY TO PREVENT RACE CONDITIONS
+    await supabase.from('games').update({ announced_to_discord: true }).eq('id', gameId);
 
-  const built = await buildEmbed(payload, channel.guild); 
-  const messagePayload = { embeds: [built.embed] };
+    const payload = await buildGameResultPayload(gameId); 
+    if (!payload) return;
 
-  if (built.screenshotMedia?.attachment) messagePayload.files = [built.screenshotMedia.attachment]; 
-  else if (built.screenshotMedia?.tooLarge) messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; 
+    const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); 
+    if (!channel) return; 
 
-  await channel.send(messagePayload);
-  await supabase.from('games').update({ announced_to_discord: true }).eq('id', gameId);
+    const built = await buildEmbed(payload, channel.guild); 
+    const messagePayload = { embeds: [built.embed] };
 
-  if (payload.game?.tournament_num && payload.tournamentDetails) {
-    try {
-      await supabase.from('tournament_match_schedules').update({ status: 'played', updated_at: new Date().toISOString() })
-        .eq('tournament_num', payload.game.tournament_num).eq('round_type', payload.tournamentDetails.roundType).eq('table_identifier', payload.tournamentDetails.tableIdentifier);
-    } catch (schedErr) {}
+    if (built.screenshotMedia?.attachment) messagePayload.files = [built.screenshotMedia.attachment]; 
+    else if (built.screenshotMedia?.tooLarge) messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; 
+
+    await channel.send(messagePayload);
+
+    if (payload.game?.tournament_num && payload.tournamentDetails) {
+      try {
+        await supabase.from('tournament_match_schedules').update({ status: 'played', updated_at: new Date().toISOString() })
+          .eq('tournament_num', payload.game.tournament_num).eq('round_type', payload.tournamentDetails.roundType).eq('table_identifier', payload.tournamentDetails.tableIdentifier);
+      } catch (schedErr) {}
+    }
+  } catch (err) {
+    console.error('Error in announceGame:', err);
+  } finally {
+    setTimeout(() => activeGameLocks.delete(gameId), 30000); // clear lock after 30s
   }
 }
-
 function scheduleAnnouncement(gameId) {
   if (pendingGames.has(gameId)) return;
   pendingGames.add(gameId);
@@ -604,13 +615,19 @@ function scheduleAnnouncement(gameId) {
 // SP EVENT ANNOUNCEMENT HANDLER
 // -------------------------------------------------------------
 async function announceSpEvent(eventId) {
+  // ATOMIC LOCK
+  if (activeSpLocks.has(eventId)) return;
+  activeSpLocks.add(eventId);
+
   try {
     const { data: event, error } = await supabase.from('sp_events').select('*').eq('id', eventId).single();
     if (error || !event || event.announced_to_discord) return;
 
+    // UPDATE DB IMMEDIATELY TO PREVENT DUPLICATE PINGS
+    await supabase.from('sp_events').update({ announced_to_discord: true }).eq('id', eventId);
+
     const { data: mapRecord } = await supabase.from('player_discord_map').select('discord_user_id, sp_alerts_opt_out').eq('player_key', event.player_key).limit(1).maybeSingle();
     if (!mapRecord || !mapRecord.discord_user_id) {
-      await supabase.from('sp_events').update({ announced_to_discord: true }).eq('id', eventId);
       return;
     }
 
@@ -651,13 +668,12 @@ async function announceSpEvent(eventId) {
         
       await notificationChannel.send({ embeds: [alertEmbed], components: components.length > 0 ? components : undefined });
     }
-    
-    await supabase.from('sp_events').update({ announced_to_discord: true }).eq('id', eventId);
   } catch (err) {
     console.error('Error announcing SP event:', err);
+  } finally {
+    setTimeout(() => activeSpLocks.delete(eventId), 30000);
   }
 }
-
 // -------------------------------------------------------------
 // 🌐 WEB LOBBIES / QUICK CHAT / ROSTER RENDERING HANDLERS
 // -------------------------------------------------------------
@@ -1424,9 +1440,6 @@ function startGlobalDatabaseListener() {
         }
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
 
-        if (table === 'sp_events' && eventType === 'INSERT' && newRecord?.id) {
-          setTimeout(() => announceSpEvent(newRecord.id), 1500);
-        }
 
         if (!newRecord) return;
         if (table === 'player_sp' && eventType === 'UPDATE' && newRecord.is_claimed === true) {
