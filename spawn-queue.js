@@ -7,9 +7,17 @@ module.exports = {
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   async execute(interaction) {
+    if (interaction.channelId !== '1558128709523996763') {
+      return interaction.reply({ content: '❌ This command can only be run in the dedicated queue channel (<#1558128709523996763>).', flags: MessageFlags.Ephemeral });
+    }
+
     const embed = new EmbedBuilder()
-      .setTitle('⚔️ Automated League Matchmaking')
-      .setDescription('Click a button below to join the matchmaking queue.\n\nWhen a queue reaches **4/4 players**, a lobby will automatically generate in the League channel using the current active Seasonal Preset!\n\nYou can also click the SA button to instantly pull waiting players into your own custom lobby.')
+      .setTitle('⚔️ Automated League Matchmaking Queue')
+      .setDescription(
+        'Select a mode below to enter the queue.\n\n' +
+        '• When a queue reaches **4/4**, an official League match will automatically generate using the active season format!\n' +
+        '• Click **Host Custom** to instantly start a match and pull any players currently waiting.'
+      )
       .setColor(0xF1C40F)
       .addFields(
         { name: '🔴 Live Queue (0/4)', value: '*Queue is empty*', inline: true },
@@ -23,6 +31,6 @@ module.exports = {
     );
 
     await interaction.channel.send({ embeds: [embed], components: [row] });
-    await interaction.reply({ content: 'Queue message generated successfully.', flags: MessageFlags.Ephemeral });
+    await interaction.reply({ content: '✅ Queue message created successfully.', flags: MessageFlags.Ephemeral });
   }
 };
