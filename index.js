@@ -23,7 +23,7 @@ const spCommand = require('./sp');
 const confirmCommand = require('./confirm');
 const tournamentStatusCommand = require('./tournament-status');
 const checkinCommand = require('./checkin');
-const spawnQueueCommand = require('./spawn-queue'); // Added spawn-queue
+const spawnQueueCommand = require('./spawn-queue');
 const { TOURNAMENTS_CONFIG } = require('./tournament-config');
 const fetch = (...args) => import('node-fetch').then(({ default: fetch }) => fetch(...args));
 const sharp = require('sharp');
@@ -436,15 +436,21 @@ async function resolveMentionForName(guild, playerName) {
 
     if (bestDir && bestScore >= DB_MATCH_THRESHOLD) {
       const targetKey = bestDir.suggested_player_key || norm;
-      await supabase.from('player_discord_map').upsert({
+      
+      // Fixed: Removed trailing .catch() which triggers TypeError on PostgREST builder
+      const { error: upsertErr } = await supabase.from('player_discord_map').upsert({
         discord_user_id: bestDir.discord_user_id,
         discord_username: bestDir.discord_username,
         display_name: bestDir.display_name,
         player_key: targetKey,
         updated_at: new Date().toISOString()
-      }, { onConflict: 'discord_user_id' }).catch(() => {});
+      }, { onConflict: 'discord_user_id' });
 
-      await supabase.from('discord_guild_members').update({ has_verified_map: true }).eq('discord_user_id', bestDir.discord_user_id).catch(() => {});
+      if (upsertErr) {
+        console.error('Error auto-mapping player_discord_map in resolveMentionForName:', upsertErr);
+      }
+
+      await supabase.from('discord_guild_members').update({ has_verified_map: true }).eq('discord_user_id', bestDir.discord_user_id);
       return userMention(bestDir.discord_user_id);
     }
   }
@@ -462,6 +468,47 @@ async function resolveMentionForName(guild, playerName) {
 // -------------------------------------------------------------
 // ⚔️ AUTOMATED MATCHMAKING QUEUE (AUTO-POPPER ENGINE)
 // -------------------------------------------------------------
+
+async function resolveQueuePlayerIdentity(discordUserId, member) {
+  // Step 1: Check verified player_discord_map
+  const { data: mapRecord } = await supabase
+    .from('player_discord_map')
+    .select('player_key, display_name, claimed_by')
+    .eq('discord_user_id', discordUserId)
+    .maybeSingle();
+
+  if (mapRecord && mapRecord.player_key) {
+    return {
+      userId: mapRecord.claimed_by || null,
+      playerKey: mapRecord.player_key,
+      displayName: mapRecord.display_name || capitalize(mapRecord.player_key)
+    };
+  }
+
+  // Step 2: Fallback to discord_guild_members directory
+  const { data: dirRecord } = await supabase
+    .from('discord_guild_members')
+    .select('suggested_player_key, display_name, discord_username')
+    .eq('discord_user_id', discordUserId)
+    .maybeSingle();
+
+  if (dirRecord?.suggested_player_key) {
+    return {
+      userId: null,
+      playerKey: dirRecord.suggested_player_key,
+      displayName: dirRecord.display_name || dirRecord.discord_username || capitalize(dirRecord.suggested_player_key)
+    };
+  }
+
+  // Step 3: Default fallback to Discord member info
+  const fallbackName = member?.nickname || member?.displayName || member?.user?.username || 'Player';
+  return {
+    userId: null,
+    playerKey: normalizeName(fallbackName),
+    displayName: fallbackName
+  };
+}
+
 async function updateQueueMessage() {
   if (queueUpdateDebounce) clearTimeout(queueUpdateDebounce);
   
@@ -473,7 +520,6 @@ async function updateQueueMessage() {
       const messages = await channel.messages.fetch({ limit: 10 }).catch(() => null);
       if (!messages) return;
       
-      // Target the queue message by embed title
       const targetMsg = messages.find(m => 
         m.author.id === discordClient.user.id && 
         m.embeds[0] && 
@@ -502,15 +548,24 @@ async function updateQueueMessage() {
       const liveQueue = (queueRecords || []).filter(r => r.mode === 'live');
       const asyncQueue = (queueRecords || []).filter(r => r.mode === 'async');
 
-      let liveText = liveQueue.length > 0 ? liveQueue.map(r => {
-        const expireStr = r.expires_at ? ` *(expires <t:${Math.floor(new Date(r.expires_at).getTime() / 1000)}:R>)*` : '';
-        return `<@${r.discord_user_id}>${expireStr}`;
-      }).join('\n') : '*Queue is empty*';
+      function formatQueuePlayerEntry(r) {
+        let tag = '';
+        if (r.player_key && r.display_name) {
+          tag = `[${r.display_name}](https://dunestats.cc/players/${encodeURIComponent(r.display_name)})`;
+          if (r.discord_user_id) tag += ` <@${r.discord_user_id}>`;
+          else tag += ` 🌐`;
+        } else if (r.discord_user_id) {
+          tag = `<@${r.discord_user_id}>`;
+        } else {
+          tag = `**${r.display_name || 'Web Player'}** 🌐`;
+        }
 
-      let asyncText = asyncQueue.length > 0 ? asyncQueue.map(r => {
         const expireStr = r.expires_at ? ` *(expires <t:${Math.floor(new Date(r.expires_at).getTime() / 1000)}:R>)*` : '';
-        return `<@${r.discord_user_id}>${expireStr}`;
-      }).join('\n') : '*Queue is empty*';
+        return `• ${tag}${expireStr}`;
+      }
+
+      let liveText = liveQueue.length > 0 ? liveQueue.map(formatQueuePlayerEntry).join('\n') : '*Queue is empty*';
+      let asyncText = asyncQueue.length > 0 ? asyncQueue.map(formatQueuePlayerEntry).join('\n') : '*Queue is empty*';
 
       const updatedEmbed = new EmbedBuilder()
         .setTitle('⚔️ Automated League Matchmaking Queue')
@@ -712,10 +767,11 @@ async function triggerAutoPop(mode) {
     const { data: queueRecords } = await supabase.from('matchmaking_queue').select('*').eq('mode', mode).order('joined_at', { ascending: true }).limit(4);
     if (!queueRecords || queueRecords.length < 4) return;
 
-    const playersToPop = queueRecords.map(r => r.discord_user_id);
+    const playersToPop = queueRecords.map(r => r.discord_user_id).filter(Boolean);
     
-    for (const pid of playersToPop) {
-      await supabase.from('matchmaking_queue').delete().eq('discord_user_id', pid);
+    // Clear popped players
+    for (const r of queueRecords) {
+      await supabase.from('matchmaking_queue').delete().eq('id', r.id);
     }
 
     await createQueueLobby(null, playersToPop, mode, true);
@@ -730,7 +786,7 @@ async function triggerAutoPop(mode) {
 async function cleanExpiredQueueEntries() {
   try {
     const nowIso = new Date().toISOString();
-    const { data: expired } = await supabase.from('matchmaking_queue').select('discord_user_id').lte('expires_at', nowIso);
+    const { data: expired } = await supabase.from('matchmaking_queue').select('id').lte('expires_at', nowIso);
     if (expired && expired.length > 0) {
       await supabase.from('matchmaking_queue').delete().lte('expires_at', nowIso);
       updateQueueMessage();
@@ -1546,7 +1602,7 @@ function startRealtimeListener() {
           JSON.stringify(oldRecord.expansions) !== JSON.stringify(newRecord.expansions) ||
           oldRecord.lobby_password !== newRecord.lobby_password ||
           oldRecord.message_text !== newRecord.message_text ||
-          oldRecord.status !== newRecord.status // Embed re-renders when kicked from started to searching
+          oldRecord.status !== newRecord.status
         ) {
           await syncLobbyEmbed(newRecord);
         }
@@ -1885,10 +1941,10 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
     });
     
     if (insertErr) {
-      console.error(`[awardSP] Failed to insert ${actionType} for${playerKey}:`, insertErr);
+      console.error(`[awardSP] Failed to insert ${actionType} for ${playerKey}:`, insertErr);
       return; 
     }
-    console.log(`[awardSP] Successfully awarded ${amount} SP (${actionType}) to ${playerKey} (Season${currentSeasonId})`);
+    console.log(`[awardSP] Successfully awarded ${amount} SP (${actionType}) to ${playerKey} (Season ${currentSeasonId})`);
 
     const { data: currentSp } = await supabase.from('player_sp').select('lifetime_sp, seasonal_sp').eq('player_key', playerKey).maybeSingle();
     if (currentSp) {
@@ -2318,19 +2374,25 @@ discordClient.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: '⏳ How many hours are you available for an **Async** match?', components: [row], flags: MessageFlags.Ephemeral });
     }
 
-    // 2. Process Queue Entry with Expiration
+    // 2. Process Queue Entry with Expiration & Dual-Identity
     if (customId.startsWith('queue_join_live_') || customId.startsWith('queue_join_async_')) {
       const isLive = customId.startsWith('queue_join_live_');
       const mode = isLive ? 'live' : 'async';
       const durationValue = parseInt(customId.replace(isLive ? 'queue_join_live_' : 'queue_join_async_', ''), 10);
       const expiryDate = new Date(Date.now() + (isLive ? durationValue * 60 * 1000 : durationValue * 60 * 60 * 1000));
 
+      const identity = await resolveQueuePlayerIdentity(interaction.user.id, interaction.member);
+
       const { error: insErr } = await supabase.from('matchmaking_queue').upsert({
         discord_user_id: interaction.user.id,
+        user_id: identity.userId,
+        player_key: identity.playerKey,
+        display_name: identity.displayName,
         mode: mode,
+        duration_minutes: isLive ? durationValue : durationValue * 60,
         expires_at: expiryDate.toISOString(),
         joined_at: new Date().toISOString()
-      }, { onConflict: 'discord_user_id' });
+      }, { onConflict: 'discord_user_id,mode' });
 
       if (insErr) {
         console.error('Queue join error:', insErr);
@@ -2338,7 +2400,7 @@ discordClient.on('interactionCreate', async (interaction) => {
       }
 
       await interaction.reply({ 
-        content: `✅ You joined the **${mode}** queue for **${durationValue} ${isLive ? 'minutes' : 'hours'}** (active until <t:${Math.floor(expiryDate.getTime() / 1000)}:t>).`, 
+        content: `✅ You joined the **${mode}** queue as **${identity.displayName}** for **${durationValue} ${isLive ? 'minutes' : 'hours'}** (active until <t:${Math.floor(expiryDate.getTime() / 1000)}:t>).`, 
         flags: MessageFlags.Ephemeral 
       });
 
@@ -2348,8 +2410,8 @@ discordClient.on('interactionCreate', async (interaction) => {
 
     // 3. Explicit Leave Queue Button
     if (customId === 'queue_leave') {
-      const { data: existing } = await supabase.from('matchmaking_queue').select('*').eq('discord_user_id', interaction.user.id).maybeSingle();
-      if (!existing) {
+      const { data: existing } = await supabase.from('matchmaking_queue').select('*').eq('discord_user_id', interaction.user.id);
+      if (!existing || existing.length === 0) {
         return interaction.reply({ content: 'ℹ️ You are not currently in the matchmaking queue.', flags: MessageFlags.Ephemeral });
       }
 
@@ -2374,7 +2436,7 @@ discordClient.on('interactionCreate', async (interaction) => {
       await interaction.deferReply({ flags: MessageFlags.Ephemeral });
       
       const { data: queueRecords } = await supabase.from('matchmaking_queue').select('*').eq('mode', mode).order('joined_at', { ascending: true }).limit(3);
-      const playersToPop = (queueRecords || []).map(r => r.discord_user_id);
+      const playersToPop = (queueRecords || []).map(r => r.discord_user_id).filter(Boolean);
       
       const allToClear = [interaction.user.id, ...playersToPop];
       for (const pid of allToClear) {
