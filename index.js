@@ -2542,27 +2542,44 @@ discordClient.on('guildMemberRemove', async (member) => {
 discordClient.on('messageReactionAdd', async (reaction, user) => {
   try {
     if (user.bot) return;
-    if (reaction.partial) { try { await reaction.fetch(); } catch (err) { return; } }
+
+    // 1. Fetch partials thoroughly
+    if (reaction.partial) {
+      try {
+        await reaction.fetch();
+      } catch (err) {
+        console.error('Failed to fetch reaction partial:', err);
+        return;
+      }
+    }
+
     const message = reaction.message;
-    const emojiName = reaction.emoji.name;
-    const emojiId = reaction.emoji.id;
-    const emojiStr = reaction.emoji.toString();
+    const emojiObj = reaction.emoji;
+    const emojiName = emojiObj.name || '';
+    const emojiId = emojiObj.id || '';
+    const emojiStr = emojiObj.toString();
 
     await handleTournamentVotingReaction(message, user, emojiName, true);
     await handleTournamentCheckinReaction(message, user, emojiName);
 
-    const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).single();
+    const { data: lobby } = await supabase
+      .from('active_async_matches')
+      .select('*')
+      .eq('message_id', message.id)
+      .single();
+
     if (!lobby || lobby.status !== 'searching') return;
 
+    // 2. Comprehensive check covering server custom emoji name, ID, string format, and Unicode fallbacks
     const isJoinEmoji = 
-      emojiName === 'AsyncDune' || 
-      emojiName === 'LiveDune' || 
-      emojiId === '1232049130151346216' || 
-      emojiId === '1232048177390289097' || 
-      emojiName === '🎲' || 
-      emojiName === '⚔️' || 
-      emojiStr.includes('AsyncDune') || 
-      emojiStr.includes('LiveDune');
+      emojiId === '1232049130151346216' || // LiveDune ID
+      emojiId === '1232048177390289097' || // AsyncDune ID
+      emojiName.toLowerCase() === 'livedune' ||
+      emojiName.toLowerCase() === 'asyncdune' ||
+      emojiStr.includes('1232049130151346216') ||
+      emojiStr.includes('1232048177390289097') ||
+      emojiName === '⚔️' ||
+      emojiName === '🎲';
 
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
@@ -2570,16 +2587,20 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     if (isJoinEmoji) {
       if (!players.includes(user.id)) {
-        if (players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) < 4) {
+        const totalRoster = players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
+        if (totalRoster < 4) {
           players.push(user.id);
           shouldUpdate = true;
           
-          // REMOVE PLAYER FROM MATCHMAKING QUEUE IF THEY JOIN MANUALLY
+          // Remove from queue table if they were waiting
           await supabase.from('matchmaking_queue').delete().eq('discord_user_id', user.id).catch(() => {});
           updateQueueMessage();
 
-          if (notifications.length > 0) await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+          if (notifications.length > 0) {
+            await message.channel.send({ content: `🔔 ${notifications.map(id => `<@${id}>`).join(' ')}, **${user.username}** joined the lobby!` }).catch(() => {});
+          }
         } else {
+          // Lobby full: reject reaction
           await reaction.users.remove(user.id).catch(() => {});
         }
       }
@@ -2732,9 +2753,10 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     if (user.bot) return;
     if (reaction.partial) { try { await reaction.fetch(); } catch (err) { return; } }
     const message = reaction.message;
-    const emojiName = reaction.emoji.name;
-    const emojiId = reaction.emoji.id;
-    const emojiStr = reaction.emoji.toString();
+    const emojiObj = reaction.emoji;
+    const emojiName = emojiObj.name || '';
+    const emojiId = emojiObj.id || '';
+    const emojiStr = emojiObj.toString();
 
     await handleTournamentVotingReaction(message, user, emojiName, false);
 
@@ -2742,14 +2764,14 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     if (!lobby || lobby.status !== 'searching') return;
 
     const isJoinEmoji = 
-      emojiName === 'AsyncDune' || 
-      emojiName === 'LiveDune' || 
-      emojiId === '1232049130151346216' || 
-      emojiId === '1232048177390289097' || 
+      emojiId === '1232049130151346216' ||
+      emojiId === '1232048177390289097' ||
+      emojiName.toLowerCase() === 'livedune' ||
+      emojiName.toLowerCase() === 'asyncdune' ||
+      emojiStr.includes('1232049130151346216') ||
+      emojiStr.includes('1232048177390289097') ||
       emojiName === '🎲' || 
-      emojiName === '⚔️' || 
-      emojiStr.includes('AsyncDune') || 
-      emojiStr.includes('LiveDune');
+      emojiName === '⚔️';
     
     let players = [...(lobby.player_ids || [])];
     let notifications = [...(lobby.notify_user_ids || [])];
