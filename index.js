@@ -437,7 +437,6 @@ async function resolveMentionForName(guild, playerName) {
     if (bestDir && bestScore >= DB_MATCH_THRESHOLD) {
       const targetKey = bestDir.suggested_player_key || norm;
       
-      // Fixed: Removed trailing .catch() which triggers TypeError on PostgREST builder
       const { error: upsertErr } = await supabase.from('player_discord_map').upsert({
         discord_user_id: bestDir.discord_user_id,
         discord_username: bestDir.discord_username,
@@ -470,7 +469,6 @@ async function resolveMentionForName(guild, playerName) {
 // -------------------------------------------------------------
 
 async function resolveQueuePlayerIdentity(discordUserId, member) {
-  // Step 1: Check verified player_discord_map
   const { data: mapRecord } = await supabase
     .from('player_discord_map')
     .select('player_key, display_name, claimed_by')
@@ -485,7 +483,6 @@ async function resolveQueuePlayerIdentity(discordUserId, member) {
     };
   }
 
-  // Step 2: Fallback to discord_guild_members directory
   const { data: dirRecord } = await supabase
     .from('discord_guild_members')
     .select('suggested_player_key, display_name, discord_username')
@@ -500,7 +497,6 @@ async function resolveQueuePlayerIdentity(discordUserId, member) {
     };
   }
 
-  // Step 3: Default fallback to Discord member info
   const fallbackName = member?.nickname || member?.displayName || member?.user?.username || 'Player';
   return {
     userId: null,
@@ -1363,18 +1359,34 @@ async function syncLobbyEmbed(lobby) {
   await msg.edit({ embeds: [embed] }).catch(err => console.error('Failed to sync embed roster via Web update:', err));
 }
 
+// -------------------------------------------------------------
+// 🌐 WEB LOBBY CREATION HANDLER WITH ATOMIC LOCK & RE-FETCH
+// -------------------------------------------------------------
 async function handleWebLobbyCreation(lobby) {
   try {
+    // 1. Claim row atomically so concurrent workers/loops do not double post
+    const { data: claimed } = await supabase
+      .from('active_async_matches')
+      .update({ status: 'posting' })
+      .eq('id', lobby.id)
+      .eq('status', 'pending_creation')
+      .select('id');
+
+    if (!claimed || claimed.length === 0) return;
+
     const isLive = lobby.mode === 'live';
     const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
     
     let channelId = isLive ? WEB_LFG_LIVE_CHANNEL : WEB_LFG_ASYNC_CHANNEL;
     if (isLeague) {
-      channelId = '1557473551227818024';
+      channelId = LEAGUE_LFG_CHANNEL_ID;
     }
 
     const channel = await discordClient.channels.fetch(channelId).catch(() => null);
-    if (!channel) return console.error('LFG channel not found for Web Lobby Creation.');
+    if (!channel) {
+      await supabase.from('active_async_matches').update({ status: 'pending_creation' }).eq('id', lobby.id);
+      return console.error('LFG channel not found for Web Lobby Creation.');
+    }
 
     let hostName = 'Web Player';
     let discordMention = '';
@@ -1387,28 +1399,35 @@ async function handleWebLobbyCreation(lobby) {
       }
     }
 
+    // 2. Format game ID
     let generatedMatchId = lobby.match_id;
-    if (!generatedMatchId) {
-      const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
-      const prefixPattern = `${cleanHostName}-${isLive ? 'L' : 'A'}`;
-      generatedMatchId = `${prefixPattern}1`;
+    if (!generatedMatchId || generatedMatchId.startsWith('pending-web-')) {
+      if (isLeague) {
+        generatedMatchId = `sa${lobby.id}`;
+      } else {
+        const cleanHostName = hostName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+        const prefixPattern = `${cleanHostName}-${isLive ? 'L' : 'A'}`;
+        generatedMatchId = `${prefixPattern}1`;
 
-      const { data: existingHostLobbies } = await supabase.from('active_async_matches').select('match_id').ilike('match_id', `${prefixPattern}%`);
-      if (existingHostLobbies && existingHostLobbies.length > 0) {
-        let maxNumber = 0;
-        const numberRegex = new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i');
-        existingHostLobbies.forEach((row) => {
-          const match = row.match_id ? row.match_id.match(numberRegex) : null;
-          if (match && match[1]) {
-            const num = parseInt(match[1], 10);
-            if (!isNaN(num) && num > maxNumber) {
-              maxNumber = num;
+        const { data: existingHostLobbies } = await supabase.from('active_async_matches').select('match_id').ilike('match_id', `${prefixPattern}%`);
+        if (existingHostLobbies && existingHostLobbies.length > 0) {
+          let maxNumber = 0;
+          const numberRegex = new RegExp(`^${cleanHostName}-[LA](\\d+)$`, 'i');
+          existingHostLobbies.forEach((row) => {
+            const match = row.match_id ? row.match_id.match(numberRegex) : null;
+            if (match && match[1]) {
+              const num = parseInt(match[1], 10);
+              if (!isNaN(num) && num > maxNumber) maxNumber = num;
             }
-          }
-        });
-        generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
+          });
+          generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
+        }
       }
     }
+
+    // 3. Reload fresh row so any password or players saved by the website right after creation are included
+    const { data: fresh } = await supabase.from('active_async_matches').select('*').eq('id', lobby.id).single();
+    if (fresh) lobby = fresh;
 
     const emojiTarget = isLive ? '⚔️' : '🎲';
     const embedColor = isLeague ? 0xF1C40F : (isLive ? 0xe74c3c : 0xC9A24B);
@@ -1433,9 +1452,8 @@ async function handleWebLobbyCreation(lobby) {
     let embedTitle = hostName !== 'Web Player' ? `${emojiTarget} ${hostName}'s Game [ID:${generatedMatchId}]` : `${emojiTarget} New Match Open! [ID:${generatedMatchId}]`;
     if (isLeague) embedTitle = `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`;
 
-    const tempLobby = { ...lobby, web_player_names: [hostName], web_player_ids: [lobby.web_host_id] };
-    const { display: rosterStr } = await buildRosterDisplay(tempLobby);
-    
+    // 4. Build roster without wiping seated queue players
+    const { display: rosterStr, count } = await buildRosterDisplay(lobby);
     const msgText = lobby.message_text ? lobby.message_text : 'Looking for players via the Website!';
 
     const embed = new EmbedBuilder()
@@ -1445,7 +1463,7 @@ async function handleWebLobbyCreation(lobby) {
       .addFields(
         { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime() / 1000)}:R>.*`, inline: false },
         { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-        { name: `👥 Players (1/4)`, value: rosterStr, inline: false },
+        { name: `👥 Players (${count}/4)`, value: rosterStr, inline: false },
         { name: 'Reaction Legend', value: [
             `${emojiTarget} • **Join / Leave** the lobby`, 
             `🎮 • **Start Game** (Requires 2+ players)`, 
@@ -1477,12 +1495,40 @@ async function handleWebLobbyCreation(lobby) {
     const pingMessage = await channel.send({ content: customPingSentence, allowedMentions: { roles: [roleId] } });
     setTimeout(() => { pingMessage.delete().catch(() => {}); }, 1500);
 
+    // 5. Update status to 'searching' WITHOUT erasing web_player_names or web_player_ids
     await supabase.from('active_async_matches').update({
-      status: 'searching', match_id: generatedMatchId, message_id: message.id, channel_id: channel.id, guild_id: channel.guild.id,
-      web_player_names: [hostName], web_player_ids: [lobby.web_host_id]
+      status: 'searching', 
+      match_id: generatedMatchId, 
+      message_id: message.id, 
+      channel_id: channel.id, 
+      guild_id: channel.guild.id
     }).eq('id', lobby.id);
 
-  } catch (err) { console.error('Error creating Discord Lobby from Web Event:', err); }
+  } catch (err) { 
+    console.error('Error creating Discord Lobby from Web Event:', err);
+    // Release the claim lock so the catch-up sweep can retry
+    await supabase.from('active_async_matches').update({ status: 'pending_creation' }).eq('id', lobby.id).catch(() => {});
+  }
+}
+
+// -------------------------------------------------------------
+// 🔄 CATCH-UP SWEEP FOR MISSED WEB LOBBIES
+// -------------------------------------------------------------
+async function catchUpMissedWebLobbies() {
+  try {
+    const { data: missedLobbies } = await supabase
+      .from('active_async_matches')
+      .select('*')
+      .eq('status', 'pending_creation')
+      .like('message_id', 'pending-web-%');
+
+    for (const missed of missedLobbies ?? []) {
+      console.log(`[Catch-Up] Processing missed lobby: ID ${missed.id}`);
+      await handleWebLobbyCreation(missed);
+    }
+  } catch (err) {
+    console.error('Error in catchUpMissedWebLobbies:', err);
+  }
 }
 
 async function executeLobbyPing(lobby, channel) {
@@ -1619,6 +1665,9 @@ function startRealtimeListener() {
           const { data: unannouncedGames } = await supabase.from('games').select('id').eq('announced_to_discord', false).lt('created_at', new Date(Date.now() - 10000).toISOString()).order('created_at', { ascending: true });
           if (unannouncedGames && unannouncedGames.length > 0) unannouncedGames.forEach(g => scheduleAnnouncement(g.id));
         } catch (catchUpErr) {}
+
+        // Run recovery sweep for any lobbies created while disconnected
+        await catchUpMissedWebLobbies();
         return; 
       }
       if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
@@ -2798,6 +2847,7 @@ discordClient.once('clientReady', async () => {
   await runInitialDatabaseSync();
   await syncGuildDirectory();
   await updateQueueMessage(); // Update queue display immediately on boot
+  await catchUpMissedWebLobbies(); // Check on boot for any missed lobbies like #169
 
   try {
     const { data: unannouncedSp } = await supabase.from('sp_events')
@@ -2841,6 +2891,7 @@ discordClient.once('clientReady', async () => {
   setInterval(async () => { await checkAndExpireCheckins(); }, 5 * 60 * 1000);
   setInterval(async () => { await checkAndExpireLobbies(); }, 5 * 60 * 1000);
   setInterval(async () => { await cleanExpiredQueueEntries(); }, 30 * 1000); // Check for expired queue player timers
+  setInterval(async () => { await catchUpMissedWebLobbies(); }, 60 * 1000); // Periodic catch-up sweep every 60s
 
   if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
     try {
