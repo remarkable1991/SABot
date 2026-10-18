@@ -1567,12 +1567,96 @@ async function buildRosterDisplay(lobby) {
   const leaderboardCaseMap = {};
   
   if (pIds.length > 0) {
-    const { data: dMap } = await supabase.from('player_discord_map').select('discord_user_id, player_key, display_name').in('discord_user_id', pIds);
+    // 1. Check verified player_discord_map first
+    const { data: dMap } = await supabase
+      .from('player_discord_map')
+      .select('discord_user_id, player_key, display_name')
+      .in('discord_user_id', pIds);
+
     if (dMap) {
       dMap.forEach(r => {
-        discordIgnMap[r.discord_user_id] = r.player_key;
-        if (r.display_name) leaderboardCaseMap[r.player_key] = r.display_name;
+        if (r.player_key) {
+          discordIgnMap[r.discord_user_id] = r.player_key;
+          if (r.display_name) leaderboardCaseMap[r.player_key] = r.display_name;
+        }
       });
+    }
+
+    // 2. For any Discord ID not in player_discord_map, check discord_guild_members & fuzzy match player_ratings
+    const unmappedIds = pIds.filter(id => !discordIgnMap[id]);
+    if (unmappedIds.length > 0) {
+      const { data: dirRows } = await supabase
+        .from('discord_guild_members')
+        .select('discord_user_id, discord_username, global_name, display_name, suggested_player_key, similarity_score')
+        .in('discord_user_id', unmappedIds);
+
+      const dirMap = {};
+      if (dirRows) {
+        dirRows.forEach(d => { dirMap[d.discord_user_id] = d; });
+      }
+
+      const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+
+      for (const uid of unmappedIds) {
+        let dirEntry = dirMap[uid];
+        let candidateNames = [];
+
+        if (dirEntry) {
+          if (dirEntry.suggested_player_key && (dirEntry.similarity_score === null || dirEntry.similarity_score >= DB_MATCH_THRESHOLD)) {
+            discordIgnMap[uid] = dirEntry.suggested_player_key;
+            if (dirEntry.display_name) leaderboardCaseMap[dirEntry.suggested_player_key] = dirEntry.display_name;
+            continue;
+          }
+          candidateNames.push(dirEntry.display_name, dirEntry.global_name, dirEntry.discord_username);
+        }
+
+        if (guild) {
+          const member = guild.members.cache.get(uid) || await guild.members.fetch(uid).catch(() => null);
+          if (member) {
+            candidateNames.push(member.nickname, member.displayName, member.user?.globalName, member.user?.username);
+          }
+        }
+
+        const cleanCandidates = [...new Set(candidateNames.filter(Boolean))];
+        let bestKey = null;
+        let bestDisplay = null;
+        let bestScore = 0;
+
+        for (const cand of cleanCandidates) {
+          const normCand = normalizeName(cand);
+          if (!normCand) continue;
+          const safeCand = cand.replace(/[,%()]/g, ' ').trim();
+          const { data: ratingMatches } = await supabase
+            .from('player_ratings')
+            .select('player_key, display_name')
+            .eq('game_version', 'overall')
+            .or(`player_key.eq.${normCand},display_name.ilike.*${safeCand}*`)
+            .limit(5);
+
+          for (const rm of ratingMatches || []) {
+            const score = Math.max(similarity(cand, rm.display_name), similarity(cand, rm.player_key));
+            if (score > bestScore) {
+              bestScore = score;
+              bestKey = rm.player_key;
+              bestDisplay = rm.display_name;
+            }
+          }
+        }
+
+        if (bestKey && bestScore >= DB_MATCH_THRESHOLD) {
+          discordIgnMap[uid] = bestKey;
+          if (bestDisplay) leaderboardCaseMap[bestKey] = bestDisplay;
+
+          // Persist to player_discord_map so future lookups are instant
+          await supabase.from('player_discord_map').upsert({
+            discord_user_id: uid,
+            discord_username: dirEntry?.discord_username || cleanCandidates[0] || null,
+            display_name: bestDisplay || cleanCandidates[0] || null,
+            player_key: bestKey,
+            updated_at: new Date().toISOString()
+          }, { onConflict: 'discord_user_id' });
+        }
+      }
     }
   }
 
@@ -1603,6 +1687,7 @@ async function buildRosterDisplay(lobby) {
   const rosterLines = [];
   const seenDiscordIds = new Set();
   let actualCount = 0;
+  const pipeSep = '|';
 
   // 1. DISCORD PLAYERS
   for (const id of pIds) {
@@ -1618,7 +1703,7 @@ async function buildRosterDisplay(lobby) {
     if (isLeague) {
       const lElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
       const oElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-      nameLine += ` [🏆 ${lElo} | 🌍 ${oElo}]`;
+      nameLine += ` [🏆 ${lElo} ${pipeSep} 🌍 ${oElo}]`;
     }
 
     rosterLines.push(`• ${nameLine}${bell}`);
@@ -1649,7 +1734,7 @@ async function buildRosterDisplay(lobby) {
     if (isLeague) {
       const lElo = elos[normKey]?.league !== undefined ? Math.round(elos[normKey].league) : 1000;
       const oElo = elos[normKey]?.overall !== undefined ? Math.round(elos[normKey].overall) : 1000;
-      line += ` [🏆 ${lElo} | 🌍 ${oElo}]`;
+      line += ` [🏆 ${lElo} ${pipeSep} 🌍 ${oElo}]`;
     }
 
     rosterLines.push(`• ${line}`);
@@ -1657,7 +1742,7 @@ async function buildRosterDisplay(lobby) {
     actualCount++;
   }
 
-  // 3. GUEST PLAYERS (Also attempts fuzzy Discord lookup if known in player_discord_map)
+  // 3. GUEST PLAYERS
   for (const guest of guests) {
     const normKey = normalizeName(guest);
     const isLeaderboard = !!leaderboardCaseMap[normKey] || !!elos[normKey];
@@ -1673,7 +1758,7 @@ async function buildRosterDisplay(lobby) {
     if (isLeague) {
       const lElo = elos[normKey]?.league !== undefined ? Math.round(elos[normKey].league) : 1000;
       const oElo = elos[normKey]?.overall !== undefined ? Math.round(elos[normKey].overall) : 1000;
-      line += ` [🏆 ${lElo} | 🌍 ${oElo}]`;
+      line += ` [🏆 ${lElo} ${pipeSep} 🌍 ${oElo}]`;
     }
     rosterLines.push(`• ${line}`);
     actualCount++;
@@ -1682,7 +1767,6 @@ async function buildRosterDisplay(lobby) {
   const finalDisplay = rosterLines.length > 0 ? rosterLines.join('\n') : '\u200B';
   return { display: finalDisplay, count: actualCount };
 }
-
 async function syncLobbyEmbed(lobby) {
   if (lobby.status !== 'searching') return;
   if (!lobby.channel_id || !lobby.message_id) return;
