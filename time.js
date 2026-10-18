@@ -121,7 +121,8 @@ module.exports = {
         ? schedule.player_discord_ids.map(id => `<@${id}>`).join(' ')
         : (schedule.player_names || []).map(name => `**${name}**`).join(', ');
 
-      const topPostLink = `https://discord.com/channels/${DISCORD_GUILD_ID || interaction.guildId}/${schedule.thread_id}/${schedule.message_id}`;
+      const activeGuildId = DISCORD_GUILD_ID || interaction.guildId;
+      const topPostLink = `https://discord.com/channels/${activeGuildId}/${schedule.thread_id}/${schedule.message_id}`;
 
       let existingSlots = schedule.suggested_slots || [];
       if (typeof existingSlots === 'string') {
@@ -141,7 +142,7 @@ module.exports = {
           .eq('id', schedule.id);
 
         const asyncEmbed = new EmbedBuilder()
-          .setTitle(`🚀 Match Started: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`)
+          .setTitle(`🚀 Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
           .setColor(0x2ECC71)
           .setDescription(`The game is now **Ongoing**! Turn timers are active. Good luck!\n\n🔗 **[Jump to Top Post](${topPostLink})**`)
           .setTimestamp();
@@ -213,7 +214,7 @@ module.exports = {
           })
           .eq('id', schedule.id);
 
-        const matchTitle = `[${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`;
+        const matchTitle = `[${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`;
         const calUrl = calculatedTimestamp ? generateGoogleCalendarUrl(matchTitle, new Date(calculatedTimestamp)) : null;
 
         const forceEmbed = new EmbedBuilder()
@@ -265,7 +266,6 @@ module.exports = {
 
       const votesCount = Object.keys(currentVotes).length;
 
-      // Update schedule status (also ensure mode is 'live' since time slots are being voted on)
       await supabase
         .from('tournament_match_schedules')
         .update({
@@ -295,9 +295,11 @@ module.exports = {
             return `${s.label} ${s.time_text}${voterMentions}`;
           });
 
+          const totalPlayersCount = (schedule.player_discord_ids && schedule.player_discord_ids.length) ? schedule.player_discord_ids.length : 4;
           const nonVoterIds = (schedule.player_discord_ids || []).filter(id => !currentVotes[id] || currentVotes[id].length === 0);
+          const votedCountCalc = totalPlayersCount - nonVoterIds.length;
           const nonVoterDisplay = nonVoterIds.length > 0
-            ? `\n\n**⏳ Did not vote yet (${(schedule.player_discord_ids?.length \vert{}\vert{} 4) - nonVoterIds.length}/4):**\n${nonVoterIds.map(id => `<@${id}>`).join(', ')}`
+            ? `\n\n**⏳ Did not vote yet (${votedCountCalc}/4):**\n${nonVoterIds.map(id => `<@${id}>`).join(', ')}`
             : `\n\n**✅ All players voted!**`;
 
           const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
@@ -318,7 +320,7 @@ module.exports = {
       const proposalEmbed = new EmbedBuilder()
         .setTitle(`💡 New Time Slot Proposed: ${nextEmoji}`)
         .setColor(0xF1C40F)
-        .setDescription(`<@${interaction.user.id}> proposed a new time slot and voted for it:\n\n**${nextEmoji}${calculatedTimeText}**\n\n👉 **[Jump to Voting Post to React](${topPostLink})**`)
+        .setDescription(`<@${interaction.user.id}> proposed a new time slot and voted for it:\n\n**${nextEmoji} ${calculatedTimeText}**\n\n👉 **[Jump to Voting Post to React](${topPostLink})**`)
         .setTimestamp();
 
       if (threadChannel.id !== interaction.channelId) {
