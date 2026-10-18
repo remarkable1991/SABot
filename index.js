@@ -89,6 +89,7 @@ const BOILERPLATE_NOTES = new Set([
   'official ranked league match!',
   'looking for players for an official league match!',
   'looking for a live match!',
+  'looking for an async match!',
   'looking for players via the website!',
   'custom match generated from the queue channel!',
   'automated matchmaking queue pop!'
@@ -872,6 +873,9 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
 
     const targetMessage = await leagueChannel.send({ content: '🎮 Match Lobby generating...', embeds: [initialEmbed] });
 
+    // Always pass a non-null string to message_text to satisfy Supabase's NOT NULL constraint
+    const dbMessageText = isCustomLobbyNote(customNote) ? customNote.trim() : 'Official Ranked League Match!';
+
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
@@ -883,7 +887,7 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
         player_ids: players,
         notify_user_ids: [],
         guest_players: [],
-        message_text: isCustomLobbyNote(customNote) ? customNote.trim() : null,
+        message_text: dbMessageText,
         lobby_password: 'None',
         board_type: boardDisplay,
         expansions: dbExpansions,
@@ -980,7 +984,7 @@ async function triggerAutoPop(mode = 'live') {
       await supabase.from('matchmaking_queue').delete().eq('id', r.id);
     }
 
-    await createQueueLobby(null, playersToPop, mode, true, false);
+    await createQueueLobby(null, playersToPop, mode, true, false, null);
     updateQueueMessage();
   } catch (err) {
     console.error('Error during auto-pop:', err);
@@ -1616,12 +1620,11 @@ async function buildRosterDisplay(lobby) {
 
   const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
   const discordIgnMap = {};
-  const discordNamesMap = {}; // uid -> array of known discord names (display_name, global_name, username)
+  const discordNamesMap = {};
   const elos = {};
   const leaderboardCaseMap = {};
   
   if (pIds.length > 0) {
-    // 1. Fetch both player_discord_map and discord_guild_members for seated Discord IDs
     const [{ data: dMap }, { data: dirRows }] = await Promise.all([
       supabase.from('player_discord_map').select('discord_user_id, player_key, display_name, discord_username').in('discord_user_id', pIds),
       supabase.from('discord_guild_members').select('discord_user_id, discord_username, global_name, display_name, suggested_player_key, similarity_score').in('discord_user_id', pIds)
@@ -1658,7 +1661,6 @@ async function buildRosterDisplay(lobby) {
       }
     }
 
-    // 2. For any Discord ID not in player_discord_map, check discord_guild_members & fuzzy match player_ratings
     const unmappedIds = pIds.filter(id => !discordIgnMap[id]);
     if (unmappedIds.length > 0) {
       for (const uid of unmappedIds) {
@@ -1747,7 +1749,6 @@ async function buildRosterDisplay(lobby) {
   const seenDiscordIds = new Set();
   let actualCount = 0;
 
-  // Helper to check if a player's IGN is the same as their Discord name
   function isIgnSameAsDiscord(ign, uid) {
     if (!ign || !uid) return false;
     const normIgn = normalizeName(ign);
@@ -1766,7 +1767,6 @@ async function buildRosterDisplay(lobby) {
     if (pk && caseName) {
       const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(caseName)}`;
       const sameName = isIgnSameAsDiscord(caseName, id);
-      // If IGN and Discord name are the same, show <@id> [📊](url); otherwise show [IGN](url) <@id>
       nameLine = sameName
         ? `<@${id}> [📊](${profileUrl})`
         : `[${caseName}](${profileUrl}) <@${id}>`;
@@ -1776,7 +1776,6 @@ async function buildRosterDisplay(lobby) {
         nameLine += ` [🏆 ${lElo}]`;
       }
     } else {
-      // Unlinked Discord player (IGN unknown): show ONLY <@id> without ELO so they look distinct
       nameLine = `<@${id}>`;
     }
 
@@ -1827,7 +1826,7 @@ async function buildRosterDisplay(lobby) {
     actualCount++;
   }
 
-  // 3. GUEST PLAYERS (IGN-only or Friend of X)
+  // 3. GUEST PLAYERS
   for (const guest of guests) {
     const normKey = normalizeName(guest);
     const isLeaderboard = !!leaderboardCaseMap[normKey] || !!elos[normKey];
