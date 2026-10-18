@@ -5,8 +5,8 @@ const LEAGUE_LFG_CHANNEL_ID = '1557473551227818024';
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('lfg')
-    .setDescription('Instantly host an official Live League match (Buttons + Modal test version)'),
+    .setName('league')
+    .setDescription('Instantly host an official Live League match (Reactions version)'),
 
   async execute(interaction, { supabase, createQueueLobby, updateQueueMessage }) {
     if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
@@ -39,8 +39,8 @@ module.exports = {
       Array.from(playerSet),
       'live',
       false,
-      true, // useButtons = true (Buttons + Modal version)
-      null  // No redundant default note
+      false, // useButtons = false (Reactions version)
+      null   // No redundant default note
     );
 
     const jumpLink = targetMsg
@@ -48,7 +48,7 @@ module.exports = {
       : `https://discord.com/channels/${interaction.guildId}/${LEAGUE_LFG_CHANNEL_ID}`;
 
     await interaction.editReply({
-      content: `✅ Created your Live League match (Buttons Mode) in <#${LEAGUE_LFG_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**`
+      content: `✅ Created your Live League match in <#${LEAGUE_LFG_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**`
     });
 
     setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
