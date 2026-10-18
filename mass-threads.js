@@ -84,7 +84,6 @@ module.exports = {
     const tNumMatch = fileName.match(/t(\d+)/i);
     const roundMatch = fileName.match(/round_?(\d+)|game_?(\d+)/i);
     const isLiveFile = fileName.includes('live');
-    const mode = isLiveFile ? 'live' : 'async';
 
     const defaultTournamentNum = tNumMatch ? parseInt(tNumMatch[1], 10) : 16;
     const defaultRoundNum = roundMatch ? parseInt(roundMatch[1] || roundMatch[2], 10) : 1;
@@ -99,7 +98,7 @@ module.exports = {
         return await interaction.editReply({ content: '❌ The CSV file appears to be empty or contains only headers.' });
       }
 
-      await interaction.editReply({ content: `⚙️ Parsing **${mode.toUpperCase()}** file and launching private threads for Tournament #${defaultTournamentNum}...` });
+      await interaction.editReply({ content: `⚙️ Parsing CSV file and launching private threads for Tournament #${defaultTournamentNum}...` });
 
       const parentChannel = interaction.channel;
       const guild = interaction.guild;
@@ -112,6 +111,11 @@ module.exports = {
         const rawThreadTitle = columns[0];
         const rawPings = columns[1];
         const slots = [columns[2], columns[3], columns[4]].filter(s => s && s !== 'No Backup Slot Secured' && s !== '');
+
+        // If time slots exist in the row OR filename includes 'live', treat as a live scheduled match
+        const isLiveMatch = isLiveFile || slots.length > 0;
+        const rowMode = isLiveMatch ? 'live' : 'async';
+        const rowStatus = isLiveMatch ? 'pending_votes' : 'published';
 
         const { roundType, tableIdentifier, isFinals } = parseRoundAndTable(rawThreadTitle, fileName, defaultRoundNum);
         const matchCode = extractMatchCode(defaultTournamentNum, roundType, tableIdentifier);
@@ -148,8 +152,8 @@ module.exports = {
           }
         }
 
-        const displayThreadTitle = isFinals ? `${roundType} · ${tableIdentifier}` : `${roundType} · ${tableIdentifier}`;
-        const formattedThreadName = `🏆 [${matchCode}] ${displayThreadTitle}`;
+        const displayThreadTitle = isFinals ? `${roundType} ·${tableIdentifier}` : `${roundType} ·${tableIdentifier}`;
+        const formattedThreadName = `🏆 [${matchCode}]${displayThreadTitle}`;
 
         const thread = await parentChannel.threads.create({
           name: formattedThreadName,
@@ -176,7 +180,7 @@ module.exports = {
           rulesEmbed.addFields(
             {
               name: '⏳ First 24 hours after the tag!',
-              value: 'Vote for which time slot suits you best. Once agreed by all 4, the bot will automatically lock in the earliest date.\n\nThese times are decided based on what you submitted on the website. If you believe this to be wrong, contact an admin ASAP!\n\nIf you selected times but now cannot play on any of them, use `/confirm` to submit an agreed alternative time.',
+              value: 'Vote for which time slot suits you best. Once agreed by all 4, the bot will automatically lock in the earliest date.\n\nThese times are decided based on what you submitted on the website. If you believe this to be wrong, contact an admin ASAP!\n\nIf you selected times but now cannot play on any of them, use `/time` to submit an agreed alternative time.',
               inline: false
             },
             {
@@ -201,7 +205,7 @@ module.exports = {
             }
           );
 
-          const slotText = suggestedSlotsPayload.map(s => `${s.label} ${s.time_text}`).join('\n');
+          const slotText = suggestedSlotsPayload.map(s => `${s.label}${s.time_text}`).join('\n');
           const nonVoterTags = playerDiscordIds.length > 0
             ? playerDiscordIds.map(id => `<@${id}>`).join(', ')
             : 'All Players';
@@ -217,7 +221,7 @@ module.exports = {
           rulesEmbed.addFields(
             {
               name: '🚀 Starting the Match',
-              value: 'When you are ready to begin, run `/confirm` directly in this thread or click **Mark Game Started** to mark the game as **Ongoing**.',
+              value: 'When you are ready to begin, run `/time` directly in this thread or click **Mark Game Started** to mark the game as **Ongoing**.',
               inline: false
             },
             {
@@ -239,7 +243,7 @@ module.exports = {
         }
 
         const message = await thread.send({
-          content: `👥 **Participants:** ${resolvedPings.join(' | ')}\n🛡️ **Support:** <@&${TOURNAMENT_HOST_ROLE_ID}>`,
+          content: `👥 **Participants:** ${resolvedPings.join(' \vert{} ')}\n🛡️ **Support:** <@&${TOURNAMENT_HOST_ROLE_ID}>`,
           embeds: [rulesEmbed]
         });
 
@@ -258,13 +262,13 @@ module.exports = {
             round_type: roundType,
             table_identifier: tableIdentifier,
             match_code: matchCode,
-            mode: mode,
+            mode: rowMode,
             thread_id: thread.id,
             message_id: message.id,
             player_discord_ids: playerDiscordIds,
             player_names: playerNames,
             suggested_slots: suggestedSlotsPayload,
-            status: isLiveFile ? 'pending_votes' : 'published',
+            status: rowStatus,
             updated_at: new Date().toISOString()
           }, { onConflict: 'tournament_num,round_type,table_identifier' })
           .select('id')
@@ -274,9 +278,6 @@ module.exports = {
           console.error('Failed to upsert tournament_match_schedules row:', scheduleError);
         }
 
-        // For matches with no time-slot voting (no live suggested slots), attach a real
-        // "Mark Game Started" button immediately instead of leaving players with only
-        // instructional text until the 24h auto check-in reminder posts one.
         if (slots.length === 0 && scheduleRow?.id) {
           const startBtn = new ActionRowBuilder().addComponents(
             new ButtonBuilder()
@@ -291,7 +292,7 @@ module.exports = {
         await new Promise((resolve) => setTimeout(resolve, 1000));
       }
 
-      await interaction.followUp({ content: `✅ Successfully created **${createdCount}** ${mode.toUpperCase()} private threads!`, flags: [MessageFlags.Ephemeral] });
+      await interaction.followUp({ content: `✅ Successfully created **${createdCount}** private threads!`, flags: [MessageFlags.Ephemeral] });
 
     } catch (error) {
       console.error('Failed processing the CSV or creating threads:', error);
