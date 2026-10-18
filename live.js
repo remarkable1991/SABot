@@ -1,5 +1,7 @@
 const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
 
+const EMOJI_GUIDE_LINK = 'https://discord.com/channels/747212662483583069/1561400611348553810';
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('live')
@@ -60,7 +62,7 @@ module.exports = {
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, buildRosterDisplay }) {
+  async execute(interaction, { supabase, buildRosterDisplay, resolveHostIgn, promptUnknownHostIgn }) {
     const isLeague = interaction.options.getBoolean('league') || false;
     const LFG_ADMIN_ROLE = '1557469534133162045';
     const LEAGUE_CHANNEL_ID = '1557473551227818024';
@@ -152,7 +154,6 @@ module.exports = {
     
     const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180;
     const expirationMs = minutesToExpiry * 60 * 1000;
-    const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
 
     const roleMention = `<@&1219666679764877424>`;
@@ -247,7 +248,12 @@ module.exports = {
         })
       : { display: playerIds.map(id => `• <@${id}>`).join('\n'), count: playerIds.length + guestPlayers.length };
 
-    const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+    const hostIgnInfo = resolveHostIgn ? await resolveHostIgn(host.id) : { ign: null, isKnown: false };
+    const lobbyNameLine = hostIgnInfo.isKnown
+      ? `🎮 In-Game Lobby: **${hostIgnInfo.ign}'s game**`
+      : `🎮 In-Game Lobby: *(Waiting for host IGN...)*`;
+
+    const cleanHostName = (hostIgnInfo.ign || host.username).replace(/[^a-zA-Z0-9]/g, '') || 'Host';
     const prefixPattern = `${cleanHostName}-L`;
     let generatedMatchId = `${prefixPattern}1`;
 
@@ -283,26 +289,14 @@ module.exports = {
     const descLines = [];
     if (rawCustomText) descLines.push(`"${rawCustomText}"\n`);
     descLines.push(formatLine);
-    descLines.push(`*Lobby expires <t:${timeoutTimestamp}:R>.*`);
+    descLines.push(lobbyNameLine);
 
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
       .setDescription(descLines.join('\n'))
       .setColor(embedColor) 
       .addFields(
-        { name: `👥 Players (${totalSlotCount}/4)`, value: fullRosterDisplay, inline: false },
-        { 
-          name: 'Reaction Legend', 
-          value: [
-            `${liveDuneEmoji} • **Join / Leave** the lobby`,
-            `🎮 • **Start Game** (Requires 2+ players)`,
-            `❌ • **Cancel Lobby** (Host/Admin only)`,
-            `🥾 • **Kick Player** (Host/Seated/Admin)`,
-            `🔔 • **Toggle Ping Alerts**`,
-            `📢 • **Ping Lobby Role** (45m cooldown)`
-          ].join('\n'), 
-          inline: false 
-        }
+        { name: `👥 Players (${totalSlotCount}/4)\n\u200B`, value: `${fullRosterDisplay}\n\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`, inline: false }
       )
       .setTimestamp();
 
@@ -333,7 +327,6 @@ module.exports = {
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
-    // Always provide non-null strings for message_text and lobby_password to satisfy Supabase NOT NULL constraints
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
@@ -358,7 +351,7 @@ module.exports = {
         expected_player_keys: [],
         discord_usernames: []
       })
-      .select('id')
+      .select('*')
       .single();
 
     if (insertError) {
@@ -393,5 +386,10 @@ module.exports = {
     setTimeout(() => {
       pingMessage.delete().catch(() => {});
     }, 1500);
+
+    // If host IGN is unknown, ask them in chat (2-minute collector) and auto-update the lobby!
+    if (!hostIgnInfo.isKnown && promptUnknownHostIgn) {
+      promptUnknownHostIgn(insertedMatch, host, targetMessage.channel);
+    }
   }
 };
