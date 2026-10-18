@@ -136,9 +136,6 @@ module.exports = {
 
     const dbBoardType = board === 'Uprising' ? 'Uprising' : 'Base Game';
 
-    let boardDisplay = 'Base Game';
-    if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
-
     const ixText = `${ixEmoji} Rise of IX`.trim();
     const immoText = `${immoEmoji} Immortality`.trim();
     const epicText = `${epicEmoji} Epic Mode`.trim();
@@ -165,7 +162,7 @@ module.exports = {
     }
 
     let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
-    const liveDuneEmoji = getCustomEmoji('LiveDune', '⚔️');
+    const liveDuneEmoji = getCustomEmoji('LiveDune', '<:LiveDune:1232049130151346216>');
     
     const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180;
     const expirationMs = minutesToExpiry * 60 * 1000;
@@ -277,7 +274,6 @@ module.exports = {
         });
       }
       
-      // Look up ratings for players & guests to resolve case-sensitive leaderboard names & ELO
       const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
       const guestRatingsLookup = {};
 
@@ -297,11 +293,9 @@ module.exports = {
         });
       }
 
-      // Check if guests match player_ratings to update discord map
       for (const guest of guestPlayers) {
         const normKey = normalize(guest);
         if (guestRatingsLookup[normKey]) {
-          // Keep their exact case-sensitive name from player_ratings
           guestRatingsLookup[guest] = guestRatingsLookup[normKey];
         }
       }
@@ -330,7 +324,6 @@ module.exports = {
 
     const guestLookup = this.guestRatingsLookup || {};
 
-    // Format roster with Leaderboard Hyperlinks
     const mentionsList = playerIds.map(id => {
       const dName = displayMap[id] || (pkMap[id] ? pkMap[id] : null);
       let nameStr = dName ? `[${dName}](https://dunestats.cc/players/${encodeURIComponent(dName)}) <@${id}>` : `<@${id}>`;
@@ -449,14 +442,15 @@ module.exports = {
       targetMessageId = targetMessage.id;
       actualChannelId = LEAGUE_CHANNEL_ID;
 
-      await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!` });
+      const jumpLink = `https://discord.com/channels/${interaction.guildId}/${LEAGUE_CHANNEL_ID}/${targetMessageId}`;
+      await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**` });
+      setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
     } else {
       const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
       targetMessageId = response.id;
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
-    // Insert to DB using clean plain strings (no raw emojis) and valid message_id
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
@@ -495,11 +489,7 @@ module.exports = {
 
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
-      if (customJoinEmoji) {
-        await targetMessage.react(customJoinEmoji).catch(() => {});
-      } else {
-        await targetMessage.react('⚔️').catch(() => {});
-      }
+      await targetMessage.react(customJoinEmoji ? customJoinEmoji.id : '1232049130151346216').catch(() => {});
       await targetMessage.react('🎮').catch(() => {});
       await targetMessage.react('❌').catch(() => {});
       await targetMessage.react('🥾').catch(() => {});
