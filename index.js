@@ -84,6 +84,23 @@ const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 // Control emojis on lobbies (Everything else on a lobby post is treated as the Join/Leave emoji!)
 const LOBBY_CONTROL_EMOJIS = new Set(['➕', '🎮', '❌', '🥾', '🔔', '📢', '🇦', '🇧', '🇨', '🇩', '🇪', '🇫']);
 
+// Default boilerplate notes that should be hidden so Section B stays clean
+const BOILERPLATE_NOTES = new Set([
+  'official ranked league match!',
+  'looking for players for an official league match!',
+  'looking for a live match!',
+  'looking for players via the website!',
+  'custom match generated from the queue channel!',
+  'automated matchmaking queue pop!'
+]);
+
+function isCustomLobbyNote(text) {
+  if (!text) return false;
+  const clean = String(text).trim();
+  if (!clean) return false;
+  return !BOILERPLATE_NOTES.has(clean.toLowerCase());
+}
+
 // --- AI SCAN STATUS ANNOUNCEMENT CONFIG ---
 const SCAN_RESULTS_CHANNEL_ID = '1519019834011160576';
 const AI_SCAN_IGNORED_STATUS = 'No'; 
@@ -179,7 +196,6 @@ const discordClient = new Client({
   partials: [ Partials.Message, Partials.Channel, Partials.Reaction ]
 });
 
-// Prevent unhandled Discord API / network errors from crashing the Node process
 discordClient.on('error', (err) => {
   console.error('[DiscordClient Error]:', err);
 });
@@ -289,22 +305,29 @@ function getEmoji(guild, name, fallback) {
 }
 
 function formatBoardWithEmoji(guild, boardType) {
-  if (!boardType) return 'Base Game';
+  if (!boardType) return '**Base Game**';
   if (boardType.toLowerCase().includes('uprising')) {
     const uprisingEmoji = getEmoji(guild, 'Uprising', '');
-    return `${uprisingEmoji} Uprising`.trim();
+    return `${uprisingEmoji} **Uprising**`.trim();
   }
-  return 'Base Game';
+  return '**Base Game**';
 }
 
 function formatExpansionsWithEmoji(guild, expansions = []) {
   return (expansions || []).map(exp => {
-    if (exp.includes('Rise of IX') || exp === 'Ix') return `${getEmoji(guild, 'Ix', '')} Rise of IX`.trim();
-    if (exp.includes('Immortality') || exp === 'Immo') return `${getEmoji(guild, 'Immo', '')} Immortality`.trim();
-    if (exp.includes('Epic Mode') || exp === 'Epic') return `${getEmoji(guild, 'Epic', '')} Epic Mode`.trim();
-    if (exp.includes('CHOAM')) return `${getEmoji(guild, 'CHOAM', '')} CHOAM Module`.trim();
-    return exp;
+    if (exp.includes('Rise of IX') || exp === 'Ix') return `${getEmoji(guild, 'Ix', '')} **Rise of IX**`.trim();
+    if (exp.includes('Immortality') || exp === 'Immo') return `${getEmoji(guild, 'Immo', '')} **Immortality**`.trim();
+    if (exp.includes('Epic Mode') || exp === 'Epic') return `${getEmoji(guild, 'Epic', '')} **Epic Mode**`.trim();
+    if (exp.includes('CHOAM')) return `${getEmoji(guild, 'CHOAM', '')} **CHOAM Module**`.trim();
+    return `**${exp}**`;
   });
+}
+
+// Builds the clean "Uprising + Immortality + CHOAM Module" format string for Section B
+function buildFormatSummaryLine(guild, boardType, expansions = []) {
+  const richBoard = formatBoardWithEmoji(guild, boardType);
+  const richExps = formatExpansionsWithEmoji(guild, expansions);
+  return [richBoard, ...richExps].filter(Boolean).join(' + ');
 }
 
 function generateGoogleCalendarUrl(title, dateObj) {
@@ -790,10 +813,7 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
     const dbExpansions = [...(preset.expansions || [])];
     if (preset.mode && !dbExpansions.includes(preset.mode)) dbExpansions.push(preset.mode);
     
-    const richBoard = formatBoardWithEmoji(guild, boardDisplay);
-    const richExpansions = formatExpansionsWithEmoji(guild, dbExpansions);
-    const expText = richExpansions.length > 0 ? ` with ${richExpansions.join(', ')}` : '';
-
+    const formatLine = buildFormatSummaryLine(guild, boardDisplay, dbExpansions);
     const currentSeasonId = await getCurrentSeasonId();
 
     const embedTitle = `🏆 Ranked League Match Open!`;
@@ -802,20 +822,11 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
     const roleMention = `<@&1219666679764877424>`;
 
     let hostDisplay = isAutoPop ? '*(Host Unclaimed)*' : `<@${hostId}>`;
-    if (hostId && !isAutoPop) {
-      const { data: hostMap } = await supabase.from('player_discord_map').select('display_name, player_key').eq('discord_user_id', hostId).maybeSingle();
-      const hName = hostMap?.display_name || (hostMap?.player_key ? capitalize(hostMap.player_key) : null);
-      if (hName) hostDisplay = `[${hName}](https://dunestats.cc/players/${encodeURIComponent(hName)}) <@${hostId}>`;
-    }
-
-    const statusSentence = `${hostDisplay} is looking for players for ${richBoard}${expText}.\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
-
-    // Tag host and all pulled queue players at the very end of the 1500ms ghost ping
     const allSeatedTags = (players || []).map(id => `<@${id}>`).join(' ');
-    let customPingSentence = `${hostDisplay} is looking for live players ${roleMention} for${richBoard}${expText}.${allSeatedTags}`.trim();
+    let customPingSentence = `${hostDisplay} is looking for live players${roleMention} for ${formatLine}.${allSeatedTags}`.trim();
 
     if (isAutoPop) {
-      customPingSentence = `A queue has popped! A new live League match has been generated ${roleMention} for${richBoard}${expText}.${allSeatedTags}`.trim();
+      customPingSentence = `A queue has popped! A new live League match has been generated ${roleMention} for ${formatLine}.${allSeatedTags}`.trim();
     }
 
     const { display: rosterStr, count } = await buildRosterDisplay({ 
@@ -827,30 +838,36 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
       web_player_ids: []
     });
 
-    const legendTitle = useButtons ? '🎛️ Lobby Controls' : 'Reaction Legend';
-    const legendLines = [
-      `${emojiTarget} • **Join / Leave** the lobby`, 
-      `➕ • **Add Player** (Host/Seated/Admin)`,
-      `🎮 • **Start Game** (Requires 2+ players)`, 
-      `❌ • **Cancel Lobby** (Host/Admin only)`, 
-      `🥾 • **Kick Player** (Host/Seated/Admin)`,
-      `🔔 • **Toggle Ping Alerts**`, 
-      `📢 • **Ping Lobby Role** (45m cooldown)`
-    ].join('\n');
+    const expireUnix = Math.floor(Date.now() / 1000) + 10800;
+    const descLines = [];
+    if (isCustomLobbyNote(customNote)) {
+      descLines.push(`"${customNote.trim()}"\n`);
+    }
+    descLines.push(formatLine);
+    descLines.push(`*Lobby expires <t:${expireUnix}:R>.*`);
 
-    const noteDescription = customNote || (isAutoPop ? 'Automated Matchmaking Queue Pop!' : 'Official Ranked League Match!');
+    const fields = [
+      { name: `👥 Players (${count}/4)`, value: rosterStr, inline: false }
+    ];
+
+    if (!useButtons) {
+      const legendLines = [
+        `${emojiTarget} • **Join / Leave** the lobby`, 
+        `➕ • **Add Player** (Host/Seated/Admin)`,
+        `🎮 • **Start Game** (Requires 2+ players)`, 
+        `❌ • **Cancel Lobby** (Host/Admin only)`, 
+        `🥾 • **Kick Player** (Host/Seated/Admin)`,
+        `🔔 • **Toggle Ping Alerts**`, 
+        `📢 • **Ping Lobby Role** (45m cooldown)`
+      ].join('\n');
+      fields.push({ name: 'Reaction Legend', value: legendLines, inline: false });
+    }
 
     const initialEmbed = new EmbedBuilder()
       .setTitle(embedTitle)
-      .setDescription(`"${noteDescription}"`)
+      .setDescription(descLines.join('\n'))
       .setColor(embedColor)
-      .addFields(
-        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(Date.now()/1000) + 10800}:R>.*`, inline: false },
-        { name: '🔑 Password', value: 'Generating...', inline: false },
-        { name: `👥 Players (${count}/4)`, value: rosterStr, inline: false },
-        { name: legendTitle, value: legendLines, inline: false }
-      )
-      .setFooter({ text: `Lobbies time out automatically if unstarted after 180 minutes.` })
+      .addFields(fields)
       .setTimestamp();
 
     const targetMessage = await leagueChannel.send({ content: '🎮 Match Lobby generating...', embeds: [initialEmbed] });
@@ -866,12 +883,12 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
         player_ids: players,
         notify_user_ids: [],
         guest_players: [],
-        message_text: noteDescription,
+        message_text: isCustomLobbyNote(customNote) ? customNote.trim() : null,
         lobby_password: 'None',
         board_type: boardDisplay,
         expansions: dbExpansions,
         status: 'searching',
-        expires_at: new Date(Date.now() + 180 * 60 * 1000).toISOString(),
+        expires_at: new Date(expireUnix * 1000).toISOString(),
         mode: 'live',
         is_league: true,
         season_id: currentSeasonId,
@@ -896,16 +913,8 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
       host_id: isAutoPop ? 'UNCLAIMED' : hostId
     }).eq('id', numericLobbyId);
 
-    const updatedEmbed = EmbedBuilder.from(initialEmbed)
-      .setTitle(`${embedTitle} [ID:${generatedMatchId}]`)
-      .setFields(
-        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(Date.now()/1000) + 10800}:R>.*`, inline: false },
-        { name: '🔑 Password', value: `\`${generatedPassword}\``, inline: false },
-        { name: `👥 Players (${count}/4)`, value: rosterStr, inline: false },
-        { name: legendTitle, value: legendLines, inline: false }
-      );
-
-    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\`\n🔑 Lobby Password: \`${generatedPassword}\` *(Tap to copy)*\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
+    // Section A: No Match ID, just Password (Tap to copy) and Manage Link
+    const copyableContent = `🔑 Lobby Password: \`${generatedPassword}\` *(Tap to copy)*\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
 
     let components = [];
     if (useButtons) {
@@ -918,7 +927,7 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
       ];
     }
 
-    await targetMessage.edit({ content: copyableContent, embeds: [updatedEmbed], components });
+    await targetMessage.edit({ content: copyableContent, embeds: [initialEmbed], components });
 
     if (!useButtons) {
       try {
@@ -1042,7 +1051,6 @@ async function resolveAndAddPlayerToLobby(lobby, rawInput, adderUser, guild) {
       await resolveQueuePlayerIdentity(targetDiscordId, member);
       players.push(targetDiscordId);
     } else {
-      // Input is an IGN or Discord username text: fuzzy search player_discord_map & discord_guild_members
       let matchedDiscordId = null;
       let matchedDisplayName = null;
       const normInput = normalizeName(cleanInput);
@@ -1594,7 +1602,7 @@ function scheduleScanRefresh(gameId) {
 }
 
 // -------------------------------------------------------------
-// ROSTER DISPLAY BUILDER WITH LEADERBOARD & FUZZY VERIFICATION
+// ROSTER DISPLAY BUILDER (DEDUPLICATED NAMES + [📊](url) + SINGLE ELO)
 // -------------------------------------------------------------
 async function buildRosterDisplay(lobby) {
   const pIds = lobby.player_ids || [];
@@ -1608,15 +1616,16 @@ async function buildRosterDisplay(lobby) {
 
   const webMentionsMap = await getDiscordMentionsForWebPlayers(webIds);
   const discordIgnMap = {};
+  const discordNamesMap = {}; // uid -> array of known discord names (display_name, global_name, username)
   const elos = {};
   const leaderboardCaseMap = {};
   
   if (pIds.length > 0) {
-    // 1. Check verified player_discord_map first
-    const { data: dMap } = await supabase
-      .from('player_discord_map')
-      .select('discord_user_id, player_key, display_name')
-      .in('discord_user_id', pIds);
+    // 1. Fetch both player_discord_map and discord_guild_members for seated Discord IDs
+    const [{ data: dMap }, { data: dirRows }] = await Promise.all([
+      supabase.from('player_discord_map').select('discord_user_id, player_key, display_name, discord_username').in('discord_user_id', pIds),
+      supabase.from('discord_guild_members').select('discord_user_id, discord_username, global_name, display_name, suggested_player_key, similarity_score').in('discord_user_id', pIds)
+    ]);
 
     if (dMap) {
       dMap.forEach(r => {
@@ -1624,53 +1633,51 @@ async function buildRosterDisplay(lobby) {
           discordIgnMap[r.discord_user_id] = r.player_key;
           if (r.display_name) leaderboardCaseMap[r.player_key] = r.display_name;
         }
+        if (!discordNamesMap[r.discord_user_id]) discordNamesMap[r.discord_user_id] = [];
+        if (r.discord_username) discordNamesMap[r.discord_user_id].push(r.discord_username);
       });
+    }
+
+    const dirMap = {};
+    if (dirRows) {
+      dirRows.forEach(d => {
+        dirMap[d.discord_user_id] = d;
+        if (!discordNamesMap[d.discord_user_id]) discordNamesMap[d.discord_user_id] = [];
+        discordNamesMap[d.discord_user_id].push(d.display_name, d.global_name, d.discord_username);
+      });
+    }
+
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+    for (const uid of pIds) {
+      if (!discordNamesMap[uid]) discordNamesMap[uid] = [];
+      if (guild) {
+        const member = guild.members.cache.get(uid) || await guild.members.fetch(uid).catch(() => null);
+        if (member) {
+          discordNamesMap[uid].push(member.nickname, member.displayName, member.user?.globalName, member.user?.username);
+        }
+      }
     }
 
     // 2. For any Discord ID not in player_discord_map, check discord_guild_members & fuzzy match player_ratings
     const unmappedIds = pIds.filter(id => !discordIgnMap[id]);
     if (unmappedIds.length > 0) {
-      const { data: dirRows } = await supabase
-        .from('discord_guild_members')
-        .select('discord_user_id, discord_username, global_name, display_name, suggested_player_key, similarity_score')
-        .in('discord_user_id', unmappedIds);
-
-      const dirMap = {};
-      if (dirRows) {
-        dirRows.forEach(d => { dirMap[d.discord_user_id] = d; });
-      }
-
-      const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
-
       for (const uid of unmappedIds) {
-        let dirEntry = dirMap[uid];
-        let candidateNames = [];
+        const dirEntry = dirMap[uid];
+        if (dirEntry && dirEntry.suggested_player_key && (dirEntry.similarity_score === null || dirEntry.similarity_score >= DB_MATCH_THRESHOLD)) {
+          discordIgnMap[uid] = dirEntry.suggested_player_key;
+          if (dirEntry.display_name) leaderboardCaseMap[dirEntry.suggested_player_key] = dirEntry.display_name;
 
-        if (dirEntry) {
-          if (dirEntry.suggested_player_key && (dirEntry.similarity_score === null || dirEntry.similarity_score >= DB_MATCH_THRESHOLD)) {
-            discordIgnMap[uid] = dirEntry.suggested_player_key;
-            if (dirEntry.display_name) leaderboardCaseMap[dirEntry.suggested_player_key] = dirEntry.display_name;
-
-            await saveDiscordPlayerMap({
-              discordUserId: uid,
-              discordUsername: dirEntry.discord_username,
-              displayName: dirEntry.display_name,
-              playerKey: dirEntry.suggested_player_key
-            });
-            await supabase.from('discord_guild_members').update({ has_verified_map: true }).eq('discord_user_id', uid);
-            continue;
-          }
-          candidateNames.push(dirEntry.display_name, dirEntry.global_name, dirEntry.discord_username);
+          await saveDiscordPlayerMap({
+            discordUserId: uid,
+            discordUsername: dirEntry.discord_username,
+            displayName: dirEntry.display_name,
+            playerKey: dirEntry.suggested_player_key
+          });
+          await supabase.from('discord_guild_members').update({ has_verified_map: true }).eq('discord_user_id', uid);
+          continue;
         }
 
-        if (guild) {
-          const member = guild.members.cache.get(uid) || await guild.members.fetch(uid).catch(() => null);
-          if (member) {
-            candidateNames.push(member.nickname, member.displayName, member.user?.globalName, member.user?.username);
-          }
-        }
-
-        const cleanCandidates = [...new Set(candidateNames.filter(Boolean))];
+        const cleanCandidates = [...new Set((discordNamesMap[uid] || []).filter(Boolean))];
         let bestKey = null;
         let bestDisplay = null;
         let bestScore = 0;
@@ -1739,7 +1746,14 @@ async function buildRosterDisplay(lobby) {
   const rosterLines = [];
   const seenDiscordIds = new Set();
   let actualCount = 0;
-  const pipeSep = '|';
+
+  // Helper to check if a player's IGN is the same as their Discord name
+  function isIgnSameAsDiscord(ign, uid) {
+    if (!ign || !uid) return false;
+    const normIgn = normalizeName(ign);
+    const knownDiscordNames = (discordNamesMap[uid] || []).filter(Boolean);
+    return knownDiscordNames.some(dn => normalizeName(dn) === normIgn);
+  }
 
   // 1. DISCORD PLAYERS
   for (const id of pIds) {
@@ -1748,14 +1762,22 @@ async function buildRosterDisplay(lobby) {
     const caseName = (pk && leaderboardCaseMap[pk]) ? leaderboardCaseMap[pk] : (pk ? capitalize(pk) : null);
     const bell = notifies.includes(id) ? ' 🔔' : '';
     
-    let nameLine = caseName 
-      ? `[${caseName}](https://dunestats.cc/players/${encodeURIComponent(caseName)}) <@${id}>`
-      : `<@${id}>`;
-    
-    if (isLeague) {
-      const lElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
-      const oElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-      nameLine += ` [🏆 ${lElo} ${pipeSep} 🌍 ${oElo}]`;
+    let nameLine = '';
+    if (pk && caseName) {
+      const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(caseName)}`;
+      const sameName = isIgnSameAsDiscord(caseName, id);
+      // If IGN and Discord name are the same, show <@id> [📊](url); otherwise show [IGN](url) <@id>
+      nameLine = sameName
+        ? `<@${id}> [📊](${profileUrl})`
+        : `[${caseName}](${profileUrl}) <@${id}>`;
+
+      if (isLeague) {
+        const lElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
+        nameLine += ` [🏆 ${lElo}]`;
+      }
+    } else {
+      // Unlinked Discord player (IGN unknown): show ONLY <@id> without ELO so they look distinct
+      nameLine = `<@${id}>`;
     }
 
     rosterLines.push(`• ${nameLine}${bell}`);
@@ -1775,18 +1797,29 @@ async function buildRosterDisplay(lobby) {
 
     if (dId && seenDiscordIds.has(dId)) continue; 
 
-    const mention = dId ? ` <@${dId}>` : '';
     const caseName = leaderboardCaseMap[normKey] || rawName;
     const isLeaderboard = !!leaderboardCaseMap[normKey] || !!elos[normKey];
+    const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(caseName)}`;
 
-    let line = isLeaderboard
-      ? `[${caseName}](https://dunestats.cc/players/${encodeURIComponent(caseName)}) 🌐${mention}`
-      : `**${rawName}** 🌐${mention}`;
+    let line = '';
+    if (dId) {
+      const sameName = isIgnSameAsDiscord(caseName, dId);
+      if (isLeaderboard) {
+        line = sameName
+          ? `<@${dId}> [📊](${profileUrl}) 🌐`
+          : `[${caseName}](${profileUrl}) <@${dId}> 🌐`;
+      } else {
+        line = `**${rawName}** <@${dId}> 🌐`;
+      }
+    } else {
+      line = isLeaderboard
+        ? `[${caseName}](${profileUrl}) 🌐`
+        : `**${rawName}** 🌐`;
+    }
 
-    if (isLeague) {
+    if (isLeague && isLeaderboard) {
       const lElo = elos[normKey]?.league !== undefined ? Math.round(elos[normKey].league) : 1000;
-      const oElo = elos[normKey]?.overall !== undefined ? Math.round(elos[normKey].overall) : 1000;
-      line += ` [🏆 ${lElo} ${pipeSep} 🌍 ${oElo}]`;
+      line += ` [🏆 ${lElo}]`;
     }
 
     rosterLines.push(`• ${line}`);
@@ -1794,7 +1827,7 @@ async function buildRosterDisplay(lobby) {
     actualCount++;
   }
 
-  // 3. GUEST PLAYERS
+  // 3. GUEST PLAYERS (IGN-only or Friend of X)
   for (const guest of guests) {
     const normKey = normalizeName(guest);
     const isLeaderboard = !!leaderboardCaseMap[normKey] || !!elos[normKey];
@@ -1803,15 +1836,14 @@ async function buildRosterDisplay(lobby) {
     if (isLeaderboard) {
       const caseName = leaderboardCaseMap[normKey] || guest;
       line = `[${caseName}](https://dunestats.cc/players/${encodeURIComponent(caseName)}) 📊`;
+      if (isLeague) {
+        const lElo = elos[normKey]?.league !== undefined ? Math.round(elos[normKey].league) : 1000;
+        line += ` [🏆 ${lElo}]`;
+      }
     } else {
       line = guest.toLowerCase().startsWith('friend of') ? `${guest} 👥` : `**${guest}** 👥`;
     }
 
-    if (isLeague) {
-      const lElo = elos[normKey]?.league !== undefined ? Math.round(elos[normKey].league) : 1000;
-      const oElo = elos[normKey]?.overall !== undefined ? Math.round(elos[normKey].overall) : 1000;
-      line += ` [🏆 ${lElo} ${pipeSep} 🌍 ${oElo}]`;
-    }
     rosterLines.push(`• ${line}`);
     actualCount++;
   }
@@ -1830,52 +1862,39 @@ async function syncLobbyEmbed(lobby) {
 
   const { display, count } = await buildRosterDisplay(lobby);
 
-  let hostDisplay = 'Web Player 🌐';
-  const validDiscordHostId = normalizeDiscordId(lobby.host_id);
-
-  if (validDiscordHostId) {
-    const { data: mapData } = await supabase.from('player_discord_map').select('player_key, display_name').eq('discord_user_id', validDiscordHostId).maybeSingle();
-    const name = mapData?.display_name || (mapData?.player_key ? capitalize(mapData.player_key) : null);
-    if (name) hostDisplay = `[${name}](https://dunestats.cc/players/${encodeURIComponent(name)}) <@${validDiscordHostId}>`;
-    else hostDisplay = `<@${validDiscordHostId}>`;
-  } else if (lobby.web_player_names && lobby.web_player_names.length > 0) {
-    const wName = lobby.web_player_names[0];
-    hostDisplay = `[${wName}](https://dunestats.cc/players/${encodeURIComponent(wName)}) 🌐`;
-    if (lobby.web_player_ids && lobby.web_player_ids[0]) {
-      const webMentionsMap = await getDiscordMentionsForWebPlayers([lobby.web_player_ids[0]]);
-      if (webMentionsMap[lobby.web_player_ids[0]]) hostDisplay += webMentionsMap[lobby.web_player_ids[0]];
-    }
-  } else if (lobby.host_id === 'UNCLAIMED') {
-    hostDisplay = '*(Host Unclaimed)*';
-  }
-
-  const oldDetails = msg.embeds[0].fields[0].value;
-  const verb = oldDetails.includes('created a lobby') ? 'created a lobby for' : 'is looking for players for';
-  
-  const richBoard = formatBoardWithEmoji(channel.guild, lobby.board_type);
-  const richExpansions = formatExpansionsWithEmoji(channel.guild, lobby.expansions);
-  const expText = richExpansions.length > 0 ? ` with ${richExpansions.join(', ')}` : '';
-  
-  const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
-  const activeSeasonNum = lobby.season_id || await getCurrentSeasonId();
-  let newDetailsLine = `${hostDisplay}${verb} ${richBoard}${expText}.`;
-  if (isLeague) {
-    newDetailsLine += `\n\n⚠️ **Official League Match**: Results will count toward Season ${activeSeasonNum} League standings.`;
-  }
-  
+  const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
   const timerLine = `*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime() / 1000)}:R>.*`;
 
-  const embed = EmbedBuilder.from(msg.embeds[0]);
-  if (lobby.message_text) embed.setDescription(`"${lobby.message_text}"`);
-  
-  embed.setFields(
-    { name: '📝 Match Details', value: `${newDetailsLine}\n${timerLine}`, inline: false },
-    { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
-    { name: `👥 Players (${count}/4)`, value: display, inline: false },
-    { name: msg.embeds[0].fields[3].name, value: msg.embeds[0].fields[3].value, inline: false }
-  );
+  const descLines = [];
+  if (isCustomLobbyNote(lobby.message_text)) {
+    descLines.push(`"${lobby.message_text.trim()}"\n`);
+  }
+  descLines.push(formatLine);
+  descLines.push(timerLine);
 
-  await msg.edit({ embeds: [embed] }).catch(err => console.error('Failed to sync embed roster:', err));
+  const hasLfgButtons = msg.components?.some(r => r.components?.some(c => c.customId?.startsWith('lfg_btn_')));
+  const existingLegendField = msg.embeds[0].fields?.find(f => f.name.includes('Reaction Legend'));
+
+  const updatedFields = [
+    { name: `👥 Players (${count}/4)`, value: display, inline: false }
+  ];
+
+  if (!hasLfgButtons && existingLegendField) {
+    updatedFields.push({ name: existingLegendField.name, value: existingLegendField.value, inline: false });
+  }
+
+  const embed = EmbedBuilder.from(msg.embeds[0])
+    .setDescription(descLines.join('\n'))
+    .setFields(updatedFields)
+    .setFooter(null);
+
+  const contentLines = [];
+  if (lobby.lobby_password && lobby.lobby_password !== 'None') {
+    contentLines.push(`🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*`);
+  }
+  contentLines.push(`🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${lobby.id}`);
+
+  await msg.edit({ content: contentLines.join('\n'), embeds: [embed] }).catch(err => console.error('Failed to sync embed roster:', err));
 }
 
 // -------------------------------------------------------------
@@ -1952,30 +1971,23 @@ async function handleWebLobbyCreation(lobby) {
     const embedColor = isLeague ? 0xF1C40F : (isLive ? 0xe74c3c : 0xC9A24B);
     const roleId = isLive ? '1219666679764877424' : '1219666516644204554';
     
-    const richBoard = formatBoardWithEmoji(channel.guild, lobby.board_type);
-    const richExpansions = formatExpansionsWithEmoji(channel.guild, lobby.expansions);
-    const expText = richExpansions.length > 0 ? ` with ${richExpansions.join(', ')}` : '';
-
-    const hostLink = `[${hostName}](https://dunestats.cc/players/${encodeURIComponent(hostName)})`;
-    let statusSentence = `**${hostLink} 🌐**${discordMention} created a lobby for ${richBoard}${expText}.`;
-
-    const activeSeasonNum = lobby.season_id || await getCurrentSeasonId();
-    if (isLeague) {
-      statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${activeSeasonNum} League standings.`;
-    }
+    const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
 
     const seatedPings = (lobby.player_ids || []).map(id => `<@${id}>`).join(' ');
     const modeLabelWord = isLive ? 'live' : 'async';
-    let customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${modeLabelWord} players <@&${roleId}>`;
-    if (lobby.board_type && lobby.board_type !== 'Base Game') customPingSentence += ` for ${richBoard}`;
-    else customPingSentence += ` for Base Game`;
-    customPingSentence += `${expText}.${seatedPings}`.trim();
+    const customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${modeLabelWord} players <@&${roleId}> for ${formatLine}.${seatedPings}`.trim();
 
-    let embedTitle = hostName !== 'Web Player' ? `${emojiTarget} ${hostName}'s Game [ID:${generatedMatchId}]` : `${emojiTarget} New Match Open! [ID:${generatedMatchId}]`;
-    if (isLeague) embedTitle = `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`;
+    let embedTitle = hostName !== 'Web Player' ? `${emojiTarget}${hostName}'s Game` : `${emojiTarget} New Match Open!`;
+    if (isLeague) embedTitle = `🏆 Ranked League Match Open!`;
 
     const { display: rosterStr, count } = await buildRosterDisplay(lobby);
-    const msgText = lobby.message_text ? lobby.message_text : 'Looking for players via the Website!';
+
+    const descLines = [];
+    if (isCustomLobbyNote(lobby.message_text)) {
+      descLines.push(`"${lobby.message_text.trim()}"\n`);
+    }
+    descLines.push(formatLine);
+    descLines.push(`*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime() / 1000)}:R>.*`);
 
     const legendItems = [
       `${emojiTarget} • **Join / Leave** the lobby`,
@@ -1989,21 +2001,21 @@ async function handleWebLobbyCreation(lobby) {
 
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
-      .setDescription(`"${msgText}"`)
+      .setDescription(descLines.join('\n'))
       .setColor(embedColor)
       .addFields(
-        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${Math.floor(new Date(lobby.expires_at).getTime() / 1000)}:R>.*`, inline: false },
-        { name: '🔑 Password', value: lobby.lobby_password && lobby.lobby_password !== 'None' ? `\`${lobby.lobby_password}\`` : 'Check chat for more info', inline: false },
         { name: `👥 Players (${count}/4)`, value: rosterStr, inline: false },
         { name: 'Reaction Legend', value: legendItems.join('\n'), inline: false }
       )
-      .setFooter({ text: `Lobby created from dunestats.cc/lobbies` }).setTimestamp();
+      .setTimestamp();
 
-    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
-    if (lobby.lobby_password && lobby.lobby_password !== 'None') copyableContent += `\n🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*`;
-    copyableContent += `\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${lobby.id}`;
+    const copyableLines = [];
+    if (lobby.lobby_password && lobby.lobby_password !== 'None') {
+      copyableLines.push(`🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*`);
+    }
+    copyableLines.push(`🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${lobby.id}`);
 
-    const message = await channel.send({ content: copyableContent, embeds: [embed] });
+    const message = await channel.send({ content: copyableLines.join('\n'), embeds: [embed] });
 
     try {
       const customJoinEmoji = channel.guild.emojis.cache.find(e => e.name === (isLive ? 'LiveDune' : 'AsyncDune'));
@@ -2065,19 +2077,13 @@ async function executeLobbyPing(lobby, channel) {
   const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
   if (!msg || !msg.embeds || !msg.embeds[0]) return true;
 
-  const modeInformation = (msg.embeds[0].fields[0]?.value || '').split('\n')[0]
-    .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+for\s+/i, '')
-    .replace(/<@!?\d+>\s+is\s+looking\s+for\s+players\s+/i, '')
-    .replace(/\*\*.+?\*\*\s+(?:<@\d+>\s+)?created\s+a\s+lobby\s+for\s+/i, '')
-    .replace(/\*\*.+?\*\*\s+(?:<@\d+>\s+)?created\s+a\s+lobby\s+/i, '');
+  const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
 
   let hostMentionString = 'Web Player 🌐';
   const validDiscordHostId = normalizeDiscordId(lobby.host_id);
 
   if (validDiscordHostId) {
-    const { data: mapData } = await supabase.from('player_discord_map').select('player_key, display_name').eq('discord_user_id', validDiscordHostId).maybeSingle();
-    const name = mapData?.display_name || (mapData?.player_key ? capitalize(mapData.player_key) : null);
-    hostMentionString = name ? `[${name}](https://dunestats.cc/players/${encodeURIComponent(name)}) <@${validDiscordHostId}>` : `<@${validDiscordHostId}>`;
+    hostMentionString = `<@${validDiscordHostId}>`;
   } else if (lobby.web_player_names && lobby.web_player_names.length > 0) {
     const wName = lobby.web_player_names[0];
     hostMentionString = `[${wName}](https://dunestats.cc/players/${encodeURIComponent(wName)}) 🌐`;
@@ -2088,14 +2094,13 @@ async function executeLobbyPing(lobby, channel) {
   }
 
   const totalCount = (lobby.player_ids?.length || 0) + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0);
-  const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `Password: \`${lobby.lobby_password}\` ` : '';
+  const optionalPasswordText = (lobby.lobby_password && lobby.lobby_password !== 'None') ? `\n🔑 Lobby Password: \`${lobby.lobby_password}\` *(Tap to copy)*` : '';
   const accurateEndEmoji = isLiveLobby
     ? getEmoji(channel.guild, 'LiveDune', '<:LiveDune:1232049130151346216>')
     : getEmoji(channel.guild, 'AsyncDune', '<:AsyncDune:1232048177390289097>');
-  const copyableMatchId = lobby.match_id ? `\n🎮 Match ID: \`${lobby.match_id}\`` : '';
-  const manageLink = `\n🔗 **Manage Lobby:** https://dunestats.cc/LFG/${lobby.id}`;
+  const manageLink = `\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${lobby.id}`;
 
-  const tagMessage = `<@&${roleId}>${hostMentionString} (${totalCount}/4) is looking for players for${modeInformation}${optionalPasswordText}${accurateEndEmoji}${copyableMatchId}${manageLink}`;
+  const tagMessage = `<@&${roleId}> ${hostMentionString} (${totalCount}/4) is looking for players for ${formatLine}${accurateEndEmoji}${optionalPasswordText}${manageLink}`;
 
   let historyCountMet = false;
   try {
@@ -2165,7 +2170,6 @@ function startRealtimeListener() {
     .on('postgres_changes', { event: '*', schema: 'public', table: 'matchmaking_queue' }, async (payload) => {
       if (payload.eventType === 'INSERT' && payload.new) {
         const qRow = payload.new;
-        // If inserted from the Website (not already handled by Discord button click)
         if (!qRow.discord_user_id || !recentDiscordQueueIds.has(qRow.discord_user_id)) {
           const fallbackName = qRow.display_name || qRow.player_key || 'Web Player';
           const whoStr = qRow.discord_user_id
@@ -2663,23 +2667,32 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
     await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
 
     const { display, count } = await buildRosterDisplay(lobbyRecord);
-    const cleanStartedSentence = String(targetMsg.embeds[0].fields[0].value).split('\n')[0].replace('is looking', 'was looking');
+    const formatLine = buildFormatSummaryLine(channel.guild, lobbyRecord.board_type, lobbyRecord.expansions);
     
     const isLive = String(lobbyRecord.mode || '').trim().toLowerCase() === 'live';
     const matchTypeTitle = isLive ? '🏁 Live Match Started!' : '🏁 Async Match Started!';
 
+    const descLines = [];
+    if (isCustomLobbyNote(lobbyRecord.message_text)) {
+      descLines.push(`"${lobbyRecord.message_text.trim()}"\n`);
+    }
+    descLines.push(formatLine);
+
     const embed = EmbedBuilder.from(targetMsg.embeds[0])
-      .setTitle(matchTypeTitle).setColor(0x2ecc71).setFooter(null) 
+      .setTitle(matchTypeTitle)
+      .setDescription(descLines.join('\n'))
+      .setColor(0x2ecc71)
+      .setFooter(null) 
       .setFields(
-        { name: '📝 Match Details', value: cleanStartedSentence, inline: false }, 
-        { name: '🔑 Password', value: lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None' ? `\`${lobbyRecord.lobby_password}\`` : 'Check chat for more info', inline: false },
         { name: `👥 Final Roster (${count}/4)`, value: display, inline: false }
       );
 
-    const safeMatchId = lobbyRecord.match_id ? ` [ID: ${lobbyRecord.match_id}]` : '';
     const playerTags = (lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ');
+    const pwLine = (lobbyRecord.lobby_password && lobbyRecord.lobby_password !== 'None')
+      ? `\n🔑 Lobby Password: \`${lobbyRecord.lobby_password}\` *(Tap to copy)*`
+      : '';
     
-    const contentStr = `🚀 **The match${safeMatchId} has officially begun! Good luck, commanders!**\nPlayers: ${playerTags}\n🔗 **Submit Results:** https://dunestats.cc/LFG/${lobbyRecord.id}`;
+    const contentStr = `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${playerTags}${pwLine}\n🔗 **Submit Results:** https://dunestats.cc/LFG/${lobbyRecord.id}`;
     
     await targetMsg.edit({ content: contentStr, embeds: [embed], components: [] }).catch(() => {});
 
@@ -2836,7 +2849,7 @@ async function checkAndExpireLobbies() {
         const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
         const msg = channel ? await channel.messages.fetch(lobby.message_id).catch(() => null) : null;
         if (msg && msg.embeds && msg.embeds.length > 0) {
-          await msg.edit({ content: `🚫 **Lobby expired**`, embeds: [EmbedBuilder.from(msg.embeds[0]).setTitle('⏳ Lobby Expired').setColor(0x95A5A6).setDescription('This lobby timed out because it did not fill up in time.')], components: [] }).catch(() => {});
+          await msg.edit({ content: `🚫 **Lobby expired**`, embeds: [EmbedBuilder.from(msg.embeds[0]).setTitle('⏳ Lobby Expired').setColor(0x95A5A6).setDescription('This lobby timed out because it did not fill up in time.').setFooter(null)], components: [] }).catch(() => {});
           await msg.reactions.removeAll().catch(() => {});
         }
       }
@@ -2973,7 +2986,6 @@ async function checkAndSendMatchReminders() {
       const isLiveSched = sched.mode?.trim() === 'live' || (rawSlots && rawSlots.length > 0);
       if (!isLiveSched) continue;
 
-      // Self-heal check: if 4/4 votes agreed on a slot OR status is confirmed without confirmed_timestamp
       const votesObj = sched.votes || {};
       const slotLabels = (rawSlots || []).map(s => s.label);
       const scores = {};
@@ -2990,7 +3002,6 @@ async function checkAndSendMatchReminders() {
         continue;
       }
 
-      // If still unconfirmed after 24 hours since last update, send daily scheduling reminder
       if (sched.status !== 'confirmed' && !sched.confirmed_timestamp) {
         const lastStamp = sched.updated_at || sched.created_at;
         const hoursSinceUpdate = (now.getTime() - new Date(lastStamp).getTime()) / (1000 * 60 * 60);
@@ -3044,7 +3055,7 @@ async function checkAndSendMatchReminders() {
         if (typeof rawSlots === 'string') {
           try { rawSlots = JSON.parse(rawSlots); } catch (e) { rawSlots = []; }
         }
-        if (rawSlots && rawSlots.length > 0) continue; // Handled by live voting reminder above
+        if (rawSlots && rawSlots.length > 0) continue;
 
         const lastAsyncStamp = asyncMatch.updated_at || asyncMatch.created_at;
         if ((now.getTime() - new Date(lastAsyncStamp).getTime()) / (1000 * 60 * 60) >= 24) {
@@ -3074,7 +3085,7 @@ discordClient.on('interactionCreate', async (interaction) => {
       const command = slashCommands.get(interaction.commandName);
       if (!command) return;
       try {
-        await command.execute(interaction, { supabase, discordClient, createQueueLobby, updateQueueMessage });
+        await command.execute(interaction, { supabase, discordClient, createQueueLobby, updateQueueMessage, buildRosterDisplay });
       } catch (error) {
         console.error(`Error executing /${interaction.commandName}:`, error);
         if (interaction.deferred || interaction.replied) await interaction.editReply({ content: 'Something went wrong while processing the command.' }).catch(() => {}); 
@@ -3153,7 +3164,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         return autoDeleteEphemeral(interaction, 60000);
       }
 
-      // 2. Process Queue Live Entry (Uses interaction.update to replace buttons in-place + Auto-Seats if open League lobby exists)
+      // 2. Process Queue Live Entry
       if (customId.startsWith('queue_join_live_')) {
         const durationValue = parseInt(customId.replace('queue_join_live_', ''), 10);
         const expiryDate = new Date(Date.now() + durationValue * 60 * 1000);
@@ -3161,7 +3172,6 @@ discordClient.on('interactionCreate', async (interaction) => {
         const identity = await resolveQueuePlayerIdentity(interaction.user.id, interaction.member);
         const whoAdminStr = `**${identity.displayName}** (<@${interaction.user.id}>)`;
 
-        // Check if an open League lobby is already searching for players
         const seatedLobby = await tryAutoSeatIntoOpenLeagueLobby(interaction.user.id, identity.displayName, identity.userId);
         if (seatedLobby) {
           await supabase.from('matchmaking_queue').delete().eq('discord_user_id', interaction.user.id);
@@ -3239,7 +3249,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         updateQueueMessage();
 
         const playerSet = new Set([interaction.user.id, ...playersToPop]);
-        const targetMsg = await createQueueLobby(interaction.user.id, Array.from(playerSet), 'live', false, false);
+        const targetMsg = await createQueueLobby(interaction.user.id, Array.from(playerSet), 'live', false, false, null);
 
         const jumpLink = targetMsg
           ? `https://discord.com/channels/${interaction.guildId}/${LEAGUE_LFG_CHANNEL_ID}/${targetMsg.id}`
@@ -3359,7 +3369,7 @@ discordClient.on('interactionCreate', async (interaction) => {
           await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
           await interaction.message.edit({
             content: `🚫 **Lobby cancelled by ${interaction.user.username}**`,
-            embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${interaction.user.username}`)],
+            embeds: [EmbedBuilder.from(interaction.message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${interaction.user.username}`).setFooter(null)],
             components: []
           }).catch(() => {});
           return;
@@ -3374,7 +3384,6 @@ discordClient.on('interactionCreate', async (interaction) => {
           return await runKickFlow(lobby, interaction.user, interaction.channel, interaction.message);
         }
 
-        // Anyone (even if not in the lobby) can toggle 🔔 Ping Alerts
         if (action === 'alert') {
           let notifications = [...(lobby.notify_user_ids || [])];
           const hasAlert = notifications.includes(interaction.user.id);
@@ -3405,7 +3414,6 @@ discordClient.on('interactionCreate', async (interaction) => {
         }
       }
 
-      // Handle SP Alerts Opt-Out Button
       if (customId.startsWith('disable_sp_')) {
         const targetId = customId.replace('disable_sp_', '');
         if (interaction.user.id !== targetId) {
@@ -3441,7 +3449,7 @@ discordClient.on('messageCreate', async (message) => {
     const leaguePrefixMatch = trimmedContent.match(/^[\/!](league|lfg)(?:\s+(.+))?$/i);
     if (leaguePrefixMatch) {
       const cmdType = leaguePrefixMatch[1].toLowerCase();
-      const customNote = leaguePrefixMatch[2]?.trim() || 'Official Ranked League Match!';
+      const customNote = leaguePrefixMatch[2]?.trim() || null;
       const member = message.member || await message.guild.members.fetch(message.author.id).catch(() => null);
       if (member && (member.roles.cache.has(LFG_ADMIN_ROLE) || member.permissions.has('Administrator'))) {
         await message.delete().catch(() => {});
@@ -3541,7 +3549,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     if (!lobby || lobby.status !== 'searching') return;
 
-    // Any reaction that is NOT one of the 6 control emojis (➕, 🎮, ❌, 🥾, 🔔, 📢) is the Join/Leave emoji!
     const isJoinEmoji = !LOBBY_CONTROL_EMOJIS.has(emojiName) && !LOBBY_CONTROL_EMOJIS.has(emojiStr);
 
     let players = [...(lobby.player_ids || [])];
@@ -3567,7 +3574,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         }
       }
     } else if (emojiName === '🔔' || emojiStr === '🔔') {
-      // Anyone (even if not in the lobby) is allowed to subscribe to ping alerts!
       if (!notifications.includes(user.id)) {
         notifications.push(user.id);
         shouldUpdate = true;
@@ -3630,7 +3636,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
       await message.edit({
         content: `🚫 **Lobby cancelled by ${user.username}**`,
-        embeds: [EmbedBuilder.from(message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${user.username}`)],
+        embeds: [EmbedBuilder.from(message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${user.username}`).setFooter(null)],
         components: []
       }).catch(() => {});
       return;
@@ -3654,7 +3660,6 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
         await message.channel.send({ content: `⏳ **Lobby full!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
       }
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-      // Immediately update the Discord embed without waiting for Supabase Realtime
       await syncLobbyEmbed({ ...lobby, ...updatePayload });
     }
   } catch (err) {
@@ -3701,7 +3706,6 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
         await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${matchCodeLabel} aborted.` }).catch(() => {});
       }
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-      // Immediately update the Discord embed without waiting for Supabase Realtime
       await syncLobbyEmbed({ ...lobby, ...updatePayload });
     }
   } catch (err) {
@@ -3717,7 +3721,7 @@ discordClient.once('clientReady', async () => {
   await syncGuildDirectory();
   await updateQueueMessage();
   await catchUpMissedWebLobbies();
-  await checkAndSendMatchReminders(); // Run immediate check on boot (will self-heal any 4/4 voted matches or due 24h reminders)
+  await checkAndSendMatchReminders();
 
   try {
     const { data: unannouncedSp } = await supabase.from('sp_events')
