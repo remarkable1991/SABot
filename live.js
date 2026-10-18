@@ -60,7 +60,7 @@ module.exports = {
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase }) {
+  async execute(interaction, { supabase, buildRosterDisplay }) {
     const isLeague = interaction.options.getBoolean('league') || false;
     const LFG_ADMIN_ROLE = '1557469534133162045';
     const LEAGUE_CHANNEL_ID = '1557473551227818024';
@@ -77,7 +77,7 @@ module.exports = {
       await interaction.deferReply();
     }
 
-    const notes = interaction.options.getString('text') || (isLeague ? 'Looking for players for an Official League match!' : 'Looking for a live match!');
+    const rawCustomText = interaction.options.getString('text')?.trim() || null;
     const customMinutes = interaction.options.getInteger('minutes');
     const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
@@ -136,32 +136,17 @@ module.exports = {
 
     const dbBoardType = board === 'Uprising' ? 'Uprising' : 'Base Game';
 
-    const ixText = `${ixEmoji} Rise of IX`.trim();
-    const immoText = `${immoEmoji} Immortality`.trim();
-    const epicText = `${epicEmoji} Epic Mode`.trim();
-    const uprisingText = `${uprisingEmoji} Uprising`.trim();
-    const choamText = `${choamEmoji} CHOAM Module`.trim();
+    const formatParts = [];
+    if (board === 'Uprising') formatParts.push(`${uprisingEmoji} **Uprising**`.trim());
+    else formatParts.push(`**Base Game**`);
 
-    let expansionText = '';
-    if (expansion === 'Ix') expansionText = ixText;
-    if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo') expansionText = `${ixText} and${immoText}`;
+    if (expansion === 'Ix' || expansion === 'Ix_Immo') formatParts.push(`${ixEmoji} **Rise of IX**`.trim());
+    if (expansion === 'Immortality' || expansion === 'Ix_Immo') formatParts.push(`${immoEmoji} **Immortality**`.trim());
+    if (activeMode === 'Epic') formatParts.push(`${epicEmoji} **Epic Mode**`.trim());
+    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') formatParts.push(`**Base Leaders**`);
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') formatParts.push(`${choamEmoji} **CHOAM Module**`.trim());
 
-    let modeText = '';
-    if (activeMode === 'Epic') modeText = epicText;
-    if (activeMode === 'BaseLeaders') modeText = 'Base Leaders';
-    if (activeMode === 'CHOAM') modeText = choamText;
-    if (activeMode === 'Leaders_CHOAM') modeText = `Base Leaders + ${choamText}`;
-
-    if (modeText) {
-      if (expansionText) {
-        expansionText += ` (with ${modeText})`;
-      } else {
-        expansionText = modeText;
-      }
-    }
-
-    let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
+    const formatLine = formatParts.join(' + ');
     const liveDuneEmoji = getCustomEmoji('LiveDune', '<:LiveDune:1232049130151346216>');
     
     const minutesToExpiry = customMinutes ? Math.max(customMinutes, 5) : 180;
@@ -240,130 +225,28 @@ module.exports = {
       }
     }
 
-    const expectedPlayerKeys = [];
-    const discordUsernames = [];
-    const pkMap = {};
-    const displayMap = {};
-    const elos = {};
     let currentSeasonId = 2;
-
     try {
       if (isLeague) {
         const nowIso = new Date().toISOString();
         const { data: seasonData } = await supabase.from('sp_seasons').select('id').lte('starts_at', nowIso).gt('ends_at', nowIso).maybeSingle();
         if (seasonData?.id) currentSeasonId = seasonData.id;
       }
+    } catch (e) {}
 
-      const { data: mapData } = await supabase.from('player_discord_map')
-        .select('discord_user_id, player_key, discord_username, display_name')
-        .in('discord_user_id', playerIds);
-        
-      if (mapData) {
-        mapData.forEach(row => {
-          if (row.player_key) {
-             pkMap[row.discord_user_id] = row.player_key;
-             if (isLeague) expectedPlayerKeys.push(row.player_key);
-          }
-          if (row.display_name) {
-             displayMap[row.discord_user_id] = row.display_name;
-          } else if (row.player_key) {
-             displayMap[row.discord_user_id] = row.player_key.charAt(0).toUpperCase() + row.player_key.slice(1);
-          }
-          
-          if (isLeague && row.discord_username) discordUsernames.push(row.discord_username);
-        });
-      }
-      
-      const keysToFetch = [...expectedPlayerKeys, ...guestPlayers.map(g => normalize(g))].filter(Boolean);
-      const guestRatingsLookup = {};
+    const { display: fullRosterDisplay, count: totalSlotCount } = buildRosterDisplay
+      ? await buildRosterDisplay({
+          player_ids: playerIds,
+          guest_players: guestPlayers,
+          web_player_names: [],
+          web_player_ids: [],
+          notify_user_ids: [],
+          is_league: isLeague,
+          season_id: currentSeasonId
+        })
+      : { display: playerIds.map(id => `• <@${id}>`).join('\n'), count: playerIds.length + guestPlayers.length };
 
-      if (keysToFetch.length > 0) {
-        const [{ data: oData }, { data: lData }] = await Promise.all([
-          supabase.from('player_ratings').select('player_key, display_name, elo').in('player_key', keysToFetch).eq('game_version', 'overall'),
-          isLeague ? supabase.from('player_league_ratings').select('player_key, elo').in('player_key', keysToFetch).eq('season', currentSeasonId) : Promise.resolve({ data: [] })
-        ]);
-        oData?.forEach(r => { 
-          if (!elos[r.player_key]) elos[r.player_key] = {}; 
-          elos[r.player_key].overall = r.elo;
-          if (r.display_name) guestRatingsLookup[r.player_key] = r.display_name;
-        });
-        lData?.forEach(r => { 
-          if (!elos[r.player_key]) elos[r.player_key] = {}; 
-          elos[r.player_key].league = r.elo; 
-        });
-      }
-
-      for (const guest of guestPlayers) {
-        const normKey = normalize(guest);
-        if (guestRatingsLookup[normKey]) {
-          guestRatingsLookup[guest] = guestRatingsLookup[normKey];
-        }
-      }
-
-      this.guestRatingsLookup = guestRatingsLookup;
-    } catch (err) { console.error('Failed to map players/elos:', err); }
-
-    const hostDisplayName = displayMap[host.id] || host.username;
-    let statusSentence = `**${hostDisplayName}** <@${host.id}> is looking for players`;
-    if (board && board !== 'Base' && expansionText) statusSentence += ` for ${boardText} with${expansionText}`;
-    else if (board && board !== 'Base') statusSentence += ` for ${boardText}`;
-    else if (board === 'Base' && expansionText) statusSentence += ` for Base Game with ${expansionText}`;
-    else if (expansionText) statusSentence += ` playing with ${expansionText}`;
-    statusSentence += '.';
-
-    if (isLeague) {
-       statusSentence += `\n\n⚠️ **Official League Match**: Results will count toward Season ${currentSeasonId} League standings.`;
-    }
-
-    let customPingSentence = `**${hostDisplayName}** <@${host.id}> is looking for live players${roleMention}`;
-    if (board && board !== 'Base' && expansionText) customPingSentence += ` for ${boardText} with${expansionText}`;
-    else if (board && board !== 'Base') customPingSentence += ` for ${boardText}`;
-    else if (board === 'Base' && expansionText) customPingSentence += ` for Base Game with ${expansionText}`;
-    else if (expansionText) customPingSentence += ` playing with ${expansionText}`;
-    customPingSentence += '.';
-
-    const guestLookup = this.guestRatingsLookup || {};
-
-    const mentionsList = playerIds.map(id => {
-      const dName = displayMap[id] || (pkMap[id] ? pkMap[id] : null);
-      let nameStr = dName ? `[${dName}](https://dunestats.cc/players/${encodeURIComponent(dName)}) <@${id}>` : `<@${id}>`;
-      
-      if (isLeague) {
-        const pk = pkMap[id];
-        const leagueElo = pk && elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
-        const overallElo = pk && elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        nameStr += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
-      }
-      return `• ${nameStr}`;
-    });
-    
-    const guestsList = guestPlayers.map(name => {
-      const normKey = normalize(name);
-      const isKnownOnBoard = guestLookup[normKey] || guestLookup[name];
-      let str = '';
-
-      if (isKnownOnBoard) {
-        const realCaseName = isKnownOnBoard;
-        str = `[${realCaseName}](https://dunestats.cc/players/${encodeURIComponent(realCaseName)}) 📊`;
-      } else {
-        str = name.toLowerCase().startsWith('friend of') ? `${name} 👥` : `**${name}** 👥`;
-      }
-
-      if (isLeague) {
-        const pk = normKey;
-        const leagueElo = elos[pk]?.league !== undefined ? Math.round(elos[pk].league) : 1000;
-        const overallElo = elos[pk]?.overall !== undefined ? Math.round(elos[pk].overall) : 1000;
-        str += ` [🏆 ${leagueElo} \vert{} 🌍 ${overallElo}]`;
-      }
-      return `• ${str}`;
-    });
-    
-    let fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
-    if (!fullRosterDisplay || fullRosterDisplay.trim() === '') {
-       fullRosterDisplay = '\u200B'; 
-    }
-
-    const cleanHostName = hostDisplayName.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+    const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
     const prefixPattern = `${cleanHostName}-L`;
     let generatedMatchId = `${prefixPattern}1`;
 
@@ -389,44 +272,42 @@ module.exports = {
 
         generatedMatchId = `${prefixPattern}${maxNumber + 1}`;
       }
-    } catch (idErr) {
-      console.error('Error generating host-based live match ID:', idErr);
-    }
-
-    const totalSlotCount = playerIds.length + guestPlayers.length;
+    } catch (idErr) {}
 
     const embedTitle = isLeague 
-      ? `🏆 Ranked League Match Open! [ID: ${generatedMatchId}]`
-      : `${liveDuneEmoji} New Live Match Open! [ID:${generatedMatchId}]`;
+      ? `🏆 Ranked League Match Open!`
+      : `${liveDuneEmoji} New Live Match Open!`;
     const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
+
+    const descLines = [];
+    if (rawCustomText) descLines.push(`"${rawCustomText}"\n`);
+    descLines.push(formatLine);
+    descLines.push(`*Lobby expires <t:${timeoutTimestamp}:R>.*`);
 
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
-      .setDescription(`"${notes}"`)
+      .setDescription(descLines.join('\n'))
       .setColor(embedColor) 
       .addFields(
-        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
-        { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
         { name: `👥 Players (${totalSlotCount}/4)`, value: fullRosterDisplay, inline: false },
         { 
           name: 'Reaction Legend', 
           value: [
             `${liveDuneEmoji} • **Join / Leave** the lobby`,
             `🎮 • **Start Game** (Requires 2+ players)`,
-            `❌ • **Cancel Lobby** (Host only)`,
-            `🥾 • **Kick Player** (Host/Admin only)`,
-            `🔔 • **Toggle Ping Alerts** to get notified when someone joins`,
+            `❌ • **Cancel Lobby** (Host/Admin only)`,
+            `🥾 • **Kick Player** (Host/Seated/Admin)`,
+            `🔔 • **Toggle Ping Alerts**`,
             `📢 • **Ping Lobby Role** (45m cooldown)`
           ].join('\n'), 
           inline: false 
         }
       )
-      .setFooter({ text: `Lobbies time out automatically if unstarted after ${minutesToExpiry} minutes.` })
       .setTimestamp();
 
-    let initialCopyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    let initialCopyableContent = '';
     if (password !== 'None') {
-      initialCopyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
+      initialCopyableContent = `🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
     }
 
     let actualChannelId = interaction.channelId;
@@ -438,7 +319,7 @@ module.exports = {
       if (!leagueChannel) {
         return interaction.editReply({ content: `❌ Could not find target channel <#${LEAGUE_CHANNEL_ID}>.` });
       }
-      targetMessage = await leagueChannel.send({ content: initialCopyableContent, embeds: [embed] });
+      targetMessage = await leagueChannel.send({ content: initialCopyableContent || undefined, embeds: [embed] });
       targetMessageId = targetMessage.id;
       actualChannelId = LEAGUE_CHANNEL_ID;
 
@@ -446,7 +327,7 @@ module.exports = {
       await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**` });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
     } else {
-      const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
+      const response = await interaction.editReply({ content: initialCopyableContent || undefined, embeds: [embed] });
       targetMessageId = response.id;
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
@@ -462,7 +343,7 @@ module.exports = {
         player_ids: playerIds,
         notify_user_ids: [],
         guest_players: guestPlayers,
-        message_text: notes,
+        message_text: rawCustomText,
         lobby_password: password !== 'None' ? password : null,
         board_type: dbBoardType,
         expansions: dbExpansions,
@@ -472,8 +353,8 @@ module.exports = {
         is_league: isLeague,
         season_id: isLeague ? currentSeasonId : null,
         league_status: isLeague ? 'open' : null,
-        expected_player_keys: expectedPlayerKeys,
-        discord_usernames: discordUsernames
+        expected_player_keys: [],
+        discord_usernames: []
       })
       .select('id')
       .single();
@@ -484,8 +365,10 @@ module.exports = {
     }
 
     const numericLobbyId = insertedMatch.id;
-    const finalizedContent = `${initialCopyableContent}\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`;
-    await targetMessage.edit({ content: finalizedContent });
+    const finalizedLines = [];
+    if (password !== 'None') finalizedLines.push(`🔑 Lobby Password: \`${password}\` *(Tap to copy)*`);
+    finalizedLines.push(`🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`);
+    await targetMessage.edit({ content: finalizedLines.join('\n') });
 
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
@@ -497,9 +380,12 @@ module.exports = {
       await targetMessage.react('📢').catch(() => {});
     } catch (reactErr) { console.error(reactErr); }
 
+    const allSeatedTags = playerIds.map(id => `<@${id}>`).join(' ');
+    const customPingSentence = `<@${host.id}> is looking for live players${roleMention} for ${formatLine}.${allSeatedTags}`.trim();
+
     const pingMessage = await targetMessage.channel.send({
       content: customPingSentence,
-      allowedMentions: { roles: ['1219666679764877424'] } 
+      allowedMentions: { roles: ['1219666679764877424'], users: playerIds } 
     });
 
     setTimeout(() => {
