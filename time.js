@@ -41,7 +41,7 @@ function generateGoogleCalendarUrl(title, startDate, durationHours = 2) {
 
 module.exports = {
   data: new SlashCommandBuilder()
-    .setName('confirm')
+    .setName('time')
     .setDescription('Confirm match start (Async), lock in a time, or propose a new live time slot')
     .addStringOption((option) =>
       option
@@ -123,8 +123,13 @@ module.exports = {
 
       const topPostLink = `https://discord.com/channels/${DISCORD_GUILD_ID || interaction.guildId}/${schedule.thread_id}/${schedule.message_id}`;
 
-      // --- ASYNC MATCH HANDLING ---
-      if (schedule.mode === 'async') {
+      let existingSlots = schedule.suggested_slots || [];
+      if (typeof existingSlots === 'string') {
+        try { existingSlots = JSON.parse(existingSlots); } catch (e) { existingSlots = []; }
+      }
+
+      // --- ASYNC MATCH HANDLING (Only if mode is async AND no time slots are being proposed/used) ---
+      if (schedule.mode === 'async' && existingSlots.length === 0 && !rawSlotInput && !customTime) {
         const nowISO = new Date().toISOString();
         await supabase
           .from('tournament_match_schedules')
@@ -136,7 +141,7 @@ module.exports = {
           .eq('id', schedule.id);
 
         const asyncEmbed = new EmbedBuilder()
-          .setTitle(`🚀 Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+          .setTitle(`🚀 Match Started: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`)
           .setColor(0x2ECC71)
           .setDescription(`The game is now **Ongoing**! Turn timers are active. Good luck!\n\n🔗 **[Jump to Top Post](${topPostLink})**`)
           .setTimestamp();
@@ -148,8 +153,7 @@ module.exports = {
         return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [asyncEmbed] });
       }
 
-      // --- LIVE MATCH HANDLING ---
-      let existingSlots = schedule.suggested_slots || [];
+      // --- LIVE MATCH TIME PROPOSAL / LOCK HANDLING ---
       let calculatedTimeText = null;
       let calculatedTimestamp = null;
       let baseSlotFound = null;
@@ -199,6 +203,7 @@ module.exports = {
         await supabase
           .from('tournament_match_schedules')
           .update({
+            mode: 'live',
             status: 'confirmed',
             confirmed_slot: baseSlotFound?.label || 'Manual',
             confirmed_time_text: calculatedTimeText,
@@ -208,7 +213,7 @@ module.exports = {
           })
           .eq('id', schedule.id);
 
-        const matchTitle = `[${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`;
+        const matchTitle = `[${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`;
         const calUrl = calculatedTimestamp ? generateGoogleCalendarUrl(matchTitle, new Date(calculatedTimestamp)) : null;
 
         const forceEmbed = new EmbedBuilder()
@@ -260,10 +265,11 @@ module.exports = {
 
       const votesCount = Object.keys(currentVotes).length;
 
-      // Update schedule status
+      // Update schedule status (also ensure mode is 'live' since time slots are being voted on)
       await supabase
         .from('tournament_match_schedules')
         .update({
+          mode: 'live',
           suggested_slots: updatedSlots,
           votes: currentVotes,
           votes_count: votesCount,
@@ -291,7 +297,7 @@ module.exports = {
 
           const nonVoterIds = (schedule.player_discord_ids || []).filter(id => !currentVotes[id] || currentVotes[id].length === 0);
           const nonVoterDisplay = nonVoterIds.length > 0
-            ? `\n\n**⏳ Did not vote yet (${(schedule.player_discord_ids?.length || 4) - nonVoterIds.length}/4):**\n${nonVoterIds.map(id => `<@${id}>`).join(', ')}`
+            ? `\n\n**⏳ Did not vote yet (${(schedule.player_discord_ids?.length \vert{}\vert{} 4) - nonVoterIds.length}/4):**\n${nonVoterIds.map(id => `<@${id}>`).join(', ')}`
             : `\n\n**✅ All players voted!**`;
 
           const updatedFields = originalEmbed.fields.filter(f => !f.name.includes('Suggested Time Slots'));
@@ -306,13 +312,13 @@ module.exports = {
           await fetchedMsg.react(nextEmoji).catch(() => {});
         }
       } catch (uiErr) {
-        console.error('Failed to update guidelines message UI on /confirm proposal:', uiErr);
+        console.error('Failed to update guidelines message UI on /time proposal:', uiErr);
       }
 
       const proposalEmbed = new EmbedBuilder()
         .setTitle(`💡 New Time Slot Proposed: ${nextEmoji}`)
         .setColor(0xF1C40F)
-        .setDescription(`<@${interaction.user.id}> proposed a new time slot and voted for it:\n\n**${nextEmoji} ${calculatedTimeText}**\n\n👉 **[Jump to Voting Post to React](${topPostLink})**`)
+        .setDescription(`<@${interaction.user.id}> proposed a new time slot and voted for it:\n\n**${nextEmoji}${calculatedTimeText}**\n\n👉 **[Jump to Voting Post to React](${topPostLink})**`)
         .setTimestamp();
 
       if (threadChannel.id !== interaction.channelId) {
@@ -322,7 +328,7 @@ module.exports = {
       return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [proposalEmbed] });
 
     } catch (error) {
-      console.error('Error executing /confirm command:', error);
+      console.error('Error executing /time command:', error);
       await interaction.editReply({ content: '⚠️ An error occurred while adjusting the match schedule.' });
     }
   }
