@@ -40,7 +40,7 @@ module.exports = {
       'live',
       false,
       true, // useButtons = true (Buttons + Modal version)
-      'Official Ranked League Match!'
+      null  // No redundant default note
     );
 
     const jumpLink = targetMsg
