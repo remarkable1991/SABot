@@ -78,6 +78,7 @@ module.exports = {
     }
 
     const rawCustomText = interaction.options.getString('text')?.trim() || null;
+    const dbMessageText = rawCustomText || (isLeague ? 'Official Ranked League Match!' : 'Looking for a live match!');
     const customMinutes = interaction.options.getInteger('minutes');
     const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
@@ -305,7 +306,7 @@ module.exports = {
       )
       .setTimestamp();
 
-    let initialCopyableContent = '';
+    let initialCopyableContent = '🎮 Generating lobby link...';
     if (password !== 'None') {
       initialCopyableContent = `🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
     }
@@ -319,7 +320,7 @@ module.exports = {
       if (!leagueChannel) {
         return interaction.editReply({ content: `❌ Could not find target channel <#${LEAGUE_CHANNEL_ID}>.` });
       }
-      targetMessage = await leagueChannel.send({ content: initialCopyableContent || undefined, embeds: [embed] });
+      targetMessage = await leagueChannel.send({ content: initialCopyableContent, embeds: [embed] });
       targetMessageId = targetMessage.id;
       actualChannelId = LEAGUE_CHANNEL_ID;
 
@@ -327,11 +328,12 @@ module.exports = {
       await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**` });
       setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
     } else {
-      const response = await interaction.editReply({ content: initialCopyableContent || undefined, embeds: [embed] });
+      const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
       targetMessageId = response.id;
       targetMessage = await interaction.channel.messages.fetch(targetMessageId);
     }
 
+    // Always provide non-null strings for message_text and lobby_password to satisfy Supabase NOT NULL constraints
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
@@ -343,8 +345,8 @@ module.exports = {
         player_ids: playerIds,
         notify_user_ids: [],
         guest_players: guestPlayers,
-        message_text: rawCustomText,
-        lobby_password: password !== 'None' ? password : null,
+        message_text: dbMessageText,
+        lobby_password: password,
         board_type: dbBoardType,
         expansions: dbExpansions,
         status: 'searching',
