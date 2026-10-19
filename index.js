@@ -57,6 +57,7 @@ const LIVE_SETTINGS_CHANNEL_ID = '1534192105533083648';
 const ASYNC_SETTINGS_CHANNEL_ID = '1084215554841264169';
 const SCHEDULING_GUIDE_LINK = 'https://discord.com/channels/747212662483583069/1561135482946064524';
 const EMOJI_GUIDE_LINK = 'https://discord.com/channels/747212662483583069/1561400611348553810';
+const HOST_RESPONSIBILITIES_LINK = 'https://discord.com/channels/747212662483583069/1561711715891023982';
 
 // Web LFG Channels
 const WEB_LFG_ASYNC_CHANNEL = '1258014952199950449';
@@ -83,7 +84,6 @@ const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
 // Control emojis on lobbies (Everything else on a lobby post is treated as the Join/Leave emoji!)
-// Uses 🙋 (bright yellow/orange in dark mode) for Add Player (and keeps ➕ for backwards compatibility)
 const LOBBY_CONTROL_EMOJIS = new Set(['🙋', '➕', '🎮', '❌', '🥾', '🔔', '📢', '🇦', '🇧', '🇨', '🇩', '🇪', '🇫']);
 
 // Default boilerplate notes that should be hidden so Section B stays clean
@@ -259,14 +259,43 @@ async function getCurrentSeasonId() {
   return cachedSeasonId;
 }
 
-function formatPresetText(preset) {
-  if (!preset) return 'Standard Rules';
-  const exps = preset.expansions || [];
-  const parts = [];
-  if (preset.board_type) parts.push(`**${preset.board_type}**`);
-  if (exps.length > 0) parts.push(exps.join(', '));
-  if (preset.mode) parts.push(preset.mode);
-  return parts.join(' + ');
+function getEmoji(guild, name, fallback = '') {
+  if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
+  const emoji = guild.emojis.cache.find((e) => e.name === name);
+  return emoji ? emoji.toString() : fallback;
+}
+
+function formatBoardWithEmoji(guild, boardType) {
+  if (!boardType) return '**Base Game**';
+  if (boardType.toLowerCase().includes('uprising')) {
+    const uprisingEmoji = getEmoji(guild, 'Uprising', '');
+    return `${uprisingEmoji} **Uprising**`.trim();
+  }
+  return `**${boardType}**`;
+}
+
+function formatExpansionsWithEmoji(guild, expansions = []) {
+  return (expansions || []).map(exp => {
+    if (exp.includes('Rise of IX') || exp === 'Ix') return `${getEmoji(guild, 'Ix', '')} **Rise of IX**`.trim();
+    if (exp.includes('Immortality') || exp === 'Immo') return `${getEmoji(guild, 'Immo', '')} **Immortality**`.trim();
+    if (exp.includes('Epic Mode') || exp === 'Epic') return `${getEmoji(guild, 'Epic', '')} **Epic Mode**`.trim();
+    if (exp.includes('CHOAM')) return `${getEmoji(guild, 'CHOAM', '')} **CHOAM Module**`.trim();
+    return `**${exp}**`;
+  });
+}
+
+// Builds the clean "Uprising + Immortality + CHOAM Module" format string with custom server emojis
+function buildFormatSummaryLine(guild, boardType, expansions = []) {
+  const richBoard = formatBoardWithEmoji(guild, boardType);
+  const richExps = formatExpansionsWithEmoji(guild, expansions);
+  return [richBoard, ...richExps].filter(Boolean).join(' + ');
+}
+
+function formatPresetText(guild, preset) {
+  if (!preset) return '**Standard Rules**';
+  const rawExps = [...(preset.expansions || [])];
+  if (preset.mode && !rawExps.includes(preset.mode)) rawExps.push(preset.mode);
+  return buildFormatSummaryLine(guild, preset.board_type, rawExps);
 }
 
 async function getActivePreset() {
@@ -300,38 +329,6 @@ function similarity(a, b) {
 }
 
 function formatDelta(value) { const num = Number(value || 0); return (num > 0 ? '+' : '') + num.toFixed(2); }
-
-function getEmoji(guild, name, fallback) {
-  if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
-  const emoji = guild.emojis.cache.find((e) => e.name === name);
-  return emoji ? emoji.toString() : fallback;
-}
-
-function formatBoardWithEmoji(guild, boardType) {
-  if (!boardType) return '**Base Game**';
-  if (boardType.toLowerCase().includes('uprising')) {
-    const uprisingEmoji = getEmoji(guild, 'Uprising', '');
-    return `${uprisingEmoji} **Uprising**`.trim();
-  }
-  return '**Base Game**';
-}
-
-function formatExpansionsWithEmoji(guild, expansions = []) {
-  return (expansions || []).map(exp => {
-    if (exp.includes('Rise of IX') || exp === 'Ix') return `${getEmoji(guild, 'Ix', '')} **Rise of IX**`.trim();
-    if (exp.includes('Immortality') || exp === 'Immo') return `${getEmoji(guild, 'Immo', '')} **Immortality**`.trim();
-    if (exp.includes('Epic Mode') || exp === 'Epic') return `${getEmoji(guild, 'Epic', '')} **Epic Mode**`.trim();
-    if (exp.includes('CHOAM')) return `${getEmoji(guild, 'CHOAM', '')} **CHOAM Module**`.trim();
-    return `**${exp}**`;
-  });
-}
-
-// Builds the clean "Uprising + Immortality + CHOAM Module" format string for Section B
-function buildFormatSummaryLine(guild, boardType, expansions = []) {
-  const richBoard = formatBoardWithEmoji(guild, boardType);
-  const richExps = formatExpansionsWithEmoji(guild, expansions);
-  return [richBoard, ...richExps].filter(Boolean).join(' + ');
-}
 
 function generateGoogleCalendarUrl(title, dateObj) {
   if (!dateObj || isNaN(dateObj.getTime())) return null;
@@ -837,6 +834,7 @@ async function updateQueueMessage() {
       if (!targetMsg) return;
 
       const now = new Date().toISOString();
+      const guild = channel.guild;
 
       const [{ data: currentPreset }, { data: nextPreset }, { data: queueRecords }] = await Promise.all([
         supabase.from('league_presets').select('*').lte('start_date', now).gt('end_date', now).order('start_date', { ascending: false }).limit(1).maybeSingle(),
@@ -844,11 +842,11 @@ async function updateQueueMessage() {
         supabase.from('matchmaking_queue').select('*').eq('mode', 'live').order('joined_at', { ascending: true })
       ]);
 
-      const currentDesc = formatPresetText(currentPreset);
+      const currentDesc = formatPresetText(guild, currentPreset);
       let rotationDetails = `🎲 **Current Active Format:**\n• ${currentDesc}`;
 
       if (nextPreset) {
-        const nextDesc = formatPresetText(nextPreset);
+        const nextDesc = formatPresetText(guild, nextPreset);
         const startUnix = Math.floor(new Date(nextPreset.start_date).getTime() / 1000);
         rotationDetails += `\n\n📅 **Upcoming Format (starts <t:${startUnix}:D>):**\n• ${nextDesc} (<t:${startUnix}:R>)`;
       }
@@ -879,9 +877,8 @@ async function updateQueueMessage() {
         .setDescription(
           `${rotationDetails}\n\n` +
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `• Select how long you are available for a Live match.\n` +
-          `• When the queue reaches **4/4**, a League lobby generates automatically in <#${LEAGUE_LFG_CHANNEL_ID}>.\n` +
-          `• Click **Host lobby now** (<:SA:945323522140565514>) to pull waiting players into your own lobby.`
+          `• A League lobby is posted in <#${LEAGUE_LFG_CHANNEL_ID}> automatically when the queue reaches **4/4**, or immediately whenever someone clicks **Host lobby**.\n` +
+          `• **Host lobby**: Opens a lobby in <#${LEAGUE_LFG_CHANNEL_ID}> with yourself and any waiting players from the queue. By hosting, you take responsibility for creating the room in-game — see **[Host Responsibilities & Guide](${HOST_RESPONSIBILITIES_LINK})**.`
         )
         .setColor(0xF1C40F)
         .setFields(
@@ -889,9 +886,9 @@ async function updateQueueMessage() {
         );
 
       const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('queue_live_prompt').setLabel('Queue Live').setStyle(ButtonStyle.Danger).setEmoji('1232049130151346216'),
-        new ButtonBuilder().setCustomId('queue_host').setLabel('Host lobby now').setStyle(ButtonStyle.Secondary).setEmoji('945323522140565514'),
-        new ButtonBuilder().setCustomId('queue_leave').setLabel('Leave Queue').setStyle(ButtonStyle.Secondary).setEmoji('🚪')
+        new ButtonBuilder().setCustomId('queue_live_prompt').setLabel('Join queue').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId('queue_host').setLabel('Host lobby').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('queue_leave').setLabel('Leave queue').setStyle(ButtonStyle.Secondary)
       );
 
       await targetMsg.edit({ embeds: [updatedEmbed], components: [row] }).catch(() => {});
@@ -948,6 +945,7 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
 
     const embedTitle = `🏆 Ranked League Match Open!`;
     const embedColor = 0xF1C40F;
+    const emojiTarget = getEmoji(guild, 'LiveDune', '<:LiveDune:1232049130151346216>');
     const roleMention = `<@&1219666679764877424>`;
 
     let hostDisplay = isAutoPop ? '*(Host Unclaimed)*' : `<@${hostId}>`;
@@ -980,9 +978,10 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
     descLines.push(formatLine);
     descLines.push(lobbyNameLine);
 
+    const footerGuideBlock = `${emojiTarget} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
     const playersValue = useButtons
       ? rosterStr
-      : `${rosterStr}\n\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
+      : `${rosterStr}\n\n${footerGuideBlock}`;
 
     const fields = [
       { name: `👥 Players (${count}/4)\n\u200B`, value: playersValue, inline: false }
@@ -1085,7 +1084,6 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
       await leagueChannel.send({ content: `⏳ **Lobby full!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
     }
 
-    // If host IGN is unknown, ask them in chat (2 minutes timeout) and auto-update the lobby!
     if (!isAutoPop && hostId && !hostIgnInfo.isKnown) {
       const hostUser = await discordClient.users.fetch(hostId).catch(() => null);
       if (hostUser) {
@@ -1791,7 +1789,6 @@ async function buildRosterDisplay(lobby) {
       }
     }
 
-    // For unmapped players, check if discord_guild_members has a pre-verified suggested_player_key
     const unmappedIds = pIds.filter(id => !discordIgnMap[id]);
     if (unmappedIds.length > 0) {
       for (const uid of unmappedIds) {
@@ -1867,7 +1864,6 @@ async function buildRosterDisplay(lobby) {
         nameLine += ` [🏆 ${lElo}]`;
       }
     } else {
-      // Unlinked player (no known IGN): show only <@id> without ELO
       nameLine = `<@${id}>`;
     }
 
@@ -1972,10 +1968,16 @@ async function syncLobbyEmbed(lobby) {
   descLines.push(formatLine);
   descLines.push(lobbyNameLine);
 
+  const isLive = String(lobby.mode || '').toLowerCase() !== 'async';
+  const emojiTarget = isLive
+    ? getEmoji(channel.guild, 'LiveDune', '<:LiveDune:1232049130151346216>')
+    : getEmoji(channel.guild, 'AsyncDune', '<:AsyncDune:1232048177390289097>');
+
   const hasLfgButtons = msg.components?.some(r => r.components?.some(c => c.customId?.startsWith('lfg_btn_')));
+  const footerGuideBlock = `${emojiTarget} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
   const playersValue = hasLfgButtons
     ? display
-    : `${display}\n\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
+    : `${display}\n\n${footerGuideBlock}`;
 
   const updatedFields = [
     { name: `👥 Players (${count}/4)\n\u200B`, value: playersValue, inline: false }
@@ -2088,12 +2090,14 @@ async function handleWebLobbyCreation(lobby) {
     descLines.push(formatLine);
     descLines.push(lobbyNameLine);
 
+    const footerGuideBlock = `${emojiTarget} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
+
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
       .setDescription(descLines.join('\n'))
       .setColor(embedColor)
       .addFields(
-        { name: `👥 Players (${count}/4)\n\u200B`, value: `${rosterStr}\n\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`, inline: false }
+        { name: `👥 Players (${count}/4)\n\u200B`, value: `${rosterStr}\n\n${footerGuideBlock}`, inline: false }
       )
       .setTimestamp();
 
@@ -3246,7 +3250,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // 1. Queue Live Prompt: Pop-up duration selection
+      // 1. Join Queue Prompt: Pop-up duration selection
       if (customId === 'queue_live_prompt') {
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId('queue_join_live_5').setLabel('5 min').setStyle(ButtonStyle.Danger),
@@ -3256,7 +3260,7 @@ discordClient.on('interactionCreate', async (interaction) => {
           new ButtonBuilder().setCustomId('queue_join_live_60').setLabel('60 min').setStyle(ButtonStyle.Danger)
         );
         await interaction.reply({
-          content: '⏳ How many minutes are you available for a **Live** match?',
+          content: '⏳ **How long do you want to be in the queue before a host opens a lobby?**\n*(If you get put in a lobby later and don\'t want to wait any longer, please leave the lobby).*',
           components: [row],
           flags: MessageFlags.Ephemeral
         }).catch(() => {});
@@ -3309,7 +3313,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         }
 
         await interaction.update({ 
-          content: `✅ You joined the **live** queue as **${identity.displayName}** for **${durationValue} minutes** (active until <t:${Math.floor(expiryDate.getTime() / 1000)}:t>).`,
+          content: `✅ You joined the queue as **${identity.displayName}** for **${durationValue} minutes** (active until <t:${Math.floor(expiryDate.getTime() / 1000)}:t>).`,
           components: []
         }).catch(() => {});
         autoDeleteEphemeral(interaction, 60000);
@@ -3334,7 +3338,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         return;
       }
 
-      // 4. "Host lobby now" Button -> Immediately creates Live League Lobby & shows jump link
+      // 4. "Host lobby" Button -> Immediately creates Live League Lobby & shows jump link
       if (customId === 'queue_host' || customId === 'queue_create_live') {
         await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
         
