@@ -291,12 +291,14 @@ module.exports = {
     descLines.push(formatLine);
     descLines.push(lobbyNameLine);
 
+    const footerGuideBlock = `${liveDuneEmoji} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
+
     const embed = new EmbedBuilder()
       .setTitle(embedTitle)
       .setDescription(descLines.join('\n'))
       .setColor(embedColor) 
       .addFields(
-        { name: `👥 Players (${totalSlotCount}/4)\n\u200B`, value: `${fullRosterDisplay}\n\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`, inline: false }
+        { name: `👥 Players (${totalSlotCount}/4)\n\u200B`, value: `${fullRosterDisplay}\n\n${footerGuideBlock}`, inline: false }
       )
       .setTimestamp();
 
@@ -387,7 +389,6 @@ module.exports = {
       pingMessage.delete().catch(() => {});
     }, 1500);
 
-    // If host IGN is unknown, ask them in chat (2-minute collector) and auto-update the lobby!
     if (!hostIgnInfo.isKnown && promptUnknownHostIgn) {
       promptUnknownHostIgn(insertedMatch, host, targetMessage.channel);
     }
