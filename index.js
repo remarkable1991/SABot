@@ -441,10 +441,57 @@ async function saveDiscordPlayerMap({ discordUserId, discordUsername, displayNam
 // 🎮 HOST IN-GAME NAME (IGN) RESOLVER & 2-MINUTE CHAT COLLECTOR
 // -------------------------------------------------------------
 async function resolveHostIgn(discordUserId, webHostId = null, webPlayerNames = []) {
-  if (webPlayerNames && webPlayerNames.length > 0 && webPlayerNames[0]) {
-    return { ign: webPlayerNames[0], isKnown: true };
+  const validDiscordId = normalizeDiscordId(discordUserId);
+
+  // 1. If the lobby has a Discord Host ID, ALWAYS resolve the Discord Host first!
+  if (validDiscordId) {
+    const { data: mapRow } = await supabase
+      .from('player_discord_map')
+      .select('player_key, display_name')
+      .eq('discord_user_id', validDiscordId)
+      .maybeSingle();
+
+    if (mapRow && mapRow.player_key) {
+      const { data: ratingRow } = await supabase
+        .from('player_ratings')
+        .select('display_name')
+        .eq('player_key', mapRow.player_key)
+        .eq('game_version', 'overall')
+        .maybeSingle();
+      return {
+        ign: ratingRow?.display_name || mapRow.display_name || capitalize(mapRow.player_key),
+        isKnown: true
+      };
+    }
+
+    const { data: dirRow } = await supabase
+      .from('discord_guild_members')
+      .select('suggested_player_key, display_name, discord_username, similarity_score')
+      .eq('discord_user_id', validDiscordId)
+      .maybeSingle();
+
+    if (dirRow && dirRow.suggested_player_key && (dirRow.similarity_score === null || dirRow.similarity_score >= DB_MATCH_THRESHOLD)) {
+      const { data: ratingRow } = await supabase
+        .from('player_ratings')
+        .select('display_name')
+        .eq('player_key', dirRow.suggested_player_key)
+        .eq('game_version', 'overall')
+        .maybeSingle();
+      const resolvedIgn = ratingRow?.display_name || dirRow.display_name || capitalize(dirRow.suggested_player_key);
+
+      await saveDiscordPlayerMap({
+        discordUserId: validDiscordId,
+        discordUsername: dirRow.discord_username,
+        displayName: resolvedIgn,
+        playerKey: dirRow.suggested_player_key
+      });
+      return { ign: resolvedIgn, isKnown: true };
+    }
+
+    return { ign: null, isKnown: false };
   }
 
+  // 2. Only if there is NO Discord Host (Lobby was hosted on the Website), check webHostId / webPlayerNames[0]
   if (webHostId) {
     const { data: wMap } = await supabase
       .from('player_discord_map')
@@ -462,54 +509,8 @@ async function resolveHostIgn(discordUserId, webHostId = null, webPlayerNames = 
     }
   }
 
-  const validDiscordId = normalizeDiscordId(discordUserId);
-  if (!validDiscordId) {
-    return { ign: null, isKnown: false };
-  }
-
-  // 1. Check verified player_discord_map
-  const { data: mapRow } = await supabase
-    .from('player_discord_map')
-    .select('player_key, display_name')
-    .eq('discord_user_id', validDiscordId)
-    .maybeSingle();
-
-  if (mapRow && mapRow.player_key) {
-    const { data: ratingRow } = await supabase
-      .from('player_ratings')
-      .select('display_name')
-      .eq('player_key', mapRow.player_key)
-      .eq('game_version', 'overall')
-      .maybeSingle();
-    return {
-      ign: ratingRow?.display_name || mapRow.display_name || capitalize(mapRow.player_key),
-      isKnown: true
-    };
-  }
-
-  // 2. Check discord_guild_members suggested_player_key
-  const { data: dirRow } = await supabase
-    .from('discord_guild_members')
-    .select('suggested_player_key, display_name, discord_username, similarity_score')
-    .eq('discord_user_id', validDiscordId)
-    .maybeSingle();
-
-  if (dirRow && dirRow.suggested_player_key && (dirRow.similarity_score === null || dirRow.similarity_score >= DB_MATCH_THRESHOLD)) {
-    const { data: ratingRow } = await supabase
-      .from('player_ratings')
-      .select('display_name')
-      .eq('player_key', dirRow.suggested_player_key)
-      .eq('game_version', 'overall')
-      .maybeSingle();
-    const resolvedIgn = ratingRow?.display_name || dirRow.display_name || capitalize(dirRow.suggested_player_key);
-
-    await saveDiscordPlayerMap({
-      discordUserId: validDiscordId,
-      discordUsername: dirRow.discord_username,
-      displayName: resolvedIgn,
-      playerKey: dirRow.suggested_player_key
-    });
-    return { ign: resolvedIgn, isKnown: true };
+  if (webPlayerNames && webPlayerNames.length > 0 && webPlayerNames[0]) {
+    return { ign: webPlayerNames[0], isKnown: true };
   }
 
   return { ign: null, isKnown: false };
@@ -2236,11 +2237,29 @@ async function handleWebQuickChat(chatRow) {
   const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
   if (!channel) return;
 
-  if (message_code === 'room_up') await channel.send(`💬 **[🌐 ${sender_name}]**: 🎮 Room has been created in-game!`);
-  else if (message_code === 'password_ask') await channel.send(`💬 **[🌐 ${sender_name}]**: 🔑 What is the in-game room password?`);
-  else if (message_code === 'need_5') await channel.send(`💬 **[🌐 ${sender_name}]**: ⏳ Stepping away for 5 minutes, be right back!`);
-  else if (message_code === 'lobby_name_ask') await channel.send(`💬 **[🌐 ${sender_name}]**: 📛 What is the in-game lobby name?`);
-  else if (message_code === 'ping') await executeLobbyPing(lobby, channel);
+  const hostPing = normalizeDiscordId(lobby.host_id) ? `<@${lobby.host_id}> ` : '';
+
+  if (message_code === 'room_up') {
+    await channel.send(`💬 **[🌐 ${sender_name}]**: 🎮 Room has been created in-game!`);
+  } else if (message_code === 'password_ask') {
+    const row = new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`quickchat_pw_btn_${lobby.id}`)
+        .setLabel('Reply with Password')
+        .setStyle(ButtonStyle.Success)
+        .setEmoji('🔑')
+    );
+    await channel.send({
+      content: `💬 **[🌐 ${sender_name}]**: 🔑 ${hostPing}What is the in-game room password?`,
+      components: [row]
+    });
+  } else if (message_code === 'need_5') {
+    await channel.send(`💬 **[🌐 ${sender_name}]**: ⏳ Stepping away for 5 minutes, be right back!`);
+  } else if (message_code === 'lobby_name_ask') {
+    await channel.send(`💬 **[🌐 ${sender_name}]**: 📛 ${hostPing}What is the in-game lobby name?`);
+  } else if (message_code === 'ping') {
+    await executeLobbyPing(lobby, channel);
+  }
 }
 
 function startRealtimeListener() {
@@ -3197,7 +3216,7 @@ discordClient.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // --- MODAL SUBMISSIONS (/lfg Add Player Modal) ---
+    // --- MODAL SUBMISSIONS (/lfg Add Player Modal & Web Quick-Chat Password Reply Modal) ---
     if (interaction.isModalSubmit()) {
       if (interaction.customId.startsWith('lfg_modal_add_')) {
         const lobbyId = interaction.customId.replace('lfg_modal_add_', '');
@@ -3220,6 +3239,42 @@ discordClient.on('interactionCreate', async (interaction) => {
         await interaction.editReply({ content: result.message }).catch(() => {});
         return autoDeleteEphemeral(interaction, 60000);
       }
+
+      if (interaction.customId.startsWith('quickchat_pw_modal_')) {
+        const lobbyId = interaction.customId.replace('quickchat_pw_modal_', '');
+        await interaction.deferReply({ flags: MessageFlags.Ephemeral }).catch(() => {});
+
+        const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobbyId).maybeSingle();
+        if (!lobby || lobby.status !== 'searching') {
+          await interaction.editReply({ content: '❌ This lobby is no longer active.' }).catch(() => {});
+          return autoDeleteEphemeral(interaction, 60000);
+        }
+
+        const perms = await checkLobbyPermissions(lobby, interaction.user.id, interaction.guild);
+        if (!perms.canManageRoster) {
+          await interaction.editReply({ content: '❌ Only the Host, seated players, or Admins can set the lobby password.' }).catch(() => {});
+          return autoDeleteEphemeral(interaction, 60000);
+        }
+
+        const newPassword = interaction.fields.getTextInputValue('password_input')?.trim() || 'None';
+        await supabase.from('active_async_matches').update({ lobby_password: newPassword }).eq('id', lobby.id);
+        await syncLobbyEmbed({ ...lobby, lobby_password: newPassword });
+
+        if (interaction.message) {
+          await interaction.message.edit({
+            content: `${interaction.message.content}\n✅ **Password set by <@${interaction.user.id}>:** \`${newPassword}\` *(Sent to website & updated on lobby)*`,
+            components: []
+          }).catch(() => {});
+        } else {
+          await interaction.channel?.send({
+            content: `🔑 <@${interaction.user.id}> set the lobby password to: \`${newPassword}\``
+          }).catch(() => {});
+        }
+
+        await interaction.editReply({ content: `✅ Lobby password updated to \`${newPassword}\`!` }).catch(() => {});
+        return autoDeleteEphemeral(interaction, 60000);
+      }
+
       return;
     }
 
@@ -3227,7 +3282,7 @@ discordClient.on('interactionCreate', async (interaction) => {
     if (interaction.isButton()) {
       const customId = interaction.customId;
 
-      // 0. If Add Player Button is clicked on /lfg, open Modal IMMEDIATELY before any async DB queries so it never hits the 3s timeout!
+      // 0a. If Add Player Button is clicked on /lfg, open Modal IMMEDIATELY before any async DB queries so it never hits the 3s timeout!
       if (customId.startsWith('lfg_btn_add_')) {
         const lobbyId = customId.replace('lfg_btn_add_', '');
         const defaultFriend = `Friend of ${interaction.user.username}`;
@@ -3246,6 +3301,27 @@ discordClient.on('interactionCreate', async (interaction) => {
         modal.addComponents(new ActionRowBuilder().addComponents(input));
         await interaction.showModal(modal).catch((err) => {
           console.error('Failed to show Add Player modal:', err.message);
+        });
+        return;
+      }
+
+      // 0b. Open Password Reply Modal immediately when clicking "Reply with Password" on a web quick-chat message
+      if (customId.startsWith('quickchat_pw_btn_')) {
+        const lobbyId = customId.replace('quickchat_pw_btn_', '');
+        const modal = new ModalBuilder()
+          .setCustomId(`quickchat_pw_modal_${lobbyId}`)
+          .setTitle('Set In-Game Lobby Password');
+
+        const input = new TextInputBuilder()
+          .setCustomId('password_input')
+          .setLabel('In-Game Room Password')
+          .setStyle(TextInputStyle.Short)
+          .setPlaceholder('Enter the password you set in Dune...')
+          .setRequired(true);
+
+        modal.addComponents(new ActionRowBuilder().addComponents(input));
+        await interaction.showModal(modal).catch((err) => {
+          console.error('Failed to show Password modal:', err.message);
         });
         return;
       }
