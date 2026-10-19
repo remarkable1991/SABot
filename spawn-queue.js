@@ -1,12 +1,42 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, PermissionFlagsBits } = require('discord.js');
 
-function formatPresetDescription(preset) {
-  if (!preset) return 'Standard Rules';
-  const exps = preset.expansions || [];
+const HOST_RESPONSIBILITIES_LINK = 'https://discord.com/channels/747212662483583069/1561711715891023982';
+
+function getEmoji(guild, name, fallback = '') {
+  if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
+  const emoji = guild.emojis.cache.find((e) => e.name === name);
+  return emoji ? emoji.toString() : fallback;
+}
+
+function formatPresetWithEmojis(guild, preset) {
+  if (!preset) return '**Standard Rules**';
   const parts = [];
-  if (preset.board_type) parts.push(`**${preset.board_type}**`);
-  if (exps.length > 0) parts.push(exps.join(', '));
-  if (preset.mode) parts.push(preset.mode);
+
+  if (preset.board_type) {
+    if (preset.board_type.toLowerCase().includes('uprising')) {
+      parts.push(`${getEmoji(guild, 'Uprising', '')} **Uprising**`.trim());
+    } else {
+      parts.push(`**${preset.board_type}**`);
+    }
+  }
+
+  const rawExps = [...(preset.expansions || [])];
+  if (preset.mode && !rawExps.includes(preset.mode)) rawExps.push(preset.mode);
+
+  for (const exp of rawExps) {
+    if (exp.includes('Rise of IX') || exp === 'Ix') {
+      parts.push(`${getEmoji(guild, 'Ix', '')} **Rise of IX**`.trim());
+    } else if (exp.includes('Immortality') || exp === 'Immo') {
+      parts.push(`${getEmoji(guild, 'Immo', '')} **Immortality**`.trim());
+    } else if (exp.includes('Epic Mode') || exp === 'Epic') {
+      parts.push(`${getEmoji(guild, 'Epic', '')} **Epic Mode**`.trim());
+    } else if (exp.includes('CHOAM')) {
+      parts.push(`${getEmoji(guild, 'CHOAM', '')} **CHOAM Module**`.trim());
+    } else {
+      parts.push(`**${exp}**`);
+    }
+  }
+
   return parts.join(' + ');
 }
 
@@ -22,17 +52,18 @@ module.exports = {
     }
 
     const now = new Date().toISOString();
+    const guild = interaction.guild;
 
     const [{ data: currentPreset }, { data: nextPreset }] = await Promise.all([
       supabase.from('league_presets').select('*').lte('start_date', now).gt('end_date', now).order('start_date', { ascending: false }).limit(1).maybeSingle(),
       supabase.from('league_presets').select('*').gt('start_date', now).order('start_date', { ascending: true }).limit(1).maybeSingle()
     ]);
 
-    const currentDesc = formatPresetDescription(currentPreset);
+    const currentDesc = formatPresetWithEmojis(guild, currentPreset);
     let rotationDetails = `🎲 **Current Active Format:**\n• ${currentDesc}`;
 
     if (nextPreset) {
-      const nextDesc = formatPresetDescription(nextPreset);
+      const nextDesc = formatPresetWithEmojis(guild, nextPreset);
       const startUnix = Math.floor(new Date(nextPreset.start_date).getTime() / 1000);
       rotationDetails += `\n\n📅 **Upcoming Format (starts <t:${startUnix}:D>):**\n• ${nextDesc} (<t:${startUnix}:R>)`;
     }
@@ -42,9 +73,8 @@ module.exports = {
       .setDescription(
         `${rotationDetails}\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `• Select how long you are available for a Live match.\n` +
-        `• When the queue reaches **4/4**, a League lobby generates automatically in <#1557473551227818024>.\n` +
-        `• Click **Host lobby now** (<:SA:945323522140565514>) to pull waiting players into your own lobby.`
+        `• A League lobby is posted in <#1557473551227818024> automatically when the queue reaches **4/4**, or immediately whenever someone clicks **Host lobby**.\n` +
+        `• **Host lobby**: Opens a lobby in <#1557473551227818024> with yourself and any waiting players from the queue. By hosting, you take responsibility for creating the room in-game — see **[Host Responsibilities & Guide](${HOST_RESPONSIBILITIES_LINK})**.`
       )
       .setColor(0xF1C40F)
       .addFields(
@@ -52,9 +82,9 @@ module.exports = {
       );
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('queue_live_prompt').setLabel('Queue Live').setStyle(ButtonStyle.Danger).setEmoji('1232049130151346216'),
-      new ButtonBuilder().setCustomId('queue_host').setLabel('Host lobby now').setStyle(ButtonStyle.Secondary).setEmoji('945323522140565514'),
-      new ButtonBuilder().setCustomId('queue_leave').setLabel('Leave Queue').setStyle(ButtonStyle.Secondary).setEmoji('🚪')
+      new ButtonBuilder().setCustomId('queue_live_prompt').setLabel('Join queue').setStyle(ButtonStyle.Danger),
+      new ButtonBuilder().setCustomId('queue_host').setLabel('Host lobby').setStyle(ButtonStyle.Secondary),
+      new ButtonBuilder().setCustomId('queue_leave').setLabel('Leave queue').setStyle(ButtonStyle.Secondary)
     );
 
     await interaction.channel.send({ embeds: [embed], components: [row] });
