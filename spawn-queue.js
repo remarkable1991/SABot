@@ -1,7 +1,5 @@
 const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, PermissionFlagsBits } = require('discord.js');
 
-const HOST_RESPONSIBILITIES_LINK = 'https://discord.com/channels/747212662483583069/1561711715891023982';
-
 function getEmoji(guild, name, fallback = '') {
   if (!guild || !guild.emojis || !guild.emojis.cache) return fallback;
   const emoji = guild.emojis.cache.find((e) => e.name === name);
@@ -46,7 +44,7 @@ module.exports = {
     .setDescription('Spawns the permanent Automated Matchmaking Queue message')
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
-  async execute(interaction, { supabase }) {
+  async execute(interaction, { supabase, updateQueueMessage }) {
     if (interaction.channelId !== '1558128709523996763') {
       return interaction.reply({ content: '❌ This command can only be run in the dedicated queue channel (<#1558128709523996763>).', flags: MessageFlags.Ephemeral });
     }
@@ -73,8 +71,8 @@ module.exports = {
       .setDescription(
         `${rotationDetails}\n\n` +
         `━━━━━━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `• A League lobby is posted in <#1557473551227818024> automatically when the queue reaches **4/4**, or immediately whenever someone clicks **Host lobby**.\n` +
-        `• **Host lobby**: Opens a lobby in <#1557473551227818024> with yourself and any waiting players from the queue. By hosting, you take responsibility for creating the room in-game — see **[Host Responsibilities & Guide](${HOST_RESPONSIBILITIES_LINK})**.`
+        `• Click **Play** to join an open lobby, enter the queue, or host a match.\n` +
+        `• Click **Leave** to exit the queue or leave your current open lobby.`
       )
       .setColor(0xF1C40F)
       .addFields(
@@ -82,12 +80,13 @@ module.exports = {
       );
 
     const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('queue_live_prompt').setLabel('Join queue').setStyle(ButtonStyle.Danger),
-      new ButtonBuilder().setCustomId('queue_host').setLabel('Host lobby').setStyle(ButtonStyle.Secondary),
-      new ButtonBuilder().setCustomId('queue_leave').setLabel('Leave queue').setStyle(ButtonStyle.Secondary)
+      new ButtonBuilder().setCustomId('queue_play').setLabel('Play').setStyle(ButtonStyle.Success),
+      new ButtonBuilder().setCustomId('queue_leave').setLabel('Leave').setStyle(ButtonStyle.Danger)
     );
 
     await interaction.channel.send({ embeds: [embed], components: [row] });
+    if (updateQueueMessage) updateQueueMessage();
+
     await interaction.reply({ content: '✅ Queue message created successfully.', flags: MessageFlags.Ephemeral });
     setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
   }
