@@ -892,11 +892,11 @@ async function updateQueueMessage() {
           ? { ign: null, isKnown: false }
           : await resolveHostIgn(openLobby.host_id, openLobby.web_host_id, openLobby.web_player_names);
         const lobbyRoomStr = hostIgnInfo.isKnown && hostIgnInfo.ign ? `🎮 Room: **${hostIgnInfo.ign}'s game**\n` : '';
-        const jumpUrl = `https://discord.com/channels/${DISCORD_GUILD_ID}/${openLobby.channel_id \vert{}\vert{} LEAGUE_LFG_CHANNEL_ID}/${openLobby.message_id}`;
+        const jumpUrl = `https://discord.com/channels/${DISCORD_GUILD_ID}/${openLobby.channel_id || LEAGUE_LFG_CHANNEL_ID}/${openLobby.message_id}`;
 
         activeField = {
           name: `🟢 Open League Lobby (${openCount}/4) — Click Play to Join!`,
-          value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby in <#${openLobby.channel_id \vert{}\vert{} LEAGUE_LFG_CHANNEL_ID}>](${jumpUrl})**`,
+          value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby in <#${openLobby.channel_id || LEAGUE_LFG_CHANNEL_ID}>](${jumpUrl})**`,
           inline: false
         };
       } else {
