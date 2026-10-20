@@ -62,7 +62,7 @@ module.exports = {
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, buildRosterDisplay, resolveHostIgn, promptUnknownHostIgn }) {
+  async execute(interaction, { supabase, buildRosterDisplay, resolveHostIgn, promptUnknownHostIgn, updateQueueMessage }) {
     const isLeague = interaction.options.getBoolean('league') || false;
     const LFG_ADMIN_ROLE = '1557469534133162045';
     const LEAGUE_CHANNEL_ID = '1557473551227818024';
@@ -161,7 +161,7 @@ module.exports = {
     const playerIds = [host.id];
     const guestPlayers = [];
 
-    if (playersInput) {
+    if (playersInput && !isLeague) {
       const mentionRegex = /<@!?(\d+)>/g;
       let match;
       const parsedMentions = [];
@@ -367,9 +367,12 @@ module.exports = {
     finalizedLines.push(`🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`);
     await targetMessage.edit({ content: finalizedLines.join('\n') });
 
+    if (isLeague && updateQueueMessage) updateQueueMessage();
+
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
       await targetMessage.react(customJoinEmoji ? customJoinEmoji.id : '1232049130151346216').catch(() => {});
+      if (!isLeague) await targetMessage.react('🙋').catch(() => {});
       await targetMessage.react('🎮').catch(() => {});
       await targetMessage.react('❌').catch(() => {});
       await targetMessage.react('🥾').catch(() => {});
