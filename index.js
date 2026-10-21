@@ -49,6 +49,10 @@ const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID;
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID || '1233029532785573918';
+const TOURNAMENT_RESULTS_CHANNEL_ID = '1225554306808287248';
+const LEAGUE_RESULTS_CHANNEL_ID = '1562444292574941184';
+const YOUTUBE_VOD_CHANNEL_ID = '1561777632100745346';
+
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
 
@@ -225,6 +229,7 @@ const pendingScanRefresh = new Set();
 const scheduleDebounceTimers = new Map();
 const activeStartLocks = new Set();
 const activeGameLocks = new Set();
+const activeVodLocks = new Set();
 const activeSpLocks = new Set();
 const recentDiscordQueueIds = new Set();
 
@@ -853,7 +858,6 @@ async function process3PlayerQuickChatEvent(lobby, senderName, messageCode) {
   }
 
   if (messageCode === 'agree_3p') {
-    // If agree_3p arrives when no vote object exists yet, initialize it
     if (!vote) {
       vote = {
         agreedKeys: new Set(),
@@ -864,7 +868,6 @@ async function process3PlayerQuickChatEvent(lobby, senderName, messageCode) {
       active3PlayerVotes.set(key, vote);
     }
 
-    // Ignore duplicate agreement from the same player
     if (vote.agreedKeys.has(participantKey)) return;
 
     vote.agreedKeys.add(participantKey);
@@ -891,7 +894,6 @@ async function process3PlayerQuickChatEvent(lobby, senderName, messageCode) {
         }
       }
     } else {
-      // All 3/3 agreed! Clean up prompt, set 15-minute timer, and start the match!
       await clear3PlayerVote(lobby.id);
 
       const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
@@ -1742,7 +1744,7 @@ async function runKickFlow(lobby, user, channel, lobbyMessage = null) {
 }
 
 // -------------------------------------------------------------
-// MAIN UTILITIES
+// MAIN UTILITIES & RESULT ANNOUNCEMENTS (TOURNAMENT TP, LEAGUE DUAL-POST, VOD)
 // -------------------------------------------------------------
 
 async function createDiscordImagePayload(storagePath) {
@@ -1757,24 +1759,57 @@ async function createDiscordImagePayload(storagePath) {
   try {
     const contentType = String(response.headers.get('content-type') || '').toLowerCase();
     const maxBytes = Math.floor(7.5 * 1024 * 1024);
-    if (!contentType.startsWith('image/')) return { attachment: null, imageUrl: publicUrl, tooLarge: false };
+    if (!contentType.startsWith('image/')) return { attachment: null, buffer: null, fileName: null, imageUrl: publicUrl, tooLarge: false };
     const arrayBuffer = await response.arrayBuffer();
     let buffer = Buffer.from(arrayBuffer);
-    if (buffer.length <= maxBytes) return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }), imageUrl: null, tooLarge: false };
+    if (buffer.length <= maxBytes) {
+      return {
+        attachment: new AttachmentBuilder(buffer, { name: 'match-result.png' }),
+        buffer,
+        fileName: 'match-result.png',
+        imageUrl: null,
+        tooLarge: false
+      };
+    }
     try {
       buffer = await sharp(buffer).rotate().resize({ width: 1600, withoutEnlargement: true }).jpeg({ quality: 76, mozjpeg: true }).toBuffer();
-      if (buffer.length <= maxBytes) return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+      if (buffer.length <= maxBytes) {
+        return {
+          attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }),
+          buffer,
+          fileName: 'match-result.jpg',
+          imageUrl: null,
+          tooLarge: false
+        };
+      }
       buffer = await sharp(buffer).resize({ width: 1280, withoutEnlargement: true }).jpeg({ quality: 62, mozjpeg: true }).toBuffer();
-      if (buffer.length <= maxBytes) return { attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }), imageUrl: null, tooLarge: false };
+      if (buffer.length <= maxBytes) {
+        return {
+          attachment: new AttachmentBuilder(buffer, { name: 'match-result.jpg' }),
+          buffer,
+          fileName: 'match-result.jpg',
+          imageUrl: null,
+          tooLarge: false
+        };
+      }
     } catch (e) {}
-    return { attachment: null, imageUrl: publicUrl, tooLarge: true };
-  } catch (err) { return { attachment: null, imageUrl: null, tooLarge: false }; }
+    return { attachment: null, buffer: null, fileName: null, imageUrl: publicUrl, tooLarge: true };
+  } catch (err) { return { attachment: null, buffer: null, fileName: null, imageUrl: null, tooLarge: false }; }
 }
 
 async function buildGameResultPayload(gameId) {
-  const { data: game, error: gameError } = await supabase.from('games').select('id, public_match_id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num').eq('id', gameId).single();
+  const { data: game, error: gameError } = await supabase
+    .from('games')
+    .select('id, public_match_id, game_version, image_url, has_rise_of_ix, has_epic_mode, has_immortality, has_base_leaders, tournament_num, is_league, youtube_url')
+    .eq('id', gameId)
+    .single();
   if (gameError || !game) return null;
-  const { data: results, error: resultsError = null } = await supabase.from('game_results').select('player_name, leader_name, placement, points, elo_delta, elo_delta_overall').eq('game_id', gameId).order('placement', { ascending: true });
+
+  const { data: results, error: resultsError = null } = await supabase
+    .from('game_results')
+    .select('player_name, leader_name, placement, points, player_slot, elo_delta, elo_delta_overall')
+    .eq('game_id', gameId)
+    .order('placement', { ascending: true });
   if (resultsError || !results || !results.length) return null;
   
   let tournamentDetails = null;
@@ -1795,8 +1830,16 @@ async function buildGameResultPayload(gameId) {
     } catch (err) {}
   }
 
-  const playerKeys = results.map(r => String(r.player_name || '').toLowerCase());
-  const { data: ratings } = await supabase.from('player_ratings').select('player_key, display_name, game_version, elo').in('player_key', playerKeys).in('game_version', ['overall', game.game_version]);
+  const playerKeys = results.map(r => String(r.player_name || '').trim().toLowerCase());
+  const normalizedKeys = results.map(r => normalizeName(r.player_name));
+  const allLookupKeys = [...new Set([...playerKeys, ...normalizedKeys])].filter(Boolean);
+
+  const { data: ratings } = await supabase
+    .from('player_ratings')
+    .select('player_key, display_name, game_version, elo')
+    .in('player_key', allLookupKeys)
+    .in('game_version', ['overall', game.game_version]);
+
   const ratingsMap = {};
   for (const row of ratings || []) {
     if (!ratingsMap[row.player_key]) ratingsMap[row.player_key] = {};
@@ -1807,12 +1850,81 @@ async function buildGameResultPayload(gameId) {
   const sandboxDeltaMap = {};
   for (const row of sandboxResults || []) sandboxDeltaMap[normalizeName(row.player_name)] = row.elo_delta_overall;
 
-  const { data: sandboxRatings } = await supabase.from('sandbox_player_ratings').select('player_key, overall_vp_elo').in('player_key', playerKeys).eq('game_version', 'overall');
+  const { data: sandboxRatings } = await supabase.from('sandbox_player_ratings').select('player_key, overall_vp_elo').in('player_key', allLookupKeys).eq('game_version', 'overall');
   const sandboxRatingsMap = {};
   for (const row of sandboxRatings || []) sandboxRatingsMap[row.player_key] = row.overall_vp_elo;
 
+  // Fetch League ELO deltas and current League ratings if this is an official League match
+  const leagueDeltaMap = {};
+  const leagueRatingMap = {};
+  const isLeagueGame = game.is_league === true || String(game.is_league).toLowerCase() === 'true';
+
+  if (isLeagueGame) {
+    try {
+      const currentSeasonId = await getCurrentSeasonId();
+      const [{ data: lDeltas }, { data: lRatings }] = await Promise.all([
+        supabase
+          .from('league_match_rating_deltas')
+          .select('player_key, elo_delta, season')
+          .eq('game_id', gameId),
+        supabase
+          .from('player_league_ratings')
+          .select('player_key, elo')
+          .in('player_key', allLookupKeys)
+          .eq('season', currentSeasonId)
+      ]);
+
+      for (const d of lDeltas || []) {
+        if (d.player_key) {
+          leagueDeltaMap[d.player_key.trim().toLowerCase()] = d.elo_delta;
+          leagueDeltaMap[normalizeName(d.player_key)] = d.elo_delta;
+        }
+      }
+      for (const r of lRatings || []) {
+        if (r.player_key) {
+          leagueRatingMap[r.player_key.trim().toLowerCase()] = r.elo;
+          leagueRatingMap[normalizeName(r.player_key)] = r.elo;
+        }
+      }
+    } catch (lErr) {
+      console.error('Error fetching league ratings/deltas for game:', gameId, lErr);
+    }
+  }
+
   const screenshotMedia = game.image_url ? await createDiscordImagePayload(game.image_url) : null;
-  return { game, results, ratingsMap, sandboxDeltaMap, sandboxRatingsMap, screenshotMedia, tournamentDetails };
+  return {
+    game,
+    results,
+    ratingsMap,
+    sandboxDeltaMap,
+    sandboxRatingsMap,
+    leagueDeltaMap,
+    leagueRatingMap,
+    screenshotMedia,
+    tournamentDetails
+  };
+}
+
+// Calculates Tournament Points (TP) for a player row based on 1st and 2nd place VP
+function calculateTournamentPoints(row, results) {
+  const firstRow = results.find(r => Number(r.placement) === 1) || results[0];
+  const secondRow = results.find(r => Number(r.placement) === 2) || results[1];
+  const vp1 = Number(firstRow?.points);
+  const vp2 = Number(secondRow?.points);
+  const playerVp = Number(row.points);
+  const place = Number(row.placement);
+
+  if (isNaN(vp1) || isNaN(playerVp)) return null;
+
+  if (place === 1) {
+    const margin = !isNaN(vp2) ? Math.max(0, vp1 - vp2) : 0;
+    return 20 + margin;
+  }
+  const baseMap = { 2: 15, 3: 10, 4: 5 };
+  const baseTp = baseMap[place];
+  if (baseTp === undefined) return null;
+  const deficit = Math.max(0, vp1 - playerVp);
+  return Math.max(0, baseTp - deficit);
 }
 
 async function buildEmbed(payload, guild) {
@@ -1829,7 +1941,7 @@ async function buildEmbed(payload, guild) {
 
   for (const row of results) {
     const place = getPlacementEmoji(guild, row.placement); 
-    const playerKey = String(row.player_name || '').toLowerCase();
+    const playerKey = String(row.player_name || '').trim().toLowerCase();
     const normalizedKey = normalizeName(row.player_name);
     const mention = await resolveMentionForName(guild, row.player_name);
     const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
@@ -1838,14 +1950,25 @@ async function buildEmbed(payload, guild) {
     const safeLeader = row.leader_name ? row.leader_name : 'Unknown Leader';
     const safePoints = row.points !== null && row.points !== undefined ? row.points : '?';
 
-    let text = `${place} **${row.player_name}** ${safeMention} -${leaderEmoji}${safeLeader} -${safePoints} pts`;
+    let tpSuffix = '';
+    if (game.tournament_num) {
+      const tpVal = calculateTournamentPoints(row, results);
+      if (tpVal !== null) tpSuffix = ` · **${tpVal} TP**`;
+    }
+
+    let text = `${place} **${row.player_name}**${safeMention} -${leaderEmoji}${safeLeader} -${safePoints} pts${tpSuffix}`;
     text += `\nOverall: ${formatDelta(row.elo_delta_overall)}`;
-    if (ratingsMap[playerKey]?.overall !== undefined) text += ` (-> ${Number(ratingsMap[playerKey].overall).toFixed(1)})`;
+    const overallElo = ratingsMap[playerKey]?.overall ?? ratingsMap[normalizedKey]?.overall;
+    if (overallElo !== undefined) text += ` (-> ${Number(overallElo).toFixed(1)})`;
+
     text += ` ${pipeSep} ${modeLabel}:${formatDelta(row.elo_delta)}`;
-    if (ratingsMap[playerKey]?.[game.game_version] !== undefined) text += ` (-> ${Number(ratingsMap[playerKey][game.game_version]).toFixed(1)})`;
+    const modeElo = ratingsMap[playerKey]?.[game.game_version] ?? ratingsMap[normalizedKey]?.[game.game_version];
+    if (modeElo !== undefined) text += ` (-> ${Number(modeElo).toFixed(1)})`;
+
     if (sandboxDeltaMap[normalizedKey] !== undefined) {
       text += ` ${pipeSep} All VP:${formatDelta(sandboxDeltaMap[normalizedKey])}`;
-      if (sandboxRatingsMap[playerKey] !== undefined) text += ` (-> ${Number(sandboxRatingsMap[playerKey]).toFixed(1)})`;
+      const sbElo = sandboxRatingsMap[playerKey] ?? sandboxRatingsMap[normalizedKey];
+      if (sbElo !== undefined) text += ` (-> ${Number(sbElo).toFixed(1)})`;
     }
     lines.push(text);
   }
@@ -1863,6 +1986,108 @@ async function buildEmbed(payload, guild) {
   return { embed, screenshotMedia };
 }
 
+// Shorter League-only Embed for LEAGUE_RESULTS_CHANNEL_ID (1562444292574941184)
+async function buildLeagueEmbed(payload, guild) {
+  const { game, results, leagueDeltaMap, leagueRatingMap, screenshotMedia } = payload;
+  const tags = buildGameTags(game, guild);
+  const lines = [];
+
+  for (const row of results) {
+    const place = getPlacementEmoji(guild, row.placement);
+    const rawKey = String(row.player_name || '').trim().toLowerCase();
+    const normKey = normalizeName(row.player_name);
+    const mention = await resolveMentionForName(guild, row.player_name);
+    const leaderEmoji = getLeaderEmoji(guild, row.leader_name);
+
+    const safeMention = mention ? mention : '';
+    const safeLeader = row.leader_name ? row.leader_name : 'Unknown Leader';
+    const safePoints = row.points !== null && row.points !== undefined ? row.points : '?';
+
+    const lDelta = leagueDeltaMap[rawKey] ?? leagueDeltaMap[normKey];
+    const lElo = leagueRatingMap[rawKey] ?? leagueRatingMap[normKey];
+
+    let text = `${place} **${row.player_name}** ${safeMention} -${leaderEmoji}${safeLeader} -${safePoints} pts`;
+    text += `\nLeague: ${formatDelta(lDelta !== undefined ? lDelta : row.elo_delta)}`;
+    if (lElo !== undefined) text += ` (-> ${Number(lElo).toFixed(1)})`;
+    lines.push(text);
+  }
+
+  if (tags.length) lines.push('Game modes played: ' + tags.join(' | '));
+
+  const titleStr = game.public_match_id
+    ? `🏆 Ranked League Match — #${game.public_match_id}`
+    : `🏆 Ranked League Match Finished!`;
+
+  const embed = new EmbedBuilder()
+    .setTitle(titleStr)
+    .setURL(game.public_match_id ? `https://dunestats.cc/match/${game.public_match_id}` : `https://dunestats.cc/matches`)
+    .setDescription(lines.join('\n\n'))
+    .setColor(0xF1C40F)
+    .setTimestamp(new Date());
+
+  if (screenshotMedia?.imageUrl) embed.setImage(screenshotMedia.imageUrl);
+  return embed;
+}
+
+// Spoiler-Free YouTube VOD Announcement for YOUTUBE_VOD_CHANNEL_ID (1561777632100745346)
+async function announceYoutubeVod(gameId) {
+  if (!gameId || activeVodLocks.has(gameId)) return;
+  activeVodLocks.add(gameId);
+
+  try {
+    const { data: game } = await supabase
+      .from('games')
+      .select('id, public_match_id, youtube_url, tournament_num, is_league')
+      .eq('id', gameId)
+      .maybeSingle();
+
+    if (!game || !game.youtube_url) return;
+
+    const { data: results } = await supabase
+      .from('game_results')
+      .select('player_name, player_slot')
+      .eq('game_id', gameId);
+
+    if (!results || results.length === 0) return;
+
+    const vodChannel = await discordClient.channels.fetch(YOUTUBE_VOD_CHANNEL_ID).catch(() => null);
+    if (!vodChannel) return;
+
+    // Sort by player_slot (or alphabetically if slots are null) so placement order is never spoiled!
+    const sortedPlayers = [...results].sort((a, b) => {
+      if (a.player_slot !== null && b.player_slot !== null && a.player_slot !== b.player_slot) {
+        return a.player_slot - b.player_slot;
+      }
+      return String(a.player_name || '').localeCompare(String(b.player_name || ''));
+    });
+
+    const playerDisplays = [];
+    for (const r of sortedPlayers) {
+      const mention = await resolveMentionForName(vodChannel.guild, r.player_name);
+      playerDisplays.push(mention ? `**${r.player_name}** (${mention})` : `**${r.player_name}**`);
+    }
+
+    const matchLabel = game.public_match_id ? `#${game.public_match_id}` : `Match`;
+    const matchLink = game.public_match_id ? `https://dunestats.cc/match/${game.public_match_id}` : `https://dunestats.cc/matches`;
+
+    let typePrefix = '🎬 **Match Recording Available!**';
+    if (game.tournament_num) typePrefix = `🎬 **Tournament #${game.tournament_num} Match Recording!**`;
+    else if (game.is_league) typePrefix = `🎬 **Ranked League Match Recording!**`;
+
+    const content = [
+      `${typePrefix} — **[${matchLabel}](<${matchLink}>)**`,
+      `👥 **Players:** ${playerDisplays.join(' · ')}`,
+      `📺 ${game.youtube_url}`
+    ].join('\n');
+
+    await vodChannel.send({ content }).catch((err) => console.error('Failed to send VOD announcement:', err));
+  } catch (err) {
+    console.error('Error in announceYoutubeVod:', err);
+  } finally {
+    setTimeout(() => activeVodLocks.delete(gameId), 30000);
+  }
+}
+
 async function announceGame(gameId) {
   if (activeGameLocks.has(gameId)) return;
   activeGameLocks.add(gameId);
@@ -1876,16 +2101,47 @@ async function announceGame(gameId) {
     const payload = await buildGameResultPayload(gameId); 
     if (!payload) return;
 
-    const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID); 
-    if (!channel) return; 
+    // 1. Route Tournament games to TOURNAMENT_RESULTS_CHANNEL_ID (1225554306808287248), all others to DISCORD_CHANNEL_ID
+    const targetPrimaryChannelId = payload.game.tournament_num
+      ? TOURNAMENT_RESULTS_CHANNEL_ID
+      : DISCORD_CHANNEL_ID;
 
-    const built = await buildEmbed(payload, channel.guild); 
-    const messagePayload = { embeds: [built.embed] };
+    const primaryChannel = await discordClient.channels.fetch(targetPrimaryChannelId).catch(() => null); 
+    if (primaryChannel) {
+      const built = await buildEmbed(payload, primaryChannel.guild); 
+      const messagePayload = { embeds: [built.embed] };
 
-    if (built.screenshotMedia?.attachment) messagePayload.files = [built.screenshotMedia.attachment]; 
-    else if (built.screenshotMedia?.tooLarge) messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.'; 
+      if (built.screenshotMedia?.attachment) {
+        messagePayload.files = [built.screenshotMedia.attachment];
+      } else if (built.screenshotMedia?.tooLarge) {
+        messagePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.';
+      }
 
-    await channel.send(messagePayload);
+      await primaryChannel.send(messagePayload).catch(err => console.error('Error sending primary match result:', err));
+    }
+
+    // 2. If this is a League match, ALSO post the shorter League-only embed + screenshot to LEAGUE_RESULTS_CHANNEL_ID (1562444292574941184)
+    const isLeagueGame = payload.game.is_league === true || String(payload.game.is_league).toLowerCase() === 'true';
+    if (isLeagueGame) {
+      const leagueChannel = await discordClient.channels.fetch(LEAGUE_RESULTS_CHANNEL_ID).catch(() => null);
+      if (leagueChannel) {
+        const leagueEmbed = await buildLeagueEmbed(payload, leagueChannel.guild);
+        const leaguePayload = { embeds: [leagueEmbed] };
+
+        if (payload.screenshotMedia?.buffer) {
+          leaguePayload.files = [new AttachmentBuilder(payload.screenshotMedia.buffer, { name: payload.screenshotMedia.fileName || 'match-result.png' })];
+        } else if (payload.screenshotMedia?.tooLarge) {
+          leaguePayload.content = 'Image was too big for Discord. Check https://dunestats.cc/matches for the screenshot.';
+        }
+
+        await leagueChannel.send(leaguePayload).catch(err => console.error('Error sending league match result:', err));
+      }
+    }
+
+    // 3. If a youtube_url is already present when the game is created, announce the spoiler-free VOD in 1561777632100745346
+    if (payload.game.youtube_url) {
+      await announceYoutubeVod(gameId);
+    }
 
     if (payload.game?.tournament_num && payload.tournamentDetails) {
       try {
@@ -3019,6 +3275,10 @@ function startGlobalDatabaseListener() {
         if (table === 'games' && eventType === 'UPDATE' && newRecord) {
           if (newRecord.ai_scan_status && newRecord.ai_scan_status !== AI_SCAN_IGNORED_STATUS && newRecord.ai_scan_status !== (oldRecord ? oldRecord.ai_scan_status : undefined)) {
             try { await announceOrUpdateScanResult(newRecord.id); } catch (scanErr) {}
+          }
+          // Trigger Spoiler-Free YouTube VOD announcement when youtube_url is added or changed
+          if (newRecord.youtube_url && newRecord.youtube_url !== (oldRecord ? oldRecord.youtube_url : null)) {
+            try { await announceYoutubeVod(newRecord.id); } catch (vodErr) {}
           }
         }
         if (table === 'game_results' && (eventType === 'INSERT' || eventType === 'UPDATE') && newRecord?.game_id) scheduleScanRefresh(newRecord.game_id);
