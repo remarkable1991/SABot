@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 
 const LFG_ADMIN_ROLE = '1557469534133162045';
 const LEAGUE_LFG_CHANNEL_ID = '1557473551227818024';
@@ -6,7 +6,7 @@ const LEAGUE_LFG_CHANNEL_ID = '1557473551227818024';
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('league')
-    .setDescription('Instantly host an official Live League match (Reactions version)'),
+    .setDescription('Host an official Live League match'),
 
   async execute(interaction, { supabase, createQueueLobby, updateQueueMessage }) {
     if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
@@ -25,22 +25,42 @@ module.exports = {
       .order('joined_at', { ascending: true })
       .limit(3);
 
-    const playersToPop = (queueRecords || []).map(r => r.discord_user_id).filter(Boolean);
-    const allToClear = [interaction.user.id, ...playersToPop];
+    const waitingQueue = (queueRecords || []).filter(r => r.discord_user_id && r.discord_user_id !== interaction.user.id);
 
-    for (const pid of allToClear) {
-      await supabase.from('matchmaking_queue').delete().eq('discord_user_id', pid);
+    // If players are waiting in the queue, ask if the host wants to pull them or start fresh
+    if (waitingQueue.length > 0) {
+      const namesList = waitingQueue.map(r => `<@${r.discord_user_id}>`).join(', ');
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId('league_cmd_pull_yes')
+          .setLabel(`Pull Queue Players (${waitingQueue.length})`)
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId('league_cmd_pull_no')
+          .setLabel('Start Fresh (Just Me)')
+          .setStyle(ButtonStyle.Secondary)
+      );
+
+      await interaction.editReply({
+        content: `👥 There ${waitingQueue.length === 1 ? 'is **1 player**' : `are **${waitingQueue.length} players**`} currently waiting in the queue (${namesList}).\nWould you like to pull them into your new League lobby?`,
+        components: [row]
+      });
+
+      setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
+      return;
     }
+
+    // Queue is empty -> Create lobby immediately
+    await supabase.from('matchmaking_queue').delete().eq('discord_user_id', interaction.user.id);
     if (updateQueueMessage) updateQueueMessage();
 
-    const playerSet = new Set([interaction.user.id, ...playersToPop]);
     const targetMsg = await createQueueLobby(
       interaction.user.id,
-      Array.from(playerSet),
+      [interaction.user.id],
       'live',
       false,
-      false, // useButtons = false (Reactions version)
-      null   // No redundant default note
+      false,
+      null
     );
 
     const jumpLink = targetMsg
