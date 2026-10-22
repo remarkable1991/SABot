@@ -243,7 +243,7 @@ module.exports = {
         }
 
         const message = await thread.send({
-          content: `👥 **Participants:** ${resolvedPings.join(' \vert{} ')}\n🛡️ **Support:** <@&${TOURNAMENT_HOST_ROLE_ID}>`,
+          content: `👥 **Participants:** ${resolvedPings.join(' | ')}\n🛡️ **Support:** <@&${TOURNAMENT_HOST_ROLE_ID}>`,
           embeds: [rulesEmbed]
         });
 
