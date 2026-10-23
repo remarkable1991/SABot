@@ -6,9 +6,14 @@ const LEAGUE_LFG_CHANNEL_ID = '1557473551227818024';
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('league')
-    .setDescription('Host an official Live League match'),
+    .setDescription('Host an official Live League match')
+    .addStringOption(option =>
+      option.setName('text')
+        .setDescription('Optional custom note or message for this lobby')
+        .setRequired(false)
+    ),
 
-  async execute(interaction, { supabase, createQueueLobby, updateQueueMessage }) {
+  async execute(interaction, { supabase, createQueueLobby, updateQueueMessage, pendingLeagueNotes }) {
     if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
       return interaction.reply({
         content: '❌ Only LFG Admins can host official League matches during the testing phase.',
@@ -17,6 +22,8 @@ module.exports = {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    const customNote = interaction.options.getString('text')?.trim() || null;
 
     const { data: queueRecords } = await supabase
       .from('matchmaking_queue')
@@ -27,8 +34,12 @@ module.exports = {
 
     const waitingQueue = (queueRecords || []).filter(r => r.discord_user_id && r.discord_user_id !== interaction.user.id);
 
-    // If players are waiting in the queue, ask if the host wants to pull them or start fresh
+    // If players are waiting in the queue, store the customNote and ask if the host wants to pull them
     if (waitingQueue.length > 0) {
+      if (pendingLeagueNotes) {
+        pendingLeagueNotes.set(interaction.user.id, customNote);
+      }
+
       const namesList = waitingQueue.map(r => `<@${r.discord_user_id}>`).join(', ');
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
@@ -50,7 +61,7 @@ module.exports = {
       return;
     }
 
-    // Queue is empty -> Create lobby immediately
+    // Queue is empty -> Create lobby immediately with customNote
     await supabase.from('matchmaking_queue').delete().eq('discord_user_id', interaction.user.id);
     if (updateQueueMessage) updateQueueMessage();
 
@@ -60,7 +71,7 @@ module.exports = {
       'live',
       false,
       false,
-      null
+      customNote
     );
 
     const jumpLink = targetMsg
