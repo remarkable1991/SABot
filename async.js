@@ -1,5 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
+const EMOJI_GUIDE_LINK = 'https://discord.com/channels/747212662483583069/1561400611348553810';
+const ASYNC_ROLE_ID = '1219666516644204554';
+
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('async')
@@ -55,8 +58,11 @@ module.exports = {
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase }) {
-    const notes = interaction.options.getString('text') || 'Looking for an async match!';
+  async execute(interaction, { supabase, buildRosterDisplay, resolveHostIgn, promptUnknownHostIgn }) {
+    await interaction.deferReply();
+
+    const rawCustomText = interaction.options.getString('text')?.trim() || null;
+    const dbMessageText = rawCustomText || 'Looking for an async match!';
     const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
     const board = interaction.options.getString('board');
@@ -106,77 +112,35 @@ module.exports = {
       activeMode = null; 
     }
 
-    const expansionsStored = [];
-    if (expansion === 'Ix' || expansion === 'Ix_Immo') expansionsStored.push(`${ixEmoji} Rise of IX`.trim());
-    if (expansion === 'Immortality' || expansion === 'Ix_Immo') expansionsStored.push(`${immoEmoji} Immortality`.trim());
-    if (activeMode === 'Epic') expansionsStored.push(`${epicEmoji} Epic Mode`.trim());
-    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') expansionsStored.push('Base Leaders');
-    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') expansionsStored.push(`${choamEmoji} CHOAM Module`.trim());
+    const dbExpansions = [];
+    if (expansion === 'Ix' || expansion === 'Ix_Immo') dbExpansions.push('Rise of IX');
+    if (expansion === 'Immortality' || expansion === 'Ix_Immo') dbExpansions.push('Immortality');
+    if (activeMode === 'Epic') dbExpansions.push('Epic Mode');
+    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') dbExpansions.push('Base Leaders');
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') dbExpansions.push('CHOAM Module');
 
-    let boardDisplay = board || 'Not Specified';
-    if (board === 'Uprising') boardDisplay = `${uprisingEmoji} Uprising`.trim();
-    if (board === 'Base') boardDisplay = 'Base Game';
+    const dbBoardType = board === 'Uprising' ? 'Uprising' : 'Base Game';
 
-    const ixText = `${ixEmoji} Rise of IX`.trim();
-    const immoText = `${immoEmoji} Immortality`.trim();
-    const epicText = `${epicEmoji} Epic Mode`.trim();
-    const uprisingText = `${uprisingEmoji} Uprising`.trim();
-    const choamText = `${choamEmoji} CHOAM Module`.trim();
+    const formatParts = [];
+    if (board === 'Uprising') formatParts.push(`${uprisingEmoji} **Uprising**`.trim());
+    else formatParts.push(`**Base Game**`);
 
-    let expansionText = '';
-    if (expansion === 'Ix') expansionText = ixText;
-    if (expansion === 'Immortality') expansionText = immoText;
-    if (expansion === 'Ix_Immo') expansionText = `${ixText} and ${immoText}`;
+    if (expansion === 'Ix' || expansion === 'Ix_Immo') formatParts.push(`${ixEmoji} **Rise of IX**`.trim());
+    if (expansion === 'Immortality' || expansion === 'Ix_Immo') formatParts.push(`${immoEmoji} **Immortality**`.trim());
+    if (activeMode === 'Epic') formatParts.push(`${epicEmoji} **Epic Mode**`.trim());
+    if (activeMode === 'BaseLeaders' || activeMode === 'Leaders_CHOAM') formatParts.push(`**Base Leaders**`);
+    if (activeMode === 'CHOAM' || activeMode === 'Leaders_CHOAM') formatParts.push(`${choamEmoji} **CHOAM Module**`.trim());
 
-    let modeText = '';
-    if (activeMode === 'Epic') modeText = epicText;
-    if (activeMode === 'BaseLeaders') modeText = 'Base Leaders';
-    if (activeMode === 'CHOAM') modeText = choamText;
-    if (activeMode === 'Leaders_CHOAM') modeText = `Base Leaders + ${choamText}`;
-
-    if (modeText) {
-      if (expansionText) {
-        expansionText += ` (with ${modeText})`;
-      } else {
-        expansionText = modeText;
-      }
-    }
-
-    let boardText = board === 'Uprising' ? uprisingText : 'Base Game';
-
-    let statusSentence = `${host} is looking for players`;
-    if (board && board !== 'Base' && expansionText) {
-      statusSentence += ` for ${boardText} with ${expansionText}`;
-    } else if (board && board !== 'Base') {
-      statusSentence += ` for ${boardText}`;
-    } else if (board === 'Base' && expansionText) {
-      statusSentence += ` for Base Game with ${expansionText}`;
-    } else if (expansionText) {
-      statusSentence += ` playing with ${expansionText}`;
-    }
-    statusSentence += '.';
-
-    const asyncDuneEmoji = getCustomEmoji('AsyncDune', '🎲');
+    const formatLine = formatParts.join(' + ');
+    const asyncDuneEmoji = getCustomEmoji('AsyncDune', '<:AsyncDune:1232048177390289097>');
     
     const hoursToExpiry = customHours ? Math.max(customHours, 1) : 15;
     const expirationMs = hoursToExpiry * 60 * 60 * 1000;
-    const timeoutTimestamp = Math.floor((Date.now() + expirationMs) / 1000);
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
 
-    const asyncRole = interaction.guild?.roles.cache.find(r => r.name === 'DuneASYNC');
-    const roleMention = asyncRole ? `<@&${asyncRole.id}>` : '@DuneASYNC';
-
-    let customPingSentence = `**${interaction.user.username}** is looking for async players ${roleMention}`;
-    if (board && board !== 'Base' && expansionText) {
-      customPingSentence += ` for ${boardText} with ${expansionText}`;
-    } else if (board && board !== 'Base') {
-      customPingSentence += ` for ${boardText}`;
-    } else if (board === 'Base' && expansionText) {
-      customPingSentence += ` for Base Game with ${expansionText}`;
-    } else if (expansionText) {
-      customPingSentence += ` playing with ${expansionText}`;
-    }
-    customPingSentence += '.';
+    const asyncRole = guild?.roles.cache.find(r => r.name === 'DuneASYNC');
+    const targetRoleId = asyncRole ? asyncRole.id : ASYNC_ROLE_ID;
+    const roleMention = `<@&${targetRoleId}>`;
 
     const playerIds = [host.id];
     const guestPlayers = [];
@@ -247,8 +211,24 @@ module.exports = {
       }
     }
 
+    const { display: fullRosterDisplay, count: totalSlotCount } = buildRosterDisplay
+      ? await buildRosterDisplay({
+          player_ids: playerIds,
+          guest_players: guestPlayers,
+          web_player_names: [],
+          web_player_ids: [],
+          notify_user_ids: [],
+          is_league: false
+        })
+      : { display: playerIds.map(id => `• <@${id}>`).join('\n'), count: playerIds.length + guestPlayers.length };
+
+    const hostIgnInfo = resolveHostIgn ? await resolveHostIgn(host.id) : { ign: null, isKnown: false };
+    const lobbyNameLine = hostIgnInfo.isKnown
+      ? `🎮 In-Game Lobby: **${hostIgnInfo.ign}'s game**`
+      : `🎮 In-Game Lobby: *(Waiting for host IGN...)*`;
+
     // --- SEQUENTIAL HOST MATCH ID CREATION ENGINE (HostName-A#) ---
-    const cleanHostName = host.username.replace(/[^a-zA-Z0-9]/g, '') || 'Host';
+    const cleanHostName = (hostIgnInfo.ign || host.username).replace(/[^a-zA-Z0-9]/g, '') || 'Host';
     const prefixPattern = `${cleanHostName}-A`;
     let generatedMatchId = `${prefixPattern}1`;
 
@@ -264,7 +244,7 @@ module.exports = {
 
         existingHostLobbies.forEach((row) => {
           const match = row.match_id ? row.match_id.match(numberRegex) : null;
-          if (match) {
+          if (match && match[1]) {
             const num = parseInt(match[1], 10);
             if (!isNaN(num) && num > maxNumber) {
               maxNumber = num;
@@ -278,75 +258,35 @@ module.exports = {
       console.error('Error generating host-based match ID:', idErr);
     }
 
-    const totalSlotCount = playerIds.length + guestPlayers.length;
-    const mentionsList = playerIds.map(id => `• <@${id}>`);
-    const guestsList = guestPlayers.map(name => `• ${name} 👥`);
-    const fullRosterDisplay = [...mentionsList, ...guestsList].join('\n');
+    const descLines = [];
+    if (rawCustomText) descLines.push(`"${rawCustomText}"\n`);
+    descLines.push(formatLine);
+    descLines.push(lobbyNameLine);
+
+    const footerGuideBlock = `${asyncDuneEmoji} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
 
     const embed = new EmbedBuilder()
-      .setTitle(`${asyncDuneEmoji} New Async Match Open! [ID: ${generatedMatchId}]`)
-      .setDescription(`"${notes}"`)
+      .setTitle(`${asyncDuneEmoji} New Async Match Open!`)
+      .setDescription(descLines.join('\n'))
       .setColor(0xC9A24B)
       .addFields(
-        { name: '📝 Match Details', value: `${statusSentence}\n*Lobby expires <t:${timeoutTimestamp}:R>.*`, inline: false },
-        { name: '🔑 Password', value: password === 'None' ? 'Check chat for more info' : `\`${password}\``, inline: false },
-        { name: `👥 Players (${totalSlotCount}/4)`, value: fullRosterDisplay, inline: false },
-        { 
-          name: 'Reaction Legend', 
-          value: [
-            `${asyncDuneEmoji} • **Join / Leave** the lobby`,
-            `🎮 • **Start Game** (Requires 2+ players)`,
-            `❌ • **Cancel Lobby** (Host only)`,
-            `🔔 • **Toggle Ping Alerts** to get notified when someone joins`,
-            `📢 • **Ping Lobby Role** (45m cooldown)`
-          ].join('\n'), 
-          inline: false 
-        }
+        { name: `👥 Players (${totalSlotCount}/4)\n\u200B`, value: `${fullRosterDisplay}\n\n${footerGuideBlock}`, inline: false }
       )
-      .setFooter({ text: `Lobbies time out automatically if unstarted after ${hoursToExpiry} hours.` })
       .setTimestamp();
 
-    // Tap-to-copy code blocks placed outside the embed
-    let copyableContent = `🎮 Match ID: \`${generatedMatchId}\``;
+    let initialCopyableContent = '🎮 Generating lobby link...';
     if (password !== 'None') {
-      copyableContent += `\n🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
+      initialCopyableContent = `🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
     }
 
-    const response = await interaction.reply({
-      content: copyableContent,
-      embeds: [embed],
-      withResponse: true
-    });
+    const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
+    const targetMessageId = response.id;
+    const targetMessage = await interaction.channel.messages.fetch(targetMessageId);
 
-    const messageId = response.resource?.message?.id || response.id;
-    const message = response.resource?.message || await interaction.channel.messages.fetch(messageId);
-
-    try {
-      const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'AsyncDune');
-      if (customJoinEmoji) {
-        await message.react(customJoinEmoji).catch(() => {});
-      } else {
-        await message.react('🎲').catch(() => {});
-      }
-      await message.react('🎮').catch(() => {});
-      await message.react('❌').catch(() => {});
-      await message.react('🔔').catch(() => {});
-      await message.react('📢').catch(() => {});
-    } catch (reactErr) { console.error(reactErr); }
-
-    const pingMessage = await interaction.followUp({
-      content: customPingSentence,
-      allowedMentions: { roles: [asyncRole?.id].filter(Boolean) }
-    });
-
-    setTimeout(() => {
-      pingMessage.delete().catch(() => {});
-    }, 1500);
-
-    await supabase
+    const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
-        message_id: messageId,
+        message_id: targetMessageId,
         match_id: generatedMatchId,
         channel_id: interaction.channelId,
         guild_id: interaction.guildId,
@@ -354,12 +294,58 @@ module.exports = {
         player_ids: playerIds,
         notify_user_ids: [],
         guest_players: guestPlayers,
-        message_text: notes,
-        lobby_password: password !== 'None' ? password : null,
-        board_type: boardDisplay,
-        expansions: expansionsStored,
+        message_text: dbMessageText,
+        lobby_password: password,
+        board_type: dbBoardType,
+        expansions: dbExpansions,
         status: 'searching',
-        expires_at: expiresAtISO
-      });
+        expires_at: expiresAtISO,
+        mode: 'async',
+        is_league: false,
+        season_id: null,
+        league_status: null,
+        expected_player_keys: [],
+        discord_usernames: []
+      })
+      .select('*')
+      .single();
+
+    if (insertError) {
+      console.error('Failed to insert async lobby into Supabase:', insertError);
+      return;
+    }
+
+    const numericLobbyId = insertedMatch.id;
+    const finalizedLines = [];
+    if (password !== 'None') finalizedLines.push(`🔑 Lobby Password: \`${password}\` *(Tap to copy)*`);
+    finalizedLines.push(`🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`);
+    await targetMessage.edit({ content: finalizedLines.join('\n') });
+
+    try {
+      const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'AsyncDune');
+      await targetMessage.react(customJoinEmoji ? customJoinEmoji.id : '1232048177390289097').catch(() => {});
+      await targetMessage.react('🙋').catch(() => {});
+      await targetMessage.react('🎮').catch(() => {});
+      await targetMessage.react('❌').catch(() => {});
+      await targetMessage.react('🥾').catch(() => {});
+      await targetMessage.react('🔔').catch(() => {});
+      await targetMessage.react('📢').catch(() => {});
+    } catch (reactErr) { console.error(reactErr); }
+
+    const allSeatedTags = playerIds.map(id => `<@${id}>`).join(' ');
+    const customPingSentence = `<@${host.id}> is looking for async players ${roleMention} for ${formatLine}. ${allSeatedTags}`.trim();
+
+    const pingMessage = await targetMessage.channel.send({
+      content: customPingSentence,
+      allowedMentions: { roles: [targetRoleId], users: playerIds }
+    });
+
+    setTimeout(() => {
+      pingMessage.delete().catch(() => {});
+    }, 1500);
+
+    if (!hostIgnInfo.isKnown && promptUnknownHostIgn) {
+      promptUnknownHostIgn(insertedMatch, host, targetMessage.channel);
+    }
   }
 };
