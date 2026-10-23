@@ -19,8 +19,8 @@ module.exports = {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 Ranked League — Season 1')
+const embed = new EmbedBuilder()
+      .setTitle('🏆 Dune: Imperium Digital — Ranked League (Season 1)')
       .setDescription(
         `🎲 **Current Active Format:**\n• Loading...\n\n` +
         `🗳️ **Future Formats:**\n• Decided by community vote in <#${POLL_CHANNEL_ID}>!`
