@@ -1,11 +1,12 @@
-const { SlashCommandBuilder, EmbedBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
 const EMOJI_GUIDE_LINK = 'https://discord.com/channels/747212662483583069/1561400611348553810';
+const CUSTOM_LIVE_ROLE_ID = '1268299468785062099';
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('live')
-    .setDescription('Look for opponents for a live game')
+    .setDescription('Look for opponents for a custom live game')
     .addStringOption(option =>
       option.setName('text')
         .setDescription('Any extra details or notes for this match')
@@ -55,32 +56,13 @@ module.exports = {
           { name: 'CHOAM Module', value: 'CHOAM' },
           { name: 'Base Leaders + CHOAM', value: 'Leaders_CHOAM' }
         )
-    )
-    .addBooleanOption(option =>
-      option.setName('league')
-        .setDescription('Official Season League Game (Admins only)')
-        .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, buildRosterDisplay, resolveHostIgn, promptUnknownHostIgn, updateQueueMessage }) {
-    const isLeague = interaction.options.getBoolean('league') || false;
-    const LFG_ADMIN_ROLE = '1557469534133162045';
-    const LEAGUE_CHANNEL_ID = '1557473551227818024';
-
-    if (isLeague) {
-      if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
-        return interaction.reply({ content: '❌ Only LFG Admins can host official League matches during the testing phase.', flags: MessageFlags.Ephemeral });
-      }
-    }
-
-    if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
-      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
-    } else {
-      await interaction.deferReply();
-    }
+  async execute(interaction, { supabase, buildRosterDisplay, resolveHostIgn, promptUnknownHostIgn }) {
+    await interaction.deferReply();
 
     const rawCustomText = interaction.options.getString('text')?.trim() || null;
-    const dbMessageText = rawCustomText || (isLeague ? 'Official Ranked League Match!' : 'Looking for a live match!');
+    const dbMessageText = rawCustomText || 'Looking for a live match!';
     const customMinutes = interaction.options.getInteger('minutes');
     const password = interaction.options.getString('password') || 'None';
     const playersInput = interaction.options.getString('players');
@@ -156,12 +138,12 @@ module.exports = {
     const expirationMs = minutesToExpiry * 60 * 1000;
     const expiresAtISO = new Date(Date.now() + expirationMs).toISOString();
 
-    const roleMention = `<@&1219666679764877424>`;
+    const roleMention = `<@&${CUSTOM_LIVE_ROLE_ID}>`;
 
     const playerIds = [host.id];
     const guestPlayers = [];
 
-    if (playersInput && !isLeague) {
+    if (playersInput) {
       const mentionRegex = /<@!?(\d+)>/g;
       let match;
       const parsedMentions = [];
@@ -227,15 +209,6 @@ module.exports = {
       }
     }
 
-    let currentSeasonId = 2;
-    try {
-      if (isLeague) {
-        const nowIso = new Date().toISOString();
-        const { data: seasonData } = await supabase.from('sp_seasons').select('id').lte('starts_at', nowIso).gt('ends_at', nowIso).maybeSingle();
-        if (seasonData?.id) currentSeasonId = seasonData.id;
-      }
-    } catch (e) {}
-
     const { display: fullRosterDisplay, count: totalSlotCount } = buildRosterDisplay
       ? await buildRosterDisplay({
           player_ids: playerIds,
@@ -243,8 +216,7 @@ module.exports = {
           web_player_names: [],
           web_player_ids: [],
           notify_user_ids: [],
-          is_league: isLeague,
-          season_id: currentSeasonId
+          is_league: false
         })
       : { display: playerIds.map(id => `• <@${id}>`).join('\n'), count: playerIds.length + guestPlayers.length };
 
@@ -281,11 +253,6 @@ module.exports = {
       }
     } catch (idErr) {}
 
-    const embedTitle = isLeague 
-      ? `🏆 Ranked League Match Open!`
-      : `${liveDuneEmoji} New Live Match Open!`;
-    const embedColor = isLeague ? 0xF1C40F : 0xe74c3c;
-
     const descLines = [];
     if (rawCustomText) descLines.push(`"${rawCustomText}"\n`);
     descLines.push(formatLine);
@@ -294,9 +261,9 @@ module.exports = {
     const footerGuideBlock = `${liveDuneEmoji} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
 
     const embed = new EmbedBuilder()
-      .setTitle(embedTitle)
+      .setTitle(`${liveDuneEmoji} New Live Match Open!`)
       .setDescription(descLines.join('\n'))
-      .setColor(embedColor) 
+      .setColor(0xe74c3c)
       .addFields(
         { name: `👥 Players (${totalSlotCount}/4)\n\u200B`, value: `${fullRosterDisplay}\n\n${footerGuideBlock}`, inline: false }
       )
@@ -307,34 +274,16 @@ module.exports = {
       initialCopyableContent = `🔑 Lobby Password: \`${password}\` *(Tap to copy)*`;
     }
 
-    let actualChannelId = interaction.channelId;
-    let targetMessage;
-    let targetMessageId;
-
-    if (isLeague && interaction.channelId !== LEAGUE_CHANNEL_ID) {
-      const leagueChannel = await interaction.client.channels.fetch(LEAGUE_CHANNEL_ID).catch(() => null);
-      if (!leagueChannel) {
-        return interaction.editReply({ content: `❌ Could not find target channel <#${LEAGUE_CHANNEL_ID}>.` });
-      }
-      targetMessage = await leagueChannel.send({ content: initialCopyableContent, embeds: [embed] });
-      targetMessageId = targetMessage.id;
-      actualChannelId = LEAGUE_CHANNEL_ID;
-
-      const jumpLink = `https://discord.com/channels/${interaction.guildId}/${LEAGUE_CHANNEL_ID}/${targetMessageId}`;
-      await interaction.editReply({ content: `✅ League match successfully posted in <#${LEAGUE_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**` });
-      setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
-    } else {
-      const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
-      targetMessageId = response.id;
-      targetMessage = await interaction.channel.messages.fetch(targetMessageId);
-    }
+    const response = await interaction.editReply({ content: initialCopyableContent, embeds: [embed] });
+    const targetMessageId = response.id;
+    const targetMessage = await interaction.channel.messages.fetch(targetMessageId);
 
     const { data: insertedMatch, error: insertError } = await supabase
       .from('active_async_matches')
       .insert({
         message_id: targetMessageId,
         match_id: generatedMatchId,
-        channel_id: actualChannelId,
+        channel_id: interaction.channelId,
         guild_id: interaction.guildId,
         host_id: host.id,
         player_ids: playerIds,
@@ -347,9 +296,9 @@ module.exports = {
         status: 'searching',
         expires_at: expiresAtISO,
         mode: 'live',
-        is_league: isLeague,
-        season_id: isLeague ? currentSeasonId : null,
-        league_status: isLeague ? 'open' : null,
+        is_league: false,
+        season_id: null,
+        league_status: null,
         expected_player_keys: [],
         discord_usernames: []
       })
@@ -367,12 +316,10 @@ module.exports = {
     finalizedLines.push(`🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${numericLobbyId}`);
     await targetMessage.edit({ content: finalizedLines.join('\n') });
 
-    if (isLeague && updateQueueMessage) updateQueueMessage();
-
     try {
       const customJoinEmoji = guild.emojis.cache.find((e) => e.name === 'LiveDune');
       await targetMessage.react(customJoinEmoji ? customJoinEmoji.id : '1232049130151346216').catch(() => {});
-      if (!isLeague) await targetMessage.react('🙋').catch(() => {});
+      await targetMessage.react('🙋').catch(() => {});
       await targetMessage.react('🎮').catch(() => {});
       await targetMessage.react('❌').catch(() => {});
       await targetMessage.react('🥾').catch(() => {});
@@ -381,11 +328,11 @@ module.exports = {
     } catch (reactErr) { console.error(reactErr); }
 
     const allSeatedTags = playerIds.map(id => `<@${id}>`).join(' ');
-    const customPingSentence = `<@${host.id}> is looking for live players${roleMention} for ${formatLine}.${allSeatedTags}`.trim();
+    const customPingSentence = `<@${host.id}> is looking for live players ${roleMention} for ${formatLine}. ${allSeatedTags}`.trim();
 
     const pingMessage = await targetMessage.channel.send({
       content: customPingSentence,
-      allowedMentions: { roles: ['1219666679764877424'], users: playerIds } 
+      allowedMentions: { roles: [CUSTOM_LIVE_ROLE_ID], users: playerIds } 
     });
 
     setTimeout(() => {
