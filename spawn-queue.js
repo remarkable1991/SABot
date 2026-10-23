@@ -46,25 +46,26 @@ module.exports = {
 
   async execute(interaction, { supabase, updateQueueMessage }) {
     if (interaction.channelId !== '1558128709523996763') {
-      return interaction.reply({ content: '❌ This command can only be run in the dedicated queue channel (<#1558128709523996763>).', flags: MessageFlags.Ephemeral });
+      return interaction.reply({
+        content: '❌ This command can only be run in the dedicated queue channel (<#1558128709523996763>).',
+        flags: MessageFlags.Ephemeral
+      });
     }
 
     const now = new Date().toISOString();
     const guild = interaction.guild;
 
-    const [{ data: currentPreset }, { data: nextPreset }] = await Promise.all([
-      supabase.from('league_presets').select('*').lte('start_date', now).gt('end_date', now).order('start_date', { ascending: false }).limit(1).maybeSingle(),
-      supabase.from('league_presets').select('*').gt('start_date', now).order('start_date', { ascending: true }).limit(1).maybeSingle()
-    ]);
+    const { data: currentPreset } = await supabase
+      .from('league_presets')
+      .select('*')
+      .lte('start_date', now)
+      .gt('end_date', now)
+      .order('start_date', { ascending: false })
+      .limit(1)
+      .maybeSingle();
 
     const currentDesc = formatPresetWithEmojis(guild, currentPreset);
-    let rotationDetails = `🎲 **Current Active Format:**\n• ${currentDesc}`;
-
-    if (nextPreset) {
-      const nextDesc = formatPresetWithEmojis(guild, nextPreset);
-      const startUnix = Math.floor(new Date(nextPreset.start_date).getTime() / 1000);
-      rotationDetails += `\n\n📅 **Upcoming Format (starts <t:${startUnix}:D>):**\n• ${nextDesc} (<t:${startUnix}:R>)`;
-    }
+    const rotationDetails = `🎲 **Current Active Format:**\n• ${currentDesc}`;
 
     const embed = new EmbedBuilder()
       .setTitle('⚔️ Automated League Matchmaking Queue')
