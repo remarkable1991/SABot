@@ -32,11 +32,11 @@ const WebSocket = require('ws');
 const statsCommand = require('./stats');
 const asyncCommand = require('./async'); 
 const liveCommand = require('./live'); 
-const fixCommand = require('./fix');
 const tournamentCommand = require('./tournament');
 const massThreadsCommand = require('./mass-threads'); 
 const spCommand = require('./sp'); 
 const timeCommand = require('./time');
+const confirmCommand = require('./confirm');
 const tournamentStatusCommand = require('./tournament-status');
 const checkinCommand = require('./checkin');
 const spawnQueueCommand = require('./spawn-queue');
@@ -213,11 +213,11 @@ const slashCommands = new Map([
   [statsCommand.data.name, statsCommand],
   [asyncCommand.data.name, asyncCommand],
   [liveCommand.data.name, liveCommand],
-  [fixCommand.data.name, fixCommand],
   [tournamentCommand.data.name, tournamentCommand],
   [massThreadsCommand.data.name, massThreadsCommand],
   [spCommand.data.name, spCommand],
   [timeCommand.data.name, timeCommand],
+  [confirmCommand.data.name, confirmCommand],
   [tournamentStatusCommand.data.name, tournamentStatusCommand],
   [checkinCommand.data.name, checkinCommand],
   [spawnQueueCommand.data.name, spawnQueueCommand],
@@ -889,7 +889,7 @@ async function process3PlayerQuickChatEvent(lobby, senderName, messageCode) {
         const promptMsg = await channel.messages.fetch(vote.promptMsgId).catch(() => null);
         if (promptMsg) {
           await promptMsg.edit({
-            content: `🗳️ **3-Player Match Start Vote (${agreedCount}/3 Agreed)**\nAgreed: **${vote.agreedNames.join(', ')}**\nWaiting on:${remainingMentions || 'remaining player'}`
+            content: `🗳️ **3-Player Match Start Vote (${agreedCount}/3 Agreed)**\nAgreed: **${vote.agreedNames.join(', ')}**\nWaiting on: ${remainingMentions || 'remaining player'}`
           }).catch(() => {});
         }
       }
@@ -1172,7 +1172,7 @@ async function tryAutoSeatIntoOpenLeagueLobby(discordUserId, displayName, userId
         const lobbyCodeLabel = lobby.match_id || `sa${lobby.id}`;
 
         await leagueChannel.send({
-          content: `⚔️ ${whoSeated} clicked **Play** and was **automatically seated** into open League Lobby \`${lobbyCodeLabel}\`! (${newTotal}/4)${extraPings}`.trim()
+          content: `⚔️ ${whoSeated} clicked **Play** and was **automatically seated** into open League Lobby \`${lobbyCodeLabel}\`! (${newTotal}/4) ${extraPings}`.trim()
         }).catch(() => {});
 
         if (startTargetDate) {
@@ -1240,11 +1240,11 @@ async function updateQueueMessage() {
           ? { ign: null, isKnown: false }
           : await resolveHostIgn(openLobby.host_id, openLobby.web_host_id, openLobby.web_player_names);
         const lobbyRoomStr = hostIgnInfo.isKnown && hostIgnInfo.ign ? `🎮 Room: **${hostIgnInfo.ign}'s game**\n` : '';
-        const jumpUrl = `https://discord.com/channels/${DISCORD_GUILD_ID}/${openLobby.channel_id \vert{}\vert{} LEAGUE_LFG_CHANNEL_ID}/${openLobby.message_id}`;
+        const jumpUrl = `https://discord.com/channels/${DISCORD_GUILD_ID}/${openLobby.channel_id || LEAGUE_LFG_CHANNEL_ID}/${openLobby.message_id}`;
 
         activeField = {
           name: `🟢 Open League Lobby (${openCount}/4) — Click Play to Join!`,
-          value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby in <#${openLobby.channel_id \vert{}\vert{} LEAGUE_LFG_CHANNEL_ID}>](${jumpUrl})**`,
+          value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby in <#${openLobby.channel_id || LEAGUE_LFG_CHANNEL_ID}>](${jumpUrl})**`,
           inline: false
         };
       } else {
@@ -1328,10 +1328,10 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
 
     let hostDisplay = isAutoPop ? '*(Host Unclaimed)*' : `<@${hostId}>`;
     const allSeatedTags = (players || []).map(id => `<@${id}>`).join(' ');
-    let customPingSentence = `${hostDisplay} is looking for live players${roleMention} for ${formatLine}.${allSeatedTags}`.trim();
+    let customPingSentence = `${hostDisplay} is looking for live players ${roleMention} for ${formatLine}. ${allSeatedTags}`.trim();
 
     if (isAutoPop) {
-      customPingSentence = `A queue has popped! A new live League match has been generated ${roleMention} for ${formatLine}.${allSeatedTags}`.trim();
+      customPingSentence = `A queue has popped! A new live League match has been generated ${roleMention} for ${formatLine}. ${allSeatedTags}`.trim();
     }
 
     const { display: rosterStr, count } = await buildRosterDisplay({ 
@@ -1676,7 +1676,7 @@ async function runKickFlow(lobby, user, channel, lobbyMessage = null) {
   if (targets.length === 0) return;
 
   const promptMsg = await channel.send({ 
-    content: `<@${user.id}>, who do you want to **kick** from the lobby?\n\n` + targets.map(t => `${t.emoji} —${t.label}`).join('\n') 
+    content: `<@${user.id}>, who do you want to **kick** from the lobby?\n\n` + targets.map(t => `${t.emoji} — ${t.label}`).join('\n') 
   });
 
   for (const t of targets) await promptMsg.react(t.emoji).catch(() => {});
@@ -1936,7 +1936,7 @@ async function buildEmbed(payload, guild) {
   
   let titleString = `Game Finished - ${modeLabel}`;
   if (game.tournament_num) {
-    titleString = tourney ? `🏆 Tournament ${game.tournament_num}${pipeSep} ${tourney.roundType}${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
+    titleString = tourney ? `🏆 Tournament ${game.tournament_num} ${pipeSep} ${tourney.roundType} ${tourney.tableIdentifier}` : `🏆 Tournament ${game.tournament_num} Match Finished!`;
   }
 
   for (const row of results) {
@@ -1956,7 +1956,7 @@ async function buildEmbed(payload, guild) {
       if (tpVal !== null) tpSuffix = ` · **${tpVal} TP**`;
     }
 
-    let text = `${place} **${row.player_name}**${safeMention} -${leaderEmoji}${safeLeader} -${safePoints} pts${tpSuffix}`;
+    let text = `${place} **${row.player_name}** ${safeMention} -${leaderEmoji}${safeLeader} -${safePoints} pts${tpSuffix}`;
     text += `\nOverall: ${formatDelta(row.elo_delta_overall)}`;
     const overallElo = ratingsMap[playerKey]?.overall ?? ratingsMap[normalizedKey]?.overall;
     if (overallElo !== undefined) text += ` (-> ${Number(overallElo).toFixed(1)})`;
@@ -1966,7 +1966,7 @@ async function buildEmbed(payload, guild) {
     if (modeElo !== undefined) text += ` (-> ${Number(modeElo).toFixed(1)})`;
 
     if (sandboxDeltaMap[normalizedKey] !== undefined) {
-      text += ` ${pipeSep} All VP:${formatDelta(sandboxDeltaMap[normalizedKey])}`;
+      text += ` ${pipeSep} All VP: ${formatDelta(sandboxDeltaMap[normalizedKey])}`;
       const sbElo = sandboxRatingsMap[playerKey] ?? sandboxRatingsMap[normalizedKey];
       if (sbElo !== undefined) text += ` (-> ${Number(sbElo).toFixed(1)})`;
     }
@@ -2713,15 +2713,15 @@ async function handleWebLobbyCreation(lobby) {
       ? getEmoji(channel.guild, 'LiveDune', '<:LiveDune:1232049130151346216>')
       : getEmoji(channel.guild, 'AsyncDune', '<:AsyncDune:1232048177390289097>');
     const embedColor = isLeague ? 0xF1C40F : (isLive ? 0xe74c3c : 0xC9A24B);
-    const roleId = isLive ? '1219666679764877424' : '1219666516644204554';
+    const roleId = isLeague ? '1219666679764877424' : (isLive ? '1268299468785062099' : '1219666516644204554');
     
     const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
 
     const seatedPings = (lobby.player_ids || []).map(id => `<@${id}>`).join(' ');
     const modeLabelWord = isLive ? 'live' : 'async';
-    const customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${modeLabelWord} players <@&${roleId}> for ${formatLine}.${seatedPings}`.trim();
+    const customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${modeLabelWord} players <@&${roleId}> for ${formatLine}. ${seatedPings}`.trim();
 
-    let embedTitle = hostName !== 'Web Player' ? `${emojiTarget}${hostName}'s Game` : `${emojiTarget} New Match Open!`;
+    let embedTitle = hostName !== 'Web Player' ? `${emojiTarget} ${hostName}'s Game` : `${emojiTarget} New Match Open!`;
     if (isLeague) embedTitle = `🏆 Ranked League Match Open!`;
 
     const { display: rosterStr, count } = await buildRosterDisplay(lobby);
@@ -2810,7 +2810,7 @@ async function executeLobbyPing(lobby, channel) {
 
   const isLiveLobby = lobby.mode === 'live';
   const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
-  let roleId = isLiveLobby ? '1219666679764877424' : '1219666516644204554';
+  let roleId = isLeague ? '1219666679764877424' : (isLiveLobby ? '1268299468785062099' : '1219666516644204554');
   
   const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
   if (!msg || !msg.embeds || !msg.embeds[0]) return true;
@@ -2838,7 +2838,7 @@ async function executeLobbyPing(lobby, channel) {
     : getEmoji(channel.guild, 'AsyncDune', '<:AsyncDune:1232048177390289097>');
   const manageLink = `\n🔗 **Manage Lobby & Submit:** https://dunestats.cc/LFG/${lobby.id}`;
 
-  const tagMessage = `<@&${roleId}> ${hostMentionString} (${totalCount}/4) is looking for players for ${formatLine}${accurateEndEmoji}${optionalPasswordText}${manageLink}`;
+  const tagMessage = `<@&${roleId}> ${hostMentionString} (${totalCount}/4) is looking for players for ${formatLine} ${accurateEndEmoji}${optionalPasswordText}${manageLink}`;
 
   let historyCountMet = false;
   try {
@@ -3086,7 +3086,7 @@ async function finalizeTournamentConfirmation(scheduleId) {
       updated_at: new Date().toISOString()
     }).eq('id', fresh.id);
 
-    const matchTitle = `[${fresh.match_code}] ${fresh.round_type}${fresh.table_identifier}`;
+    const matchTitle = `[${fresh.match_code}] ${fresh.round_type} ${fresh.table_identifier}`;
     const calUrl = confirmedDate ? generateGoogleCalendarUrl(matchTitle, confirmedDate) : null;
     
     let tablePath = 'table';
@@ -3139,12 +3139,12 @@ async function sendTournamentConflictAlert(scheduleRecord) {
     
     if (threeVoterSlots.length > 0) {
       breakdownLines.push('**🔥 Closest Options (3/4 Players Agreed):**');
-      for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label}${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
+      for (const s of threeVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}**\n  ↳ Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')}\n  ↳ **Needs:** ${s.missing.map(id => `<@${id}>`).join(', ')} — *Are you available, or could you play slightly earlier/later?*`);
       breakdownLines.push('');
     }
     if (twoVoterSlots.length > 0) {
       breakdownLines.push('**⚖️ Split Options (2/4 Players Agreed):**');
-      for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed:${s.backers.map(id => `<@${id}>`).join(', ')})`);
+      for (const s of twoVoterSlots) breakdownLines.push(`• **${s.label} ${s.time_text}** (Agreed: ${s.backers.map(id => `<@${id}>`).join(', ')})`);
       breakdownLines.push('');
     }
     if (threeVoterSlots.length === 0 && twoVoterSlots.length === 0) {
@@ -3155,7 +3155,7 @@ async function sendTournamentConflictAlert(scheduleRecord) {
 
     const instructions = `**💡 How to Resolve & Propose Solutions:**\n1. [Jump to the pinned voting post](https://discord.com/channels/${DISCORD_GUILD_ID}/${scheduleRecord.thread_id}/${scheduleRecord.message_id}) to check or update your votes.\n2. Check mutual 2-hour free windows on the live map:\n   👉 **[Availability Map for Table ${scheduleRecord.table_identifier}](${webUrl})** · **[Scheduling Guide](${SCHEDULING_GUIDE_LINK})**\n3. Use \`/time\` to propose an adjustment:\n   • **Shift by minutes:** \`/time slot: B offset_minutes: 60\` *(Creates a new option **🇩** shifted +1h)*\n   • **Custom time code:** \`/time custom_time: <t:1787814000:F>\`\n4. Once proposed, everyone can vote on the new option above!`;
     const conflictEmbed = new EmbedBuilder()
-      .setTitle(`⚠️ Scheduling Conflict: [${scheduleRecord.match_code}] ${scheduleRecord.round_type}${scheduleRecord.table_identifier}`)
+      .setTitle(`⚠️ Scheduling Conflict: [${scheduleRecord.match_code}] ${scheduleRecord.round_type} ${scheduleRecord.table_identifier}`)
       .setColor(0xE74C3C)
       .setDescription(`All 4 players have voted, but no single slot reached unanimous agreement.\n\n${breakdownLines.join('\n')}${instructions}`)
       .setTimestamp();
@@ -3428,7 +3428,7 @@ async function awardSP(playerKey, userId, actionType, amount, metadata = {}) {
     });
     
     if (insertErr) {
-      console.error(`[awardSP] Failed to insert ${actionType} for${playerKey}:`, insertErr);
+      console.error(`[awardSP] Failed to insert ${actionType} for ${playerKey}:`, insertErr);
       return; 
     }
 
@@ -3829,7 +3829,7 @@ async function checkAndSendMatchReminders() {
               : `\n\n⚠️ **Votes are currently split with no unanimous slot!**`;
 
             const reminderEmbed = new EmbedBuilder()
-              .setTitle(`⏰ Daily Scheduling Reminder: [${sched.match_code}] ${sched.round_type}${sched.table_identifier}`)
+              .setTitle(`⏰ Daily Scheduling Reminder: [${sched.match_code}] ${sched.round_type} ${sched.table_identifier}`)
               .setColor(0xE67E22)
               .setDescription(
                 `This match does not have a confirmed time locked in yet!${missingLine}\n\n` +
@@ -3870,7 +3870,7 @@ async function checkAndSendMatchReminders() {
           if (thread) {
             await thread.send({
               content: `👥 ${(asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`,
-              embeds: [new EmbedBuilder().setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type}${asyncMatch.table_identifier}`).setColor(0x3498DB).setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/time\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()],
+              embeds: [new EmbedBuilder().setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`).setColor(0x3498DB).setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()],
               components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`async_start_${asyncMatch.id}`).setLabel('🚀 Mark Game Started').setStyle(ButtonStyle.Success))]
             }).catch(() => {});
             await supabase.from('tournament_match_schedules').update({ updated_at: now.toISOString() }).eq('id', asyncMatch.id);
@@ -3899,7 +3899,8 @@ discordClient.on('interactionCreate', async (interaction) => {
           updateQueueMessage,
           buildRosterDisplay,
           resolveHostIgn,
-          promptUnknownHostIgn
+          promptUnknownHostIgn,
+          pendingLeagueNotes
         });
       } catch (error) {
         console.error(`Error executing /${interaction.commandName}:`, error);
@@ -4358,7 +4359,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         }
         await supabase.from('tournament_match_schedules').update({ status: 'ongoing', confirmed_timestamp: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', schedule.id);
         await interaction.update({ components: [] }).catch(() => {});
-        await interaction.channel.send({ content: `👥 ${(schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`, embeds: [new EmbedBuilder().setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type}${schedule.table_identifier}`).setColor(0x2ECC71).setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()] }).catch(() => {});
+        await interaction.channel.send({ content: `👥 ${(schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`, embeds: [new EmbedBuilder().setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`).setColor(0x2ECC71).setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()] }).catch(() => {});
       }
     }
   } catch (err) {
@@ -4395,7 +4396,7 @@ discordClient.on('messageCreate', async (message) => {
               .setStyle(ButtonStyle.Secondary)
           );
           const askMsg = await message.channel.send({
-            content: `👥 <@${message.author.id}>, there${waitingQueue.length === 1 ? 'is **1 player**' : `are **${waitingQueue.length} players**`} currently waiting in the queue (${namesList}). Would you like to pull them into your new League lobby?`,
+            content: `👥 <@${message.author.id}>, there ${waitingQueue.length === 1 ? 'is **1 player**' : `are **${waitingQueue.length} players**`} currently waiting in the queue (${namesList}). Would you like to pull them into your new League lobby?`,
             components: [row]
           }).catch(() => null);
           if (askMsg) setTimeout(() => askMsg.delete().catch(() => {}), 60000);
