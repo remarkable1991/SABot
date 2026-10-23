@@ -950,7 +950,12 @@ async function updateLeagueInfoMessage() {
       if (!channel) return;
       const messages = await channel.messages.fetch({ limit: 10 }).catch(() => null);
       if (!messages) return;
-      const targetMsg = messages.find(m => m.author.id === discordClient.user.id && m.embeds[0] && m.embeds[0].title && m.embeds[0].title.includes('Ranked League'));
+      const targetMsg = messages.find(m =>
+        m.author.id === discordClient.user.id &&
+        m.embeds[0] &&
+        m.embeds[0].title &&
+        m.embeds[0].title.includes('Ranked League')
+      );
       if (!targetMsg) return;
 
       const now = new Date().toISOString();
@@ -962,51 +967,124 @@ async function updateLeagueInfoMessage() {
       const seasonStartsAt = seasonRow?.starts_at || '2026-10-01T00:00:00Z';
       const seasonEndsUnix = seasonRow?.ends_at ? Math.floor(new Date(seasonRow.ends_at).getTime() / 1000) : null;
 
-      const [{ data: currentPreset }, { data: topRatings }, { count: seasonGamesCount }] = await Promise.all([
+      const [
+        { data: currentPreset },
+        { data: nextPreset },
+        { data: topRatings },
+        { count: seasonGamesCount }
+      ] = await Promise.all([
         supabase.from('league_presets').select('*').lte('start_date', now).gt('end_date', now).order('start_date', { ascending: false }).limit(1).maybeSingle(),
+        supabase.from('league_presets').select('*').gt('start_date', now).order('start_date', { ascending: true }).limit(1).maybeSingle(),
         supabase.from('player_league_ratings').select('player_key, elo, games_played, wins').eq('season', dbSeasonId).order('elo', { ascending: false }).limit(3),
         supabase.from('games').select('id', { count: 'exact', head: true }).eq('is_league', true).gte('created_at', seasonStartsAt)
       ]);
 
+      // 1. Format Rotation (Current + Upcoming from Supabase + Poll channel)
       const currentDesc = formatPresetText(guild, currentPreset);
-      const formatSection = `🎲 **Current Active Format:**\n• ${currentDesc}\n\n🗳️ **Future Formats:**\n• Decided based on the community poll in <#${LEAGUE_POLL_CHANNEL_ID}>!`;
+      let formatSection = `🎲 **Current Active Format:**\n• ${currentDesc}`;
 
+      if (nextPreset) {
+        const nextDesc = formatPresetText(guild, nextPreset);
+        const startUnix = Math.floor(new Date(nextPreset.start_date).getTime() / 1000);
+        formatSection += `\n\n📅 **Upcoming Format (starts <t:${startUnix}:D>):**\n• ${nextDesc} (<t:${startUnix}:R>)`;
+      }
+
+      formatSection += `\n\n🗳️ **Future Formats:**\n• Decided based on the community poll in <#${LEAGUE_POLL_CHANNEL_ID}>!`;
+
+      // 2. Top 3 Standings (Using Lobby/Queue Deduplication & Profile Links)
       let top3Text = '*No ranked matches recorded yet this season.*';
       if (topRatings && topRatings.length > 0) {
         const topKeys = topRatings.map(r => r.player_key);
-        const [{ data: mapRows }, { data: globalRatingRows }] = await Promise.all([
-          supabase.from('player_discord_map').select('player_key, display_name, discord_user_id').in('player_key', topKeys),
+        const [{ data: mapRows }, { data: dirRows }, { data: globalRatingRows }] = await Promise.all([
+          supabase.from('player_discord_map').select('player_key, display_name, discord_user_id, discord_username').in('player_key', topKeys),
+          supabase.from('discord_guild_members').select('discord_user_id, discord_username, global_name, display_name, suggested_player_key').in('suggested_player_key', topKeys),
           supabase.from('player_ratings').select('player_key, display_name').in('player_key', topKeys).eq('game_version', 'overall')
         ]);
-        const nameMap = {}, discordIdMap = {};
-        (globalRatingRows || []).forEach(r => { if (r.display_name) nameMap[r.player_key] = r.display_name; });
-        (mapRows || []).forEach(r => {
-          if (r.display_name && !nameMap[r.player_key]) nameMap[r.player_key] = r.display_name;
-          if (r.discord_user_id) discordIdMap[r.player_key] = r.discord_user_id;
+
+        const nameMap = {};
+        const discordIdMap = {};
+        const discordNamesMap = {};
+
+        (globalRatingRows || []).forEach(r => {
+          if (r.display_name) nameMap[r.player_key] = r.display_name;
         });
 
-        const trophyEmojis = [getEmoji(guild, 'Tournament', '🥇'), getEmoji(guild, '2ndTrophy', '🥈'), getEmoji(guild, '3rdTrophy', '🥉')];
+        (mapRows || []).forEach(r => {
+          if (r.display_name && !nameMap[r.player_key]) nameMap[r.player_key] = r.display_name;
+          if (r.discord_user_id) {
+            discordIdMap[r.player_key] = r.discord_user_id;
+            if (!discordNamesMap[r.discord_user_id]) discordNamesMap[r.discord_user_id] = [];
+            if (r.discord_username) discordNamesMap[r.discord_user_id].push(r.discord_username);
+          }
+        });
+
+        (dirRows || []).forEach(d => {
+          if (d.suggested_player_key && !discordIdMap[d.suggested_player_key] && d.discord_user_id) {
+            discordIdMap[d.suggested_player_key] = d.discord_user_id;
+          }
+          if (d.discord_user_id) {
+            if (!discordNamesMap[d.discord_user_id]) discordNamesMap[d.discord_user_id] = [];
+            discordNamesMap[d.discord_user_id].push(d.display_name, d.global_name, d.discord_username);
+          }
+        });
+
+        // Also check live guild member cache for nicknames/display names
+        for (const pk of topKeys) {
+          const uid = discordIdMap[pk];
+          if (uid && guild) {
+            const member = guild.members.cache.get(uid) || await guild.members.fetch(uid).catch(() => null);
+            if (member) {
+              if (!discordNamesMap[uid]) discordNamesMap[uid] = [];
+              discordNamesMap[uid].push(member.nickname, member.displayName, member.user?.globalName, member.user?.username);
+            }
+          }
+        }
+
+        const trophyEmojis = [
+          getEmoji(guild, 'Tournament', '🥇'),
+          getEmoji(guild, '2ndTrophy', '🥈'),
+          getEmoji(guild, '3rdTrophy', '🥉')
+        ];
+
         const rankLines = topRatings.map((row, idx) => {
           const badge = trophyEmojis[idx] || `${idx + 1}.`;
-          const displayName = nameMap[row.player_key] || capitalize(row.player_key);
-          const mentionStr = discordIdMap[row.player_key] ? ` (<@${discordIdMap[row.player_key]}>)` : '';
-          return `${badge} **${displayName}**${mentionStr} — **${Number(row.elo).toFixed(1)} ELO**`;
+          const caseName = nameMap[row.player_key] || capitalize(row.player_key);
+          const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(caseName)}`;
+          const uid = discordIdMap[row.player_key];
+
+          let playerDisplay = `[${caseName}](${profileUrl})`;
+          if (uid) {
+            const normIgn = normalizeName(caseName);
+            const knownDiscordNames = (discordNamesMap[uid] || []).filter(Boolean);
+            const sameName = knownDiscordNames.some(dn => normalizeName(dn) === normIgn);
+            playerDisplay = sameName
+              ? `<@${uid}> [📊](${profileUrl})`
+              : `[${caseName}](${profileUrl}) <@${uid}>`;
+          }
+
+          return `${badge} ${playerDisplay} — **${Number(row.elo).toFixed(1)} ELO**`;
         });
+
         top3Text = `${rankLines.join('\n')}\n\n🔗 **[View Full Ranking on dunestats.cc](https://dunestats.cc/leaderboard)**`;
       } else {
         top3Text += `\n\n🔗 **[View Full Ranking on dunestats.cc](https://dunestats.cc/leaderboard)**`;
       }
 
+      // 3. League Activity Stats (Tracked via role, but without mentioning the role)
       const role = guild.roles.cache.get(ACTIVE_LEAGUE_ROLE_ID) || await guild.roles.fetch(ACTIVE_LEAGUE_ROLE_ID).catch(() => null);
       const activeRoleCount = role ? role.members.size : 0;
+
       const statsLines = [
-        `👥 **Active Players (Last 3 Weeks):** **${activeRoleCount}** (<@&${ACTIVE_LEAGUE_ROLE_ID}>)`,
+        `👥 **Active Players on Discord (Last 3 Weeks):** **${activeRoleCount}**`,
         `🎮 **League Games Played (Season ${displaySeasonNum}):** **${seasonGamesCount || 0}**`
       ];
-      if (seasonEndsUnix) statsLines.push(`⏳ **Season ${displaySeasonNum} Ends / Season ${displaySeasonNum + 1} Starts:** <t:${seasonEndsUnix}:D> (<t:${seasonEndsUnix}:R>)`);
+
+      if (seasonEndsUnix) {
+        statsLines.push(`⏳ **Season ${displaySeasonNum} Ends / Season ${displaySeasonNum + 1} Starts:** <t:${seasonEndsUnix}:D> (<t:${seasonEndsUnix}:R>)`);
+      }
 
       const updatedEmbed = new EmbedBuilder()
-        .setTitle(`🏆 Ranked League — Season ${displaySeasonNum}`)
+        .setTitle(`🏆 Dune: Imperium Digital — Ranked League (Season ${displaySeasonNum})`)
         .setDescription(formatSection)
         .setColor(0xF1C40F)
         .setFields(
@@ -1014,8 +1092,11 @@ async function updateLeagueInfoMessage() {
           { name: `📊 League Activity & Season Info`, value: statsLines.join('\n'), inline: false }
         )
         .setTimestamp();
+
       await targetMsg.edit({ embeds: [updatedEmbed] }).catch(() => {});
-    } catch (e) {}
+    } catch (e) {
+      console.error('Error updating League Info message:', e);
+    }
   }, 1000);
 }
 // -------------------------------------------------------------
