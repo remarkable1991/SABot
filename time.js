@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
 
 const DISCORD_GUILD_ID = process.env.DISCORD_GUILD_ID;
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
@@ -28,31 +28,14 @@ function normalizeSlotInput(input) {
   return letterMap[clean] || clean;
 }
 
-function generateGoogleCalendarUrl(title, startDate, durationHours = 2) {
-  if (!startDate || isNaN(startDate.getTime())) return null;
-  const endDate = new Date(startDate.getTime() + durationHours * 60 * 60 * 1000);
-  const pad = (n) => String(n).padStart(2, '0');
-  const formatUtc = (d) => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getUTCDate())}T${pad(d.getUTCHours())}${pad(d.getUTCMinutes())}${pad(d.getUTCSeconds())}Z`;
-  const dates = `${formatUtc(startDate)}/${formatUtc(endDate)}`;
-  const text = encodeURIComponent(title);
-  const details = encodeURIComponent('Strategy Arena Tournament Match.');
-  return `https://calendar.google.com/calendar/render?action=TEMPLATE&text=${text}&dates=${dates}&details=${details}`;
-}
-
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('time')
-    .setDescription('Confirm match start (Async), lock in a time, or propose a new live time slot')
-    .addStringOption((option) =>
-      option
-        .setName('match_code')
-        .setDescription('Match Code (e.g. 15G1T6) - Optional if run inside the match thread')
-        .setRequired(false)
-    )
+    .setDescription('Propose a new time slot or shift an existing slot in this match thread')
     .addStringOption((option) =>
       option
         .setName('slot')
-        .setDescription('Select an existing suggested slot (e.g. A, B, C, or 🇦, 🇧)')
+        .setDescription('Select an existing suggested slot to shift (e.g. A, B, C, or 🇦, 🇧)')
         .setRequired(false)
     )
     .addIntegerOption((option) =>
@@ -64,41 +47,29 @@ module.exports = {
     .addStringOption((option) =>
       option
         .setName('custom_time')
-        .setDescription('Propose a brand new custom time or Unix timestamp')
-        .setRequired(false)
-    )
-    .addBooleanOption((option) =>
-      option
-        .setName('force_lock')
-        .setDescription('Admin/Host only: Immediately force-confirm without waiting for votes')
+        .setDescription('Propose a brand new custom time or Discord timestamp (<t:...:F>)')
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, discordClient }) {
+  async execute(interaction, { supabase }) {
     await interaction.deferReply();
 
     const member = interaction.member;
     const channelId = interaction.channelId;
-    const inputMatchCode = interaction.options.getString('match_code')?.trim().toUpperCase();
     const rawSlotInput = interaction.options.getString('slot');
     const offsetMinutes = interaction.options.getInteger('offset_minutes');
     const customTime = interaction.options.getString('custom_time')?.trim();
-    const forceLock = interaction.options.getBoolean('force_lock') || false;
 
     try {
-      let query = supabase.from('tournament_match_schedules').select('*');
-      if (inputMatchCode) {
-        query = query.eq('match_code', inputMatchCode);
-      } else {
-        query = query.eq('thread_id', channelId);
-      }
+      const { data: schedule, error } = await supabase
+        .from('tournament_match_schedules')
+        .select('*')
+        .eq('thread_id', channelId)
+        .maybeSingle();
 
-      const { data: schedule, error } = await query.maybeSingle();
       if (error || !schedule) {
         return await interaction.editReply({
-          content: inputMatchCode
-            ? `❌ Could not find a match with code **${inputMatchCode}**.`
-            : `❌ No active match schedule found for this channel. Please specify \`match_code\` if outside the thread.`
+          content: `❌ No active match schedule found for this channel. Please run \`/time\` directly inside your tournament match thread.`
         });
       }
 
@@ -108,13 +79,8 @@ module.exports = {
 
       if (!isHost && !isAdmin && !isParticipant) {
         return await interaction.editReply({
-          content: `❌ You do not have permission to adjust this match schedule.`
+          content: `❌ Only participants of this match (or Tournament Hosts) can propose time slots.`
         });
-      }
-
-      let threadChannel = interaction.channel;
-      if (schedule.thread_id && schedule.thread_id !== interaction.channelId) {
-        threadChannel = await discordClient.channels.fetch(schedule.thread_id).catch(() => interaction.channel);
       }
 
       const playerMentions = schedule.player_discord_ids && schedule.player_discord_ids.length > 0
@@ -129,37 +95,9 @@ module.exports = {
         try { existingSlots = JSON.parse(existingSlots); } catch (e) { existingSlots = []; }
       }
 
-      // --- ASYNC MATCH HANDLING (Only if mode is async AND no time slots are being proposed/used) ---
-      if (schedule.mode === 'async' && existingSlots.length === 0 && !rawSlotInput && !customTime) {
-        const nowISO = new Date().toISOString();
-        await supabase
-          .from('tournament_match_schedules')
-          .update({
-            status: 'ongoing',
-            confirmed_timestamp: nowISO,
-            updated_at: nowISO
-          })
-          .eq('id', schedule.id);
-
-        const asyncEmbed = new EmbedBuilder()
-          .setTitle(`🚀 Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
-          .setColor(0x2ECC71)
-          .setDescription(`The game is now **Ongoing**! Turn timers are active. Good luck!\n\n🔗 **[Jump to Top Post](${topPostLink})**`)
-          .setTimestamp();
-
-        if (threadChannel.id !== interaction.channelId) {
-          await threadChannel.send({ content: `👥 ${playerMentions}`, embeds: [asyncEmbed] }).catch(() => {});
-        }
-
-        return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [asyncEmbed] });
-      }
-
-      // --- LIVE MATCH TIME PROPOSAL / LOCK HANDLING ---
       let calculatedTimeText = null;
-      let calculatedTimestamp = null;
       let baseSlotFound = null;
 
-      // Normalize slot search (supports 'B' matching '🇧')
       if (rawSlotInput) {
         const normalizedInput = normalizeSlotInput(rawSlotInput);
         const upperRaw = rawSlotInput.trim().toUpperCase();
@@ -169,24 +107,27 @@ module.exports = {
           s.label.toUpperCase().includes(upperRaw) ||
           normalizeSlotInput(s.label) === normalizedInput
         );
+
+        if (!baseSlotFound) {
+          return await interaction.editReply({
+            content: `⚠️ Could not find slot **${rawSlotInput}** on this match. Available slots: ${existingSlots.map(s => s.label).join(', ') || 'None'}.`
+          });
+        }
       }
 
-      // Calculate time based on base slot + offset or custom_time
       if (baseSlotFound && offsetMinutes) {
         const baseUnix = extractUnixSec(baseSlotFound.time_text);
         if (baseUnix) {
           const newUnix = baseUnix + (offsetMinutes * 60);
-          calculatedTimestamp = new Date(newUnix * 1000).toISOString();
           calculatedTimeText = `<t:${newUnix}:F>`;
         }
       } else if (baseSlotFound && !offsetMinutes) {
-        calculatedTimeText = baseSlotFound.time_text;
-        const unix = extractUnixSec(baseSlotFound.time_text);
-        if (unix) calculatedTimestamp = new Date(unix * 1000).toISOString();
+        return await interaction.editReply({
+          content: `⚠️ Please include \`offset_minutes\` (e.g. \`60\` or \`-30\`) when shifting an existing slot, or react directly to **${baseSlotFound.label}** on the [voting post](${topPostLink})!`
+        });
       } else if (customTime) {
         const unix = extractUnixSec(customTime);
         if (unix) {
-          calculatedTimestamp = new Date(unix * 1000).toISOString();
           calculatedTimeText = `<t:${unix}:F>`;
         } else {
           calculatedTimeText = customTime;
@@ -195,55 +136,10 @@ module.exports = {
 
       if (!calculatedTimeText) {
         return await interaction.editReply({
-          content: `⚠️ Please specify a valid slot (e.g. \`slot: B\`), a slot with offset (e.g. \`slot: B\` + \`offset_minutes: 60\`), or a \`custom_time\`.`
+          content: `⚠️ Please specify either a slot with an offset (e.g. \`slot: B\` + \`offset_minutes: 60\`) or a \`custom_time\` (e.g. \`<t:1792850400:F>\`).`
         });
       }
 
-      // 1. ADMIN FORCE LOCK OPTION
-      if (forceLock && (isAdmin || isHost)) {
-        await supabase
-          .from('tournament_match_schedules')
-          .update({
-            mode: 'live',
-            status: 'confirmed',
-            confirmed_slot: baseSlotFound?.label || 'Manual',
-            confirmed_time_text: calculatedTimeText,
-            confirmed_timestamp: calculatedTimestamp,
-            reminders_sent: [],
-            updated_at: new Date().toISOString()
-          })
-          .eq('id', schedule.id);
-
-        const matchTitle = `[${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`;
-        const calUrl = calculatedTimestamp ? generateGoogleCalendarUrl(matchTitle, new Date(calculatedTimestamp)) : null;
-
-        const forceEmbed = new EmbedBuilder()
-          .setTitle(`📅 Match Time Confirmed by Host: ${matchTitle}`)
-          .setColor(0x2ECC71)
-          .setDescription(`Tournament Host locked in the match for **${calculatedTimeText}**.\n\n🔗 **[Jump to Top Post](${topPostLink})**\n\nPlease let your opponents know on time if you need to reschedule.`)
-          .setTimestamp();
-
-        const components = [];
-        if (calUrl) {
-          components.push(
-            new ActionRowBuilder().addComponents(
-              new ButtonBuilder()
-                .setLabel('Add to Google Calendar')
-                .setStyle(ButtonStyle.Link)
-                .setURL(calUrl)
-                .setEmoji('📅')
-            )
-          );
-        }
-
-        if (threadChannel.id !== interaction.channelId) {
-          await threadChannel.send({ content: `👥 ${playerMentions}`, embeds: [forceEmbed], components }).catch(() => {});
-        }
-
-        return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [forceEmbed], components });
-      }
-
-      // 2. PROPOSE NEW OPTION BRANCH
       const nextEmojiIndex = existingSlots.length;
       const nextEmoji = REGIONAL_EMOJIS[nextEmojiIndex] || `Option ${nextEmojiIndex + 1}`;
 
@@ -279,10 +175,9 @@ module.exports = {
         })
         .eq('id', schedule.id);
 
-      // 3. UPDATE PINNED MESSAGE EMBED AND ADD REACTIONS
-      let fetchedMsg = null;
+      // Update pinned message embed and add reaction
       try {
-        fetchedMsg = await threadChannel.messages.fetch(schedule.message_id);
+        const fetchedMsg = await interaction.channel.messages.fetch(schedule.message_id);
         if (fetchedMsg && fetchedMsg.embeds.length > 0) {
           const originalEmbed = fetchedMsg.embeds[0];
           const updatedEmbed = EmbedBuilder.from(originalEmbed);
@@ -323,15 +218,11 @@ module.exports = {
         .setDescription(`<@${interaction.user.id}> proposed a new time slot and voted for it:\n\n**${nextEmoji} ${calculatedTimeText}**\n\n👉 **[Jump to Voting Post to React](${topPostLink})**`)
         .setTimestamp();
 
-      if (threadChannel.id !== interaction.channelId) {
-        await threadChannel.send({ content: `👥 ${playerMentions}`, embeds: [proposalEmbed] }).catch(() => {});
-      }
-
       return await interaction.editReply({ content: `👥 ${playerMentions}`, embeds: [proposalEmbed] });
 
     } catch (error) {
       console.error('Error executing /time command:', error);
-      await interaction.editReply({ content: '⚠️ An error occurred while adjusting the match schedule.' });
+      await interaction.editReply({ content: '⚠️ An error occurred while proposing the time slot.' });
     }
   }
 };
