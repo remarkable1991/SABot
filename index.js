@@ -857,9 +857,9 @@ async function updateQueueMessage() {
         if (openLobby.channel_id) openChId = openLobby.channel_id;
         const jumpUrl = `https://discord.com/channels/${DISCORD_GUILD_ID}/${openChId}/${openLobby.message_id}`;
 
-        activeField = {
+       activeField = {
           name: `🟢 Open League Lobby (${openCount}/4) — Click Play to Join!`,
-          value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby in <#${openChId}>](${jumpUrl})**`,
+          value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby](${jumpUrl})** in <#${openChId}>`,
           inline: false
         };
       } else {
