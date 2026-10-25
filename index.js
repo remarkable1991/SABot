@@ -56,6 +56,7 @@ const YOUTUBE_VOD_CHANNEL_ID = '1561777632100745346';
 const LEAGUE_INFO_CHANNEL_ID = '1563165091669475499';
 const LEAGUE_POLL_CHANNEL_ID = '1221556256406507611';
 const ACTIVE_LEAGUE_ROLE_ID = '1563153007728791622';
+const LEAGUE_NOTIFY_ROLE_ID = '1219666679764877424';
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
@@ -689,35 +690,82 @@ async function syncGuildDirectory() {
     if (!guild) return;
     const members = await guild.members.fetch();
     const validMembers = members.filter(m => !m.user.bot);
-    const { data: verifiedMaps } = await supabase.from('player_discord_map').select('discord_user_id, player_key');
+
+    const { data: verifiedMaps } = await supabase
+      .from('player_discord_map')
+      .select('id, discord_user_id, player_key, has_league_lfg_role');
+
     const verifiedSet = new Set((verifiedMaps || []).map(m => m.discord_user_id).filter(Boolean));
     const { data: allRatings } = await supabase.from('player_ratings').select('player_key, display_name').eq('game_version', 'overall');
     const ratingsList = allRatings || [];
+
     const rows = [];
+    const roleHolderDiscordIds = new Set();
+
     for (const [, member] of validMembers) {
       const dId = member.id;
       const username = member.user.username;
       const globalName = member.user.globalName || null;
       const displayName = member.nickname || member.displayName || username;
       const isVerified = verifiedSet.has(dId);
+      const hasLeagueRole = member.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+
+      if (hasLeagueRole) roleHolderDiscordIds.add(dId);
+
       let suggestedKey = null, bestScore = 0;
       if (!isVerified) {
         for (const rating of ratingsList) {
-          const score = Math.max(similarity(displayName, rating.display_name), similarity(displayName, rating.player_key), similarity(username, rating.player_key));
+          const score = Math.max(
+            similarity(displayName, rating.display_name),
+            similarity(displayName, rating.player_key),
+            similarity(username, rating.player_key)
+          );
           if (score > bestScore) { bestScore = score; suggestedKey = rating.player_key; }
         }
       }
+
       rows.push({
-        discord_user_id: dId, discord_username: username, global_name: globalName, display_name: displayName,
+        discord_user_id: dId,
+        discord_username: username,
+        global_name: globalName,
+        display_name: displayName,
         suggested_player_key: bestScore >= DB_MATCH_THRESHOLD ? suggestedKey : null,
         similarity_score: bestScore >= DB_MATCH_THRESHOLD ? parseFloat(bestScore.toFixed(3)) : null,
-        has_verified_map: isVerified, joined_at: member.joinedAt ? member.joinedAt.toISOString() : null, updated_at: new Date().toISOString()
+        has_verified_map: isVerified,
+        has_league_lfg_role: hasLeagueRole,
+        joined_at: member.joinedAt ? member.joinedAt.toISOString() : null,
+        updated_at: new Date().toISOString()
       });
     }
-    for (let i = 0; i < rows.length; i += 100) await supabase.from('discord_guild_members').upsert(rows.slice(i, i + 100), { onConflict: 'discord_user_id' });
-  } catch (err) {}
-}
 
+    for (let i = 0; i < rows.length; i += 100) {
+      await supabase.from('discord_guild_members').upsert(rows.slice(i, i + 100), { onConflict: 'discord_user_id' });
+    }
+
+    // Backfill player_discord_map ONLY where the DB state differs from live Discord role state
+    const idsToSetTrue = [];
+    const idsToSetFalse = [];
+
+    for (const m of verifiedMaps || []) {
+      if (!m.discord_user_id) continue;
+      const shouldBeTrue = roleHolderDiscordIds.has(m.discord_user_id);
+      if (shouldBeTrue && m.has_league_lfg_role !== true) {
+        idsToSetTrue.push(m.id);
+      } else if (!shouldBeTrue && m.has_league_lfg_role === true) {
+        idsToSetFalse.push(m.id);
+      }
+    }
+
+    if (idsToSetTrue.length > 0) {
+      await supabase.from('player_discord_map').update({ has_league_lfg_role: true }).in('id', idsToSetTrue);
+    }
+    if (idsToSetFalse.length > 0) {
+      await supabase.from('player_discord_map').update({ has_league_lfg_role: false }).in('id', idsToSetFalse);
+    }
+  } catch (err) {
+    console.error('[Directory] Error syncing guild directory:', err);
+  }
+}
 async function resolveMentionForName(guild, playerName) {
   let dbMatch = await getDatabasePlayerMap(playerName);
   const mappedDiscordId = normalizeDiscordId(dbMatch && dbMatch.discord_user_id);
@@ -2865,6 +2913,28 @@ function startGlobalDatabaseListener() {
                await supabase.from('player_discord_map').update({ discord_username: member.user.username, discord_user_id: member.id, updated_at: new Date().toISOString() }).eq('discord_username', rec.discord_username);
             }
           }
+          if (table === 'player_discord_map' && eventType === 'UPDATE' && newRecord && oldRecord) {
+          if (
+            typeof newRecord.has_league_lfg_role === 'boolean' &&
+            newRecord.has_league_lfg_role !== oldRecord.has_league_lfg_role &&
+            newRecord.discord_user_id
+          ) {
+            try {
+              const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+              const member = guild ? await guild.members.fetch(newRecord.discord_user_id).catch(() => null) : null;
+              if (member) {
+                const currentlyHasRole = member.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+                if (newRecord.has_league_lfg_role && !currentlyHasRole) {
+                  await member.roles.add(LEAGUE_NOTIFY_ROLE_ID).catch(() => {});
+                } else if (!newRecord.has_league_lfg_role && currentlyHasRole) {
+                  await member.roles.remove(LEAGUE_NOTIFY_ROLE_ID).catch(() => {});
+                }
+              }
+            } catch (roleErr) {
+              console.error('Error syncing league ping role from website:', roleErr);
+            }
+          }
+        }
           if (eventType === 'UPDATE' && newRecord?.has_checked_in === true) {
             const isFreshWebsiteCheckin = (oldRecord?.has_checked_in !== true && newRecord.check_in_method === 'website');
             const isDualConfirmed = (oldRecord?.check_in_method === 'discord' && newRecord.check_in_method === 'discord/website');
@@ -3916,12 +3986,27 @@ discordClient.on('guildMemberUpdate', async (oldMember, newMember) => {
     if (newMember.user.bot) return;
     const username = newMember.user.username;
     const displayName = newMember.nickname || newMember.displayName || username;
+    const hasLeagueRole = newMember.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+
     await supabase.from('discord_guild_members').upsert({
-      discord_user_id: newMember.id, discord_username: username, global_name: newMember.user.globalName || null, display_name: displayName, updated_at: new Date().toISOString()
+      discord_user_id: newMember.id,
+      discord_username: username,
+      global_name: newMember.user.globalName || null,
+      display_name: displayName,
+      has_league_lfg_role: hasLeagueRole,
+      updated_at: new Date().toISOString()
     }, { onConflict: 'discord_user_id' });
+
+    // If the League Notification Role changed on Discord, update player_discord_map
+    const hadLeagueRole = oldMember.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+    if (hadLeagueRole !== hasLeagueRole) {
+      await supabase
+        .from('player_discord_map')
+        .update({ has_league_lfg_role: hasLeagueRole, updated_at: new Date().toISOString() })
+        .eq('discord_user_id', newMember.id);
+    }
   } catch (e) {}
 });
-
 discordClient.on('guildMemberRemove', async (member) => {
   try {
     if (member.user.bot) return;
