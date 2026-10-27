@@ -271,48 +271,44 @@ function getEmoji(guild, name, fallback = '') {
   return emoji ? emoji.toString() : fallback;
 }
 
-function wrapLink(text, url) {
-  return url ? `[${text}](${url})` : text;
-}
-
-function formatBoardWithEmoji(guild, boardType, url = null) {
-  if (!boardType) return wrapLink('**Base Game**', url);
+function formatBoardWithEmoji(guild, boardType) {
+  if (!boardType) return '**Base Game**';
   if (boardType.toLowerCase().includes('uprising')) {
-    const emoji = getEmoji(guild, 'Uprising', '');
-    return `${emoji} ${wrapLink('**Uprising**', url)}`.trim();
+    const uprisingEmoji = getEmoji(guild, 'Uprising', '');
+    return `${uprisingEmoji} **Uprising**`.trim();
   }
-  return wrapLink(`**${boardType}**`, url);
+  return `**${boardType}**`;
 }
 
-function formatExpansionsWithEmoji(guild, expansions = [], url = null) {
+function formatExpansionsWithEmoji(guild, expansions = []) {
   return (expansions || []).map(exp => {
     const lower = String(exp).toLowerCase();
 
     if (lower.includes('rise of ix') || lower === 'ix') {
-      return `${getEmoji(guild, 'Ix', '')} ${wrapLink('**Rise of IX**', url)}`.trim();
+      return `${getEmoji(guild, 'Ix', '')} **Rise of IX**`.trim();
     }
     // Detects "Immortality to 11" or "Immortality (To 11)"
     if (lower.includes('immortality') && lower.includes('11')) {
-      return `${getEmoji(guild, 'Immo', '')} ${wrapLink('**Immortality (To 11)**', url)}`.trim();
+      return `${getEmoji(guild, 'Immo', '')} **Immortality (To 11)**`.trim();
     }
     // Detects standard "Immortality"
     if (lower.includes('immortality') || lower === 'immo') {
-      return `${getEmoji(guild, 'Immo', '')} ${wrapLink('**Immortality**', url)}`.trim();
+      return `${getEmoji(guild, 'Immo', '')} **Immortality**`.trim();
     }
     if (lower.includes('epic mode') || lower === 'epic') {
-      return `${getEmoji(guild, 'Epic', '')} ${wrapLink('**Epic Mode**', url)}`.trim();
+      return `${getEmoji(guild, 'Epic', '')} **Epic Mode**`.trim();
     }
     if (lower.includes('choam')) {
-      return `${getEmoji(guild, 'CHOAM', '')} ${wrapLink('**CHOAM Module**', url)}`.trim();
+      return `${getEmoji(guild, 'CHOAM', '')} **CHOAM Module**`.trim();
     }
-    return wrapLink(`**${exp}**`, url);
+    return `**${exp}**`;
   });
 }
 
-// Used for the visible Embeds (has Emojis + optional clickable URL)
-function buildFormatSummaryLine(guild, boardType, expansions = [], url = null) {
-  const richBoard = formatBoardWithEmoji(guild, boardType, url);
-  const richExps = formatExpansionsWithEmoji(guild, expansions, url);
+// Used for the visible Embeds (with custom server emojis)
+function buildFormatSummaryLine(guild, boardType, expansions = []) {
+  const richBoard = formatBoardWithEmoji(guild, boardType);
+  const richExps = formatExpansionsWithEmoji(guild, expansions);
   return [richBoard, ...richExps].filter(Boolean).join(' + ');
 }
 
@@ -327,11 +323,16 @@ function buildPlainFormatLine(boardType, expansions = []) {
   return [board, ...exps].filter(Boolean).join(' + ');
 }
 
+// Used by /spawn-queue and /spawn-info (adds ⚙️ See in-game settings line if preset.url exists)
 function formatPresetText(guild, preset) {
   if (!preset) return '**Standard Rules**';
   const rawExps = [...(preset.expansions || [])];
   if (preset.mode && !rawExps.includes(preset.mode)) rawExps.push(preset.mode);
-  return buildFormatSummaryLine(guild, preset.board_type, rawExps, preset.url || null);
+  let text = buildFormatSummaryLine(guild, preset.board_type, rawExps);
+  if (preset.url) {
+    text += `\n⚙️ ([See in-game settings](${preset.url}))`;
+  }
+  return text;
 }
 
 async function getActivePreset() {
@@ -773,7 +774,6 @@ async function syncGuildDirectory() {
       await supabase.from('discord_guild_members').upsert(rows.slice(i, i + 100), { onConflict: 'discord_user_id' });
     }
 
-    // Backfill player_discord_map ONLY where the DB state differs from live Discord role state
     const idsToSetTrue = [];
     const idsToSetFalse = [];
 
@@ -797,6 +797,7 @@ async function syncGuildDirectory() {
     console.error('[Directory] Error syncing guild directory:', err);
   }
 }
+
 async function resolveMentionForName(guild, playerName) {
   let dbMatch = await getDatabasePlayerMap(playerName);
   const mappedDiscordId = normalizeDiscordId(dbMatch && dbMatch.discord_user_id);
@@ -936,7 +937,7 @@ async function updateQueueMessage() {
         if (openLobby.channel_id) openChId = openLobby.channel_id;
         const jumpUrl = `https://discord.com/channels/${DISCORD_GUILD_ID}/${openChId}/${openLobby.message_id}`;
 
-       activeField = {
+        activeField = {
           name: `🟢 Open League Lobby (${openCount}/4) — Click Play to Join!`,
           value: `${lobbyRoomStr}${openRosterStr}\n\n🔗 **[Jump to Lobby](${jumpUrl})** in <#${openChId}>`,
           inline: false
@@ -1107,7 +1108,6 @@ async function updateLeagueInfoMessage() {
           }
         });
 
-        // Also check live guild member cache for nicknames/display names
         for (const pk of topKeys) {
           const uid = discordIdMap[pk];
           if (uid && guild) {
@@ -1149,7 +1149,7 @@ async function updateLeagueInfoMessage() {
         top3Text += `\n\n🔗 **[View Full Ranking on dunestats.cc](https://dunestats.cc/leaderboard)**`;
       }
 
-      // 3. League Activity Stats (Tracked via role, but without mentioning the role)
+      // 3. League Activity Stats (Tracked via role, without mentioning the role)
       const role = guild.roles.cache.get(ACTIVE_LEAGUE_ROLE_ID) || await guild.roles.fetch(ACTIVE_LEAGUE_ROLE_ID).catch(() => null);
       const activeRoleCount = role ? role.members.size : 0;
 
@@ -1191,12 +1191,12 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
     const leagueChannel = await discordClient.channels.fetch(LEAGUE_LFG_CHANNEL_ID).catch(() => null);
     if (!leagueChannel) return null;
     
-const boardDisplay = preset.board_type;
+    const boardDisplay = preset.board_type;
     const dbExpansions = [...(preset.expansions || [])];
     if (preset.mode && !dbExpansions.includes(preset.mode)) dbExpansions.push(preset.mode);
     
-    // 1. Visible Embed gets Emojis + Clickable URL
-    const formatLine = buildFormatSummaryLine(guild, boardDisplay, dbExpansions, preset.url || null);
+    // 1. Visible Embed gets Emojis
+    const formatLine = buildFormatSummaryLine(guild, boardDisplay, dbExpansions);
     // 2. Ghost Ping gets clean plain text (no emojis, no URL)
     const plainFormatLine = buildPlainFormatLine(boardDisplay, dbExpansions);
     const currentSeasonId = await getCurrentSeasonId();
@@ -1234,6 +1234,9 @@ const boardDisplay = preset.board_type;
       descLines.push(`"${customNote.trim()}"\n`);
     }
     descLines.push(formatLine);
+    if (preset.url) {
+      descLines.push(`⚙️ ([See in-game settings](${preset.url}))`);
+    }
     descLines.push(lobbyNameLine);
 
     const footerGuideBlock = `${emojiTarget} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
@@ -1654,7 +1657,7 @@ async function buildGameResultPayload(gameId) {
   const screenshotMedia = game.image_url ? await createDiscordImagePayload(game.image_url) : null;
   return { game, results, ratingsMap, sandboxDeltaMap, sandboxRatingsMap, leagueDeltaMap, leagueRatingMap, leagueRankMap, screenshotMedia, tournamentDetails };
 }
-// Calculates Tournament Points (TP) for a player row based on 1st and 2nd place VP
+
 function calculateTournamentPoints(row, results) {
   const firstRow = results.find(r => Number(r.placement) === 1) || results[0];
   const secondRow = results.find(r => Number(r.placement) === 2) || results[1];
@@ -1735,7 +1738,6 @@ async function buildEmbed(payload, guild) {
   return { embed, screenshotMedia };
 }
 
-// Shorter League-only Embed for LEAGUE_RESULTS_CHANNEL_ID (1562444292574941184)
 async function buildLeagueEmbed(payload, guild) {
   const { game, results, leagueDeltaMap, leagueRatingMap, leagueRankMap, screenshotMedia } = payload;
   const tags = buildGameTags(game, guild);
@@ -1788,7 +1790,6 @@ async function buildLeagueEmbed(payload, guild) {
   return embed;
 }
 
-// Spoiler-Free YouTube VOD Announcement for YOUTUBE_VOD_CHANNEL_ID (1561777632100745346)
 async function announceYoutubeVod(gameId) {
   if (!gameId || activeVodLocks.has(gameId)) return;
   activeVodLocks.add(gameId);
@@ -2130,6 +2131,7 @@ function scheduleScanRefresh(gameId) {
     }
   }, GAME_ROWS_WAIT_MS);
 }
+
 // -------------------------------------------------------------
 // ROSTER DISPLAY BUILDER (DEDUPLICATED NAMES + [📊](url) + SINGLE ELO)
 // -------------------------------------------------------------
@@ -2346,9 +2348,9 @@ async function syncLobbyEmbed(lobby) {
 
   const { display, count } = await buildRosterDisplay(lobby);
 
- const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
+  const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
   const activePreset = isLeague ? await getActivePreset() : null;
-  const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions, activePreset?.url || null);
+  const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
 
   let lobbyNameLine = `🎮 In-Game Lobby: *(Waiting for host IGN...)*`;
   if (lobby.host_id === 'UNCLAIMED') {
@@ -2365,6 +2367,9 @@ async function syncLobbyEmbed(lobby) {
     descLines.push(`"${lobby.message_text.trim()}"\n`);
   }
   descLines.push(formatLine);
+  if (activePreset?.url) {
+    descLines.push(`⚙️ ([See in-game settings](${activePreset.url}))`);
+  }
   descLines.push(lobbyNameLine);
 
   const isLive = String(lobby.mode || '').toLowerCase() !== 'async';
@@ -2482,11 +2487,13 @@ async function handleWebLobbyCreation(lobby) {
     const embedColor = isLeague ? 0xF1C40F : (isLive ? 0xe74c3c : 0xC9A24B);
     const roleId = isLeague ? '1219666679764877424' : (isLive ? '1268299468785062099' : '1219666516644204554');
     
+    const activePreset = isLeague ? await getActivePreset() : null;
     const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
+    const plainFormatLine = buildPlainFormatLine(lobby.board_type, lobby.expansions);
 
     const seatedPings = (lobby.player_ids || []).map(id => `<@${id}>`).join(' ');
     const modeLabelWord = isLive ? 'live' : 'async';
-    const customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${modeLabelWord} players <@&${roleId}> for ${formatLine}. ${seatedPings}`.trim();
+    const customPingSentence = `**${hostName} 🌐**${discordMention} is looking for ${modeLabelWord} players <@&${roleId}> for **${plainFormatLine}**. ${seatedPings}`.trim();
 
     let embedTitle = hostName !== 'Web Player' ? `${emojiTarget} ${hostName}'s Game` : `${emojiTarget} New Match Open!`;
     if (isLeague) embedTitle = `🏆 Ranked League Match Open!`;
@@ -2499,6 +2506,9 @@ async function handleWebLobbyCreation(lobby) {
       descLines.push(`"${lobby.message_text.trim()}"\n`);
     }
     descLines.push(formatLine);
+    if (activePreset?.url) {
+      descLines.push(`⚙️ ([See in-game settings](${activePreset.url}))`);
+    }
     descLines.push(lobbyNameLine);
 
     const footerGuideBlock = `${emojiTarget} • **Join / Leave** the lobby\n📖 **[Emoji Controls Guide](${EMOJI_GUIDE_LINK})**`;
@@ -2639,7 +2649,6 @@ async function executeLobbyPing(lobby, channel) {
   }
   return true;
 }
-
 async function handleWebQuickChat(chatRow) {
   const { lobby_id, sender_name, message_code } = chatRow;
   const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobby_id).single();
@@ -2797,6 +2806,7 @@ function startRealtimeListener() {
       }
     });
 }
+
 // -------------------------------------------------------------
 // 🏆 TOURNAMENT CONFIRMATION & CONFLICT HELPER
 // -------------------------------------------------------------
@@ -2949,28 +2959,6 @@ function startGlobalDatabaseListener() {
                await supabase.from('player_discord_map').update({ discord_username: member.user.username, discord_user_id: member.id, updated_at: new Date().toISOString() }).eq('discord_username', rec.discord_username);
             }
           }
-          if (table === 'player_discord_map' && eventType === 'UPDATE' && newRecord && oldRecord) {
-          if (
-            typeof newRecord.has_league_lfg_role === 'boolean' &&
-            newRecord.has_league_lfg_role !== oldRecord.has_league_lfg_role &&
-            newRecord.discord_user_id
-          ) {
-            try {
-              const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
-              const member = guild ? await guild.members.fetch(newRecord.discord_user_id).catch(() => null) : null;
-              if (member) {
-                const currentlyHasRole = member.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
-                if (newRecord.has_league_lfg_role && !currentlyHasRole) {
-                  await member.roles.add(LEAGUE_NOTIFY_ROLE_ID).catch(() => {});
-                } else if (!newRecord.has_league_lfg_role && currentlyHasRole) {
-                  await member.roles.remove(LEAGUE_NOTIFY_ROLE_ID).catch(() => {});
-                }
-              }
-            } catch (roleErr) {
-              console.error('Error syncing league ping role from website:', roleErr);
-            }
-          }
-        }
           if (eventType === 'UPDATE' && newRecord?.has_checked_in === true) {
             const isFreshWebsiteCheckin = (oldRecord?.has_checked_in !== true && newRecord.check_in_method === 'website');
             const isDualConfirmed = (oldRecord?.check_in_method === 'discord' && newRecord.check_in_method === 'discord/website');
@@ -2994,6 +2982,30 @@ function startGlobalDatabaseListener() {
                   }
                 }
               } catch (err) {}
+            }
+          }
+        }
+
+        // Two-way sync: Website toggled has_league_lfg_role on player_discord_map
+        if (table === 'player_discord_map' && eventType === 'UPDATE' && newRecord && oldRecord) {
+          if (
+            typeof newRecord.has_league_lfg_role === 'boolean' &&
+            newRecord.has_league_lfg_role !== oldRecord.has_league_lfg_role &&
+            newRecord.discord_user_id
+          ) {
+            try {
+              const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+              const member = guild ? await guild.members.fetch(newRecord.discord_user_id).catch(() => null) : null;
+              if (member) {
+                const currentlyHasRole = member.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+                if (newRecord.has_league_lfg_role && !currentlyHasRole) {
+                  await member.roles.add(LEAGUE_NOTIFY_ROLE_ID).catch(() => {});
+                } else if (!newRecord.has_league_lfg_role && currentlyHasRole) {
+                  await member.roles.remove(LEAGUE_NOTIFY_ROLE_ID).catch(() => {});
+                }
+              }
+            } catch (roleErr) {
+              console.error('Error syncing league ping role from website:', roleErr);
             }
           }
         }
@@ -3239,7 +3251,7 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
     const { display, count } = await buildRosterDisplay(lobbyRecord);
     const isLeague = lobbyRecord.is_league === true || String(lobbyRecord.is_league).toLowerCase() === 'true';
     const activePreset = isLeague ? await getActivePreset() : null;
-    const formatLine = buildFormatSummaryLine(channel.guild, lobbyRecord.board_type, lobbyRecord.expansions, activePreset?.url || null);
+    const formatLine = buildFormatSummaryLine(channel.guild, lobbyRecord.board_type, lobbyRecord.expansions);
     const hostIgnInfo = await resolveHostIgn(lobbyRecord.host_id, lobbyRecord.web_host_id, lobbyRecord.web_player_names);
     const lobbyNameLine = hostIgnInfo.ign ? `🎮 In-Game Lobby: **${hostIgnInfo.ign}'s game**` : '';
     
@@ -3251,6 +3263,9 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
       descLines.push(`"${lobbyRecord.message_text.trim()}"\n`);
     }
     descLines.push(formatLine);
+    if (activePreset?.url) {
+      descLines.push(`⚙️ ([See in-game settings](${activePreset.url}))`);
+    }
     if (lobbyNameLine) descLines.push(lobbyNameLine);
 
     const embed = EmbedBuilder.from(targetMsg.embeds[0])
@@ -4045,6 +4060,7 @@ discordClient.on('guildMemberUpdate', async (oldMember, newMember) => {
     }
   } catch (e) {}
 });
+
 discordClient.on('guildMemberRemove', async (member) => {
   try {
     if (member.user.bot) return;
