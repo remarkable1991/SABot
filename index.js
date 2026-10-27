@@ -271,36 +271,67 @@ function getEmoji(guild, name, fallback = '') {
   return emoji ? emoji.toString() : fallback;
 }
 
-function formatBoardWithEmoji(guild, boardType) {
-  if (!boardType) return '**Base Game**';
-  if (boardType.toLowerCase().includes('uprising')) {
-    const uprisingEmoji = getEmoji(guild, 'Uprising', '');
-    return `${uprisingEmoji} **Uprising**`.trim();
-  }
-  return `**${boardType}**`;
+function wrapLink(text, url) {
+  return url ? `[${text}](${url})` : text;
 }
 
-function formatExpansionsWithEmoji(guild, expansions = []) {
+function formatBoardWithEmoji(guild, boardType, url = null) {
+  if (!boardType) return wrapLink('**Base Game**', url);
+  if (boardType.toLowerCase().includes('uprising')) {
+    const emoji = getEmoji(guild, 'Uprising', '');
+    return `${emoji} ${wrapLink('**Uprising**', url)}`.trim();
+  }
+  return wrapLink(`**${boardType}**`, url);
+}
+
+function formatExpansionsWithEmoji(guild, expansions = [], url = null) {
   return (expansions || []).map(exp => {
-    if (exp.includes('Rise of IX') || exp === 'Ix') return `${getEmoji(guild, 'Ix', '')} **Rise of IX**`.trim();
-    if (exp.includes('Immortality') || exp === 'Immo') return `${getEmoji(guild, 'Immo', '')} **Immortality**`.trim();
-    if (exp.includes('Epic Mode') || exp === 'Epic') return `${getEmoji(guild, 'Epic', '')} **Epic Mode**`.trim();
-    if (exp.includes('CHOAM')) return `${getEmoji(guild, 'CHOAM', '')} **CHOAM Module**`.trim();
-    return `**${exp}**`;
+    const lower = String(exp).toLowerCase();
+
+    if (lower.includes('rise of ix') || lower === 'ix') {
+      return `${getEmoji(guild, 'Ix', '')} ${wrapLink('**Rise of IX**', url)}`.trim();
+    }
+    // Detects "Immortality to 11" or "Immortality (To 11)"
+    if (lower.includes('immortality') && lower.includes('11')) {
+      return `${getEmoji(guild, 'Immo', '')} ${wrapLink('**Immortality (To 11)**', url)}`.trim();
+    }
+    // Detects standard "Immortality"
+    if (lower.includes('immortality') || lower === 'immo') {
+      return `${getEmoji(guild, 'Immo', '')} ${wrapLink('**Immortality**', url)}`.trim();
+    }
+    if (lower.includes('epic mode') || lower === 'epic') {
+      return `${getEmoji(guild, 'Epic', '')} ${wrapLink('**Epic Mode**', url)}`.trim();
+    }
+    if (lower.includes('choam')) {
+      return `${getEmoji(guild, 'CHOAM', '')} ${wrapLink('**CHOAM Module**', url)}`.trim();
+    }
+    return wrapLink(`**${exp}**`, url);
   });
 }
 
-function buildFormatSummaryLine(guild, boardType, expansions = []) {
-  const richBoard = formatBoardWithEmoji(guild, boardType);
-  const richExps = formatExpansionsWithEmoji(guild, expansions);
+// Used for the visible Embeds (has Emojis + optional clickable URL)
+function buildFormatSummaryLine(guild, boardType, expansions = [], url = null) {
+  const richBoard = formatBoardWithEmoji(guild, boardType, url);
+  const richExps = formatExpansionsWithEmoji(guild, expansions, url);
   return [richBoard, ...richExps].filter(Boolean).join(' + ');
+}
+
+// Used for the 1.5s Ghost Ping (Clean plain text, no emojis, no URLs)
+function buildPlainFormatLine(boardType, expansions = []) {
+  const board = boardType || 'Base Game';
+  const exps = (expansions || []).map(exp => {
+    const lower = String(exp).toLowerCase();
+    if (lower.includes('immortality') && lower.includes('11')) return 'Immortality (To 11)';
+    return exp;
+  });
+  return [board, ...exps].filter(Boolean).join(' + ');
 }
 
 function formatPresetText(guild, preset) {
   if (!preset) return '**Standard Rules**';
   const rawExps = [...(preset.expansions || [])];
   if (preset.mode && !rawExps.includes(preset.mode)) rawExps.push(preset.mode);
-  return buildFormatSummaryLine(guild, preset.board_type, rawExps);
+  return buildFormatSummaryLine(guild, preset.board_type, rawExps, preset.url || null);
 }
 
 async function getActivePreset() {
@@ -1160,11 +1191,14 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
     const leagueChannel = await discordClient.channels.fetch(LEAGUE_LFG_CHANNEL_ID).catch(() => null);
     if (!leagueChannel) return null;
     
-    const boardDisplay = preset.board_type;
+const boardDisplay = preset.board_type;
     const dbExpansions = [...(preset.expansions || [])];
     if (preset.mode && !dbExpansions.includes(preset.mode)) dbExpansions.push(preset.mode);
     
-    const formatLine = buildFormatSummaryLine(guild, boardDisplay, dbExpansions);
+    // 1. Visible Embed gets Emojis + Clickable URL
+    const formatLine = buildFormatSummaryLine(guild, boardDisplay, dbExpansions, preset.url || null);
+    // 2. Ghost Ping gets clean plain text (no emojis, no URL)
+    const plainFormatLine = buildPlainFormatLine(boardDisplay, dbExpansions);
     const currentSeasonId = await getCurrentSeasonId();
 
     const embedTitle = `🏆 Ranked League Match Open!`;
@@ -1174,10 +1208,10 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
 
     let hostDisplay = isAutoPop ? '*(Host Unclaimed)*' : `<@${hostId}>`;
     const allSeatedTags = (players || []).map(id => `<@${id}>`).join(' ');
-    let customPingSentence = `${hostDisplay} is looking for live players ${roleMention} for ${formatLine}. ${allSeatedTags}`.trim();
+    let customPingSentence = `${hostDisplay} is looking for live players ${roleMention} for **${plainFormatLine}**. ${allSeatedTags}`.trim();
 
     if (isAutoPop) {
-      customPingSentence = `A queue has popped! A new live League match has been generated ${roleMention} for ${formatLine}. ${allSeatedTags}`.trim();
+      customPingSentence = `A queue has popped! A new live League match has been generated ${roleMention} for **${plainFormatLine}**. ${allSeatedTags}`.trim();
     }
 
     const { display: rosterStr, count } = await buildRosterDisplay({ 
@@ -2312,7 +2346,9 @@ async function syncLobbyEmbed(lobby) {
 
   const { display, count } = await buildRosterDisplay(lobby);
 
-  const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions);
+ const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
+  const activePreset = isLeague ? await getActivePreset() : null;
+  const formatLine = buildFormatSummaryLine(channel.guild, lobby.board_type, lobby.expansions, activePreset?.url || null);
 
   let lobbyNameLine = `🎮 In-Game Lobby: *(Waiting for host IGN...)*`;
   if (lobby.host_id === 'UNCLAIMED') {
@@ -3201,7 +3237,9 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
     if (lobbyRecord.is_league) updateQueueMessage();
 
     const { display, count } = await buildRosterDisplay(lobbyRecord);
-    const formatLine = buildFormatSummaryLine(channel.guild, lobbyRecord.board_type, lobbyRecord.expansions);
+    const isLeague = lobbyRecord.is_league === true || String(lobbyRecord.is_league).toLowerCase() === 'true';
+    const activePreset = isLeague ? await getActivePreset() : null;
+    const formatLine = buildFormatSummaryLine(channel.guild, lobbyRecord.board_type, lobbyRecord.expansions, activePreset?.url || null);
     const hostIgnInfo = await resolveHostIgn(lobbyRecord.host_id, lobbyRecord.web_host_id, lobbyRecord.web_player_names);
     const lobbyNameLine = hostIgnInfo.ign ? `🎮 In-Game Lobby: **${hostIgnInfo.ign}'s game**` : '';
     
