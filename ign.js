@@ -92,6 +92,7 @@ module.exports = {
       .from('player_discord_map')
       .select('id, player_key, display_name, claimed_by')
       .eq('discord_user_id', discordId)
+      .limit(1)
       .maybeSingle();
 
     const { data: allRatings } = await supabase
@@ -347,9 +348,10 @@ module.exports = {
           });
           await supabase.from('discord_guild_members').update({ suggested_player_key: normKey, has_verified_map: true }).eq('discord_user_id', interaction.user.id);
 
+          await modalSubmit.deferUpdate().catch(() => {});
           const tagNotice = hadTag ? `\n*(Note: Stripped \`#/+numbers\` from \`${enteredRaw}\` -> **\`${finalDisplay}\`**)*` : '';
           const dupNote = isDuplicate ? `\n\n⚠️ *Note: Another Discord account is also linked to **${finalDisplay}**. An admin has been notified to verify.*` : '';
-          await modalSubmit.update({
+          await interaction.editReply({
             embeds: [
               new EmbedBuilder()
                 .setTitle('✅ In-Game Name Updated!')
