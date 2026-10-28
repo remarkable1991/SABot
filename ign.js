@@ -177,7 +177,7 @@ module.exports = {
         buttonRow.addComponents(
           new ButtonBuilder()
             .setCustomId(`ign_claim_${s.player_key}`)
-            .setLabel(`Link "${s.display_name}"`)
+            .setLabel(`Link "${s.display_name}".slice(0, 80)`)
             .setStyle(i === 0 ? ButtonStyle.Success : ButtonStyle.Primary)
             .setEmoji('✅')
         );
@@ -188,7 +188,7 @@ module.exports = {
       buttonRow.addComponents(
         new ButtonBuilder()
           .setCustomId(`ign_setcustom_${encodeURIComponent(cleanedInput)}`)
-          .setLabel(`Link "${cleanedInput}"`)
+          .setLabel(`Link "${cleanedInput}"`.slice(0, 80))
           .setStyle(ButtonStyle.Success)
           .setEmoji('✅')
       );
@@ -288,27 +288,32 @@ module.exports = {
           .setCustomId(`ign_modal_submit_${isLocked ? 'locked' : 'new'}`)
           .setTitle(isLocked ? '⚠️ Unlock & Change Linked IGN' : 'Set Your Dune In-Game Name');
 
+        // Label strictly under 45 chars (34 chars)
         const ignInput = new TextInputBuilder()
           .setCustomId('ign_value')
-          .setLabel('Exact Name on Scoreboard Screenshot (No #1234)')
+          .setLabel('Scoreboard Screenshot Name (No #)')
           .setStyle(TextInputStyle.Short)
           .setPlaceholder('e.g. PaulAtreides (NO #1234 or +1234 numbers!)')
-          .setValue(prefill)
           .setRequired(true);
+
+        if (prefill) {
+          ignInput.setValue(prefill);
+        }
 
         modal.addComponents(new ActionRowBuilder().addComponents(ignInput));
 
         if (isLocked) {
+          // Label strictly under 45 chars (35 chars)
           const confirmInput = new TextInputBuilder()
             .setCustomId('ign_confirm_word')
-            .setLabel('Type CONFIRM to overwrite your linked profile')
+            .setLabel('Type CONFIRM to change linked IGN')
             .setStyle(TextInputStyle.Short)
             .setPlaceholder('Type CONFIRM in all caps')
             .setRequired(true);
           modal.addComponents(new ActionRowBuilder().addComponents(confirmInput));
         }
 
-        await btnInt.showModal(modal).catch(() => {});
+        await btnInt.showModal(modal).catch((err) => console.error('Failed to show IGN modal:', err));
 
         try {
           const modalSubmit = await btnInt.awaitModalSubmit({
