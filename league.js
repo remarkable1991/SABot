@@ -13,7 +13,7 @@ module.exports = {
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, createQueueLobby, updateQueueMessage, pendingLeagueNotes }) {
+  async execute(interaction, { supabase, discordClient, createQueueLobby, updateQueueMessage, resolveHostIgn, promptUnknownHostIgn, pendingLeagueNotes }) {
     if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
       return interaction.reply({
         content: '❌ Only LFG Admins can host official League matches during the testing phase.',
@@ -22,6 +22,22 @@ module.exports = {
     }
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    // Require linked IGN before hosting a League match
+    if (resolveHostIgn) {
+      const hostIgnCheck = await resolveHostIgn(interaction.user.id);
+      if (!hostIgnCheck.isKnown) {
+        const leagueChannel = interaction.channel || (discordClient ? await discordClient.channels.fetch(LEAGUE_LFG_CHANNEL_ID).catch(() => null) : null);
+        if (promptUnknownHostIgn) {
+          await promptUnknownHostIgn(null, interaction.user.id, leagueChannel);
+        }
+        await interaction.editReply({
+          content: '❌ You need to link your **Dune: Imperium Digital In-Game Name** before hosting a match! Please run **`/ign`** first.'
+        }).catch(() => {});
+        setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
+        return;
+      }
+    }
 
     const customNote = interaction.options.getString('text')?.trim() || null;
 
@@ -74,9 +90,15 @@ module.exports = {
       customNote
     );
 
-    const jumpLink = targetMsg
-      ? `https://discord.com/channels/${interaction.guildId}/${LEAGUE_LFG_CHANNEL_ID}/${targetMsg.id}`
-      : `https://discord.com/channels/${interaction.guildId}/${LEAGUE_LFG_CHANNEL_ID}`;
+    if (!targetMsg) {
+      await interaction.editReply({
+        content: '❌ Could not create lobby. Please make sure your In-Game Name is linked using **`/ign`**.'
+      }).catch(() => {});
+      setTimeout(() => interaction.deleteReply().catch(() => {}), 60000);
+      return;
+    }
+
+    const jumpLink = `https://discord.com/channels/${interaction.guildId}/${LEAGUE_LFG_CHANNEL_ID}/${targetMsg.id}`;
 
     await interaction.editReply({
       content: `✅ Created your Live League match in <#${LEAGUE_LFG_CHANNEL_ID}>!\n🔗 **[Jump to Lobby](${jumpLink})**`
