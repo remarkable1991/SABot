@@ -3,14 +3,9 @@ const {
   EmbedBuilder,
   ActionRowBuilder,
   ButtonBuilder,
-  ButtonStyle,
-  ModalBuilder,
-  TextInputBuilder,
-  TextInputStyle,
-  MessageFlags
+  ButtonStyle
 } = require('discord.js');
 
-const LFG_ADMIN_ALERT_CHANNEL_ID = '937921061180309505';
 const LFG_ADMIN_ROLE = '1557469534133162045';
 
 function normalizeName(value) {
@@ -35,6 +30,7 @@ function similarity(a, b) {
   return 1 - dp[x.length][y.length] / Math.max(x.length, y.length);
 }
 
+// Strips Dire Wolf / Discord tags like #1234 or +1234
 function cleanScreenshotName(rawInput) {
   if (!rawInput) return { cleaned: '', hadTag: false };
   const trimmed = String(rawInput).trim();
@@ -44,45 +40,41 @@ function cleanScreenshotName(rawInput) {
   return { cleaned, hadTag };
 }
 
-async function checkAndAlertDuplicateIgn(supabase, discordClient, newDiscordUserId, playerKey, displayName) {
+async function getDuplicateHolders(supabase, discordUserId, playerKey) {
   try {
     const { data: existingHolders } = await supabase
       .from('player_discord_map')
       .select('discord_user_id, discord_username, display_name')
       .eq('player_key', playerKey)
-      .neq('discord_user_id', newDiscordUserId);
+      .neq('discord_user_id', discordUserId);
 
-    const otherDiscordUsers = (existingHolders || []).filter(r => r.discord_user_id);
-    if (otherDiscordUsers.length > 0) {
-      const otherMentions = otherDiscordUsers.map(r => `<@${r.discord_user_id}> (${r.discord_username || r.display_name || 'User'})`).join(', ');
-      const alertChannel = await discordClient.channels.fetch(LFG_ADMIN_ALERT_CHANNEL_ID).catch(() => null);
-      if (alertChannel) {
-        await alertChannel.send({
-          content: `⚠️ <@&${LFG_ADMIN_ROLE}> **Duplicate IGN Linked — Clarification Needed:**\n<@${newDiscordUserId}> just linked the In-Game Name **\`${displayName}\`** (\`${playerKey}\`), which is also linked to ${otherMentions}. Both accounts currently share this IGN—please check if this is an alt account or a mix-up!`,
-          allowedMentions: { roles: [LFG_ADMIN_ROLE], users: [newDiscordUserId, ...otherDiscordUsers.map(u => u.discord_user_id)] }
-        }).catch(() => {});
-      }
-      return true;
-    }
+    return (existingHolders || []).filter(r => r.discord_user_id);
   } catch (err) {
-    console.error('Error checking duplicate IGN:', err);
+    return [];
   }
-  return false;
+}
+
+function buildStatsSentence(matchedRating) {
+  if (matchedRating && Number(matchedRating.games_played) > 0) {
+    return `📊 **Leaderboard Stats:** **${Number(matchedRating.elo).toFixed(1)} ELO** (${matchedRating.games_played} games played on record).`;
+  }
+  return `📊 **Leaderboard Stats:** No completed games recorded under this name yet—your future matches will track here automatically!`;
 }
 
 module.exports = {
   data: new SlashCommandBuilder()
     .setName('ign')
-    .setDescription('Check or link your Dune: Imperium Digital In-Game Name (as shown on match screenshots)')
+    .setDescription('Check or register your Dune: Imperium Digital In-Game Name (as shown on match screenshots)')
     .addStringOption(option =>
       option
         .setName('name')
-        .setDescription('Optional: Your exact In-Game Name on the end-of-game scoreboard (NO #1234 numbers)')
+        .setDescription('Your exact In-Game Name on the end-of-game scoreboard (NO #1234 numbers)')
         .setRequired(false)
     ),
 
-  async execute(interaction, { supabase, discordClient, saveDiscordPlayerMap }) {
-    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+  async execute(interaction, { supabase, saveDiscordPlayerMap }) {
+    // Public reply so everyone can see when /ign is used
+    await interaction.deferReply();
 
     const discordId = interaction.user.id;
     const rawInput = interaction.options.getString('name');
@@ -102,41 +94,145 @@ module.exports = {
 
     const ratingsList = allRatings || [];
 
-    // CASE A: Already linked
+    // =========================================================================
+    // CASE A: User ALREADY has a linked IGN
+    // =========================================================================
     if (existingMap && existingMap.player_key) {
-      const matchedRating = ratingsList.find(r => r.player_key === existingMap.player_key);
-      const currentDisplay = matchedRating?.display_name || existingMap.display_name || existingMap.player_key;
-      const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(currentDisplay)}`;
-      const statsStr = matchedRating
-        ? `**${Number(matchedRating.elo).toFixed(1)} ELO** (${matchedRating.games_played || 0} games tracked)`
-        : `*No completed matches recorded under this name yet*`;
+      const oldRating = ratingsList.find(r => r.player_key === existingMap.player_key);
+      const oldDisplay = oldRating?.display_name || existingMap.display_name || existingMap.player_key;
+      const oldProfileUrl = `https://dunestats.cc/players/${encodeURIComponent(oldDisplay)}`;
+      const oldStatsLine = buildStatsSentence(oldRating);
 
-      const embed = new EmbedBuilder()
-        .setTitle('🔒 Your In-Game Name is Linked')
-        .setColor(0x2ECC71)
+      // Subcase A1: They just ran `/ign` (or typed the exact same name they already have)
+      if (!cleanedInput || normalizeName(cleanedInput) === existingMap.player_key) {
+        const embed = new EmbedBuilder()
+          .setTitle('🎮 Linked In-Game Name')
+          .setColor(0x2ECC71)
+          .setDescription(
+            `<@${discordId}> is registered as **[${oldDisplay}](${oldProfileUrl})**.\n` +
+            `${oldStatsLine}\n\n` +
+            `💡 *Need to fix or change your linked name? Run \`/ign name: YourNewName\` (only use the exact name shown on the end-of-game scoreboard screenshot, without \`#1234\` numbers).*`
+          );
+        return interaction.editReply({ embeds: [embed] });
+      }
+
+      // Subcase A2: They ran `/ign name: NewName` -> Ask for 1-click confirmation before overwriting & tagging admin
+      const newNormKey = normalizeName(cleanedInput);
+      const newRating = ratingsList.find(r => r.player_key === newNormKey);
+      const newDisplay = newRating?.display_name || cleanedInput;
+      const newProfileUrl = `https://dunestats.cc/players/${encodeURIComponent(newDisplay)}`;
+      const newStatsLine = buildStatsSentence(newRating);
+
+      const tagWarning = hadTag
+        ? `\n⚠️ *Stripped \`#/+numbers\` from \`${rawInput}\` -> **\`${newDisplay}\`** (friend code numbers don't appear on screenshots).*`
+        : '';
+
+      const confirmEmbed = new EmbedBuilder()
+        .setTitle('⚠️ Confirm In-Game Name Overwrite')
+        .setColor(0xF39C12)
         .setDescription(
-          `Your Discord account (<@${discordId}>) is currently locked to:\n` +
-          `### 🎮 **[${currentDisplay}](${profileUrl})**\n` +
-          `📊 **Stats:** ${statsStr}\n\n` +
-          `⚠️ **Why is this locked?**\n` +
-          `Your In-Game Name connects your Discord account to your ELO history, League rank, and automated screenshot verification. You should **only** change this if you linked the wrong profile or permanently changed your name inside Dune: Imperium Digital.\n\n` +
-          `📸 *Remember: Your IGN is the name shown on the **end-of-game scoreboard screenshot** (without any \`#1234\` or \`+1234\` friend code numbers).*`
+          `<@${discordId}>, your Discord is currently linked to **[${oldDisplay}](${oldProfileUrl})**.\n\n` +
+          `Are you sure you want to overwrite your In-Game Name to **[${newDisplay}](${newProfileUrl})**?${tagWarning}\n` +
+          `${newStatsLine}\n\n` +
+          `*Note: Overwriting an existing IGN will notify the LFG Admins to keep player records clean.*`
         );
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
-          .setCustomId(`ign_unlock_request_${cleanedInput ? encodeURIComponent(cleanedInput) : 'NONE'}`)
-          .setLabel('🔓 Unlock & Change IGN')
+          .setCustomId('ign_confirm_overwrite')
+          .setLabel(`Confirm Change to "${newDisplay}"`.slice(0, 80))
           .setStyle(ButtonStyle.Danger)
+          .setEmoji('✅'),
+        new ButtonBuilder()
+          .setCustomId('ign_cancel_overwrite')
+          .setLabel('Cancel')
+          .setStyle(ButtonStyle.Secondary)
+          .setEmoji('✖️')
       );
 
-      const replyMsg = await interaction.editReply({ embeds: [embed], components: [row] });
-      return this.attachCollector(replyMsg, interaction, { supabase, discordClient, ratingsList, existingMap, saveDiscordPlayerMap });
+      const replyMsg = await interaction.editReply({ embeds: [confirmEmbed], components: [row] });
+      const collector = replyMsg.createMessageComponentCollector({ time: 60000 });
+
+      collector.on('collect', async (btnInt) => {
+        if (btnInt.user.id !== discordId) {
+          return btnInt.reply({ content: '❌ Only the player who ran `/ign` can click this button.', ephemeral: true }).catch(() => {});
+        }
+
+        if (btnInt.customId === 'ign_cancel_overwrite') {
+          await btnInt.update({
+            content: `✖️ <@${discordId}> cancelled the IGN change (still linked to **[${oldDisplay}](${oldProfileUrl})**).`,
+            embeds: [],
+            components: []
+          }).catch(() => {});
+          collector.stop();
+          return;
+        }
+
+        if (btnInt.customId === 'ign_confirm_overwrite') {
+          const dupHolders = await getDuplicateHolders(supabase, discordId, newNormKey);
+          await saveDiscordPlayerMap({
+            discordUserId: discordId,
+            discordUsername: interaction.user.username,
+            displayName: newDisplay,
+            playerKey: newNormKey
+          });
+          await supabase.from('discord_guild_members').update({ suggested_player_key: newNormKey, has_verified_map: true }).eq('discord_user_id', discordId);
+
+          let adminAlertText = `🔔 <@&${LFG_ADMIN_ROLE}> **IGN Overwrite:** <@${discordId}> changed their linked In-Game Name from **[${oldDisplay}](<${oldProfileUrl}>)** ➡️ **[${newDisplay}](<${newProfileUrl}>)**.\n${newStatsLine}`;
+          if (dupHolders.length > 0) {
+            const otherMentions = dupHolders.map(r => `<@${r.discord_user_id}>`).join(', ');
+            adminAlertText += `\n⚠️ **Duplicate IGN Notice:** **${newDisplay}** is also linked to ${otherMentions}—please clarify if this is an alt or mix-up!`;
+          }
+
+          await btnInt.update({
+            content: adminAlertText,
+            embeds: [],
+            components: [],
+            allowedMentions: { roles: [LFG_ADMIN_ROLE], users: [discordId, ...dupHolders.map(u => u.discord_user_id)] }
+          }).catch(() => {});
+          collector.stop();
+        }
+      });
+      return;
     }
 
-    // CASE B: Not linked yet
+    // =========================================================================
+    // CASE B: User has NO linked IGN yet
+    // =========================================================================
+
+    // Subcase B1: They provided a name (`/ign name: MyName`) -> Register immediately!
+    if (cleanedInput) {
+      const normKey = normalizeName(cleanedInput);
+      const matchedRating = ratingsList.find(r => r.player_key === normKey);
+      const finalDisplay = matchedRating?.display_name || cleanedInput;
+      const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(finalDisplay)}`;
+      const statsLine = buildStatsSentence(matchedRating);
+
+      const dupHolders = await getDuplicateHolders(supabase, discordId, normKey);
+      await saveDiscordPlayerMap({
+        discordUserId: discordId,
+        discordUsername: interaction.user.username,
+        displayName: finalDisplay,
+        playerKey: normKey
+      });
+      await supabase.from('discord_guild_members').update({ suggested_player_key: normKey, has_verified_map: true }).eq('discord_user_id', discordId);
+
+      const tagNote = hadTag ? `\n*(Note: Stripped \`#/+numbers\` from \`${rawInput}\` -> **\`${finalDisplay}\`**)*` : '';
+      let contentMsg = `✅ <@${discordId}> registered their In-Game Name to **[${finalDisplay}](<${profileUrl}>)**!${tagNote}\n${statsLine}`;
+
+      if (dupHolders.length > 0) {
+        const otherMentions = dupHolders.map(r => `<@${r.discord_user_id}>`).join(', ');
+        contentMsg += `\n\n⚠️ <@&${LFG_ADMIN_ROLE}> **Duplicate IGN Notice:** **${finalDisplay}** is also linked to ${otherMentions}—please clarify!`;
+      }
+
+      return interaction.editReply({
+        content: contentMsg,
+        allowedMentions: { roles: [LFG_ADMIN_ROLE], users: [discordId, ...dupHolders.map(u => u.discord_user_id)] }
+      });
+    }
+
+    // Subcase B2: They ran `/ign` with NO name and aren't linked yet -> Show fuzzy guesses + instructions
     const candidateNames = [
-      cleanedInput,
       interaction.member?.nickname,
       interaction.member?.displayName,
       interaction.user.globalName,
@@ -157,54 +253,28 @@ module.exports = {
     scoredMatches.sort((a, b) => b.score - a.score);
     const topSuggestions = scoredMatches.slice(0, 3);
 
-    let desc = `You don't have a Dune: Imperium Digital **In-Game Name (IGN)** linked to your Discord yet!\n\n` +
-      `📸 **Important — What is your IGN?**\n` +
-      `It is the **exact name displayed on the end-of-game scoreboard screenshot**.\n` +
-      `• ❌ **DO NOT** include \`#1234\` or \`+1234\` friend code numbers.\n` +
-      `• ✅ **DO** match the exact spelling shown on the victory screen.\n\n`;
-
-    if (hadTag) {
-      desc += `⚠️ *Note: We automatically stripped the \`#/+numbers\` from \`${rawInput}\` -> **\`${cleanedInput}\`**.*\n\n`;
-    }
+    let desc = `<@${discordId}>, you don't have a Dune: Imperium Digital **In-Game Name (IGN)** linked yet!\n\n` +
+      `📸 **What is your IGN?**\n` +
+      `It is the **exact name shown on the end-of-game scoreboard screenshot** (without any \`#1234\` or \`+1234\` friend code numbers).\n\n` +
+      `👉 **To register your name:** Type **\`/ign name: YourExactInGameName\`**`;
 
     const components = [];
-    const buttonRow = new ActionRowBuilder();
-
     if (topSuggestions.length > 0) {
-      desc += `🔍 **We found existing player profile(s) on the leaderboard that match your name:**\n`;
+      desc += `\n\n🔍 **Or click a button below if one of these leaderboard profiles is you:**\n`;
+      const row = new ActionRowBuilder();
       topSuggestions.forEach((s, i) => {
-        desc += `${i + 1}. **[${s.display_name}](https://dunestats.cc/players/${encodeURIComponent(s.display_name)})** — ${Number(s.elo).toFixed(1)} ELO (${s.games_played || 0} games)\n`;
-        buttonRow.addComponents(
+        const pUrl = `https://dunestats.cc/players/${encodeURIComponent(s.display_name)}`;
+        desc += `• **[${s.display_name}](${pUrl})** — **${Number(s.elo).toFixed(1)} ELO** (${s.games_played || 0} games)\n`;
+        row.addComponents(
           new ButtonBuilder()
-            .setCustomId(`ign_claim_${s.player_key}`)
-            .setLabel(`Link "${s.display_name}".slice(0, 80)`)
+            .setCustomId(`ign_quickclaim_${s.player_key}`)
+            .setLabel(`Link "${s.display_name}"`.slice(0, 80))
             .setStyle(i === 0 ? ButtonStyle.Success : ButtonStyle.Primary)
             .setEmoji('✅')
         );
       });
-      desc += `\n*If one of these is you, click its button below! Otherwise, click **Enter Different IGN**.*`;
-    } else if (cleanedInput) {
-      desc += `🆕 No existing leaderboard profile matched **\`${cleanedInput}\`**.\nClick below to link **\`${cleanedInput}\`** as your new In-Game Name!`;
-      buttonRow.addComponents(
-        new ButtonBuilder()
-          .setCustomId(`ign_setcustom_${encodeURIComponent(cleanedInput)}`)
-          .setLabel(`Link "${cleanedInput}"`.slice(0, 80))
-          .setStyle(ButtonStyle.Success)
-          .setEmoji('✅')
-      );
-    } else {
-      desc += `🔍 We couldn't automatically guess your IGN from the current leaderboard. Click **Enter My IGN** below to type it in!`;
+      components.push(row);
     }
-
-    buttonRow.addComponents(
-      new ButtonBuilder()
-        .setCustomId('ign_open_modal_new')
-        .setLabel(topSuggestions.length > 0 || cleanedInput ? 'Enter Different IGN' : 'Enter My IGN')
-        .setStyle(ButtonStyle.Secondary)
-        .setEmoji('✏️')
-    );
-
-    components.push(buttonRow);
 
     const embed = new EmbedBuilder()
       .setTitle('🎮 Link Your Dune: Imperium Digital IGN')
@@ -212,161 +282,43 @@ module.exports = {
       .setDescription(desc);
 
     const replyMsg = await interaction.editReply({ embeds: [embed], components });
-    return this.attachCollector(replyMsg, interaction, { supabase, discordClient, ratingsList, existingMap: null, saveDiscordPlayerMap });
-  },
+    if (components.length === 0) return;
 
-  attachCollector(replyMsg, interaction, { supabase, discordClient, ratingsList, existingMap, saveDiscordPlayerMap }) {
-    if (!replyMsg) return;
-    const collector = replyMsg.createMessageComponentCollector({ time: 120000 });
-
+    const collector = replyMsg.createMessageComponentCollector({ time: 60000 });
     collector.on('collect', async (btnInt) => {
-      if (btnInt.user.id !== interaction.user.id) return;
-      const cid = btnInt.customId;
+      if (btnInt.user.id !== discordId) {
+        return btnInt.reply({ content: '❌ Only the player who ran `/ign` can click this button.', ephemeral: true }).catch(() => {});
+      }
 
-      if (cid.startsWith('ign_claim_')) {
-        const pk = cid.replace('ign_claim_', '');
-        const rating = ratingsList.find(r => r.player_key === pk);
-        const disp = rating?.display_name || pk;
+      if (btnInt.customId.startsWith('ign_quickclaim_')) {
+        const pk = btnInt.customId.replace('ign_quickclaim_', '');
+        const matchedRating = ratingsList.find(r => r.player_key === pk);
+        const finalDisplay = matchedRating?.display_name || pk;
+        const profileUrl = `https://dunestats.cc/players/${encodeURIComponent(finalDisplay)}`;
+        const statsLine = buildStatsSentence(matchedRating);
 
-        const isDuplicate = await checkAndAlertDuplicateIgn(supabase, discordClient, interaction.user.id, pk, disp);
+        const dupHolders = await getDuplicateHolders(supabase, discordId, pk);
         await saveDiscordPlayerMap({
-          discordUserId: interaction.user.id,
+          discordUserId: discordId,
           discordUsername: interaction.user.username,
-          displayName: disp,
+          displayName: finalDisplay,
           playerKey: pk
         });
-        await supabase.from('discord_guild_members').update({ suggested_player_key: pk, has_verified_map: true }).eq('discord_user_id', interaction.user.id);
+        await supabase.from('discord_guild_members').update({ suggested_player_key: pk, has_verified_map: true }).eq('discord_user_id', discordId);
 
-        const dupNote = isDuplicate ? `\n\n⚠️ *Note: Another Discord account is also linked to **${disp}**. An admin has been notified to verify.*` : '';
-        await btnInt.update({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle('✅ In-Game Name Linked!')
-              .setColor(0x2ECC71)
-              .setDescription(`Your Discord account is now linked to **[${disp}](https://dunestats.cc/players/${encodeURIComponent(disp)})**!${dupNote}`)
-          ],
-          components: []
-        }).catch(() => {});
-        collector.stop();
-        return;
-      }
-
-      if (cid.startsWith('ign_setcustom_')) {
-        const rawCustom = decodeURIComponent(cid.replace('ign_setcustom_', ''));
-        const { cleaned } = cleanScreenshotName(rawCustom);
-        const normKey = normalizeName(cleaned);
-
-        const isDuplicate = await checkAndAlertDuplicateIgn(supabase, discordClient, interaction.user.id, normKey, cleaned);
-        await saveDiscordPlayerMap({
-          discordUserId: interaction.user.id,
-          discordUsername: interaction.user.username,
-          displayName: cleaned,
-          playerKey: normKey
-        });
-        await supabase.from('discord_guild_members').update({ suggested_player_key: normKey, has_verified_map: true }).eq('discord_user_id', interaction.user.id);
-
-        const dupNote = isDuplicate ? `\n\n⚠️ *Note: Another Discord account is also linked to **${cleaned}**. An admin has been notified to verify.*` : '';
-        await btnInt.update({
-          embeds: [
-            new EmbedBuilder()
-              .setTitle('✅ In-Game Name Linked!')
-              .setColor(0x2ECC71)
-              .setDescription(`Your Discord account is now linked to **${cleaned}**!${dupNote}`)
-          ],
-          components: []
-        }).catch(() => {});
-        collector.stop();
-        return;
-      }
-
-      if (cid === 'ign_open_modal_new' || cid.startsWith('ign_unlock_request_')) {
-        const isLocked = cid.startsWith('ign_unlock_request_');
-        const prefillRaw = isLocked ? decodeURIComponent(cid.replace('ign_unlock_request_', '')) : '';
-        const prefill = prefillRaw !== 'NONE' ? prefillRaw : '';
-
-        const modal = new ModalBuilder()
-          .setCustomId(`ign_modal_submit_${isLocked ? 'locked' : 'new'}`)
-          .setTitle(isLocked ? '⚠️ Unlock & Change Linked IGN' : 'Set Your Dune In-Game Name');
-
-        // Label strictly under 45 chars (34 chars)
-        const ignInput = new TextInputBuilder()
-          .setCustomId('ign_value')
-          .setLabel('Scoreboard Screenshot Name (No #)')
-          .setStyle(TextInputStyle.Short)
-          .setPlaceholder('e.g. PaulAtreides (NO #1234 or +1234 numbers!)')
-          .setRequired(true);
-
-        if (prefill) {
-          ignInput.setValue(prefill);
+        let contentMsg = `✅ <@${discordId}> registered their In-Game Name to **[${finalDisplay}](<${profileUrl}>)**!\n${statsLine}`;
+        if (dupHolders.length > 0) {
+          const otherMentions = dupHolders.map(r => `<@${r.discord_user_id}>`).join(', ');
+          contentMsg += `\n\n⚠️ <@&${LFG_ADMIN_ROLE}> **Duplicate IGN Notice:** **${finalDisplay}** is also linked to ${otherMentions}—please clarify!`;
         }
 
-        modal.addComponents(new ActionRowBuilder().addComponents(ignInput));
-
-        if (isLocked) {
-          // Label strictly under 45 chars (35 chars)
-          const confirmInput = new TextInputBuilder()
-            .setCustomId('ign_confirm_word')
-            .setLabel('Type CONFIRM to change linked IGN')
-            .setStyle(TextInputStyle.Short)
-            .setPlaceholder('Type CONFIRM in all caps')
-            .setRequired(true);
-          modal.addComponents(new ActionRowBuilder().addComponents(confirmInput));
-        }
-
-        await btnInt.showModal(modal).catch((err) => console.error('Failed to show IGN modal:', err));
-
-        try {
-          const modalSubmit = await btnInt.awaitModalSubmit({
-            filter: (m) => m.user.id === interaction.user.id && m.customId.startsWith('ign_modal_submit_'),
-            time: 120000
-          });
-
-          if (isLocked) {
-            const confirmWord = modalSubmit.fields.getTextInputValue('ign_confirm_word')?.trim();
-            if (confirmWord !== 'CONFIRM') {
-              await modalSubmit.reply({
-                content: '❌ Change cancelled. You must type `CONFIRM` in all caps to overwrite an existing linked IGN.',
-                flags: MessageFlags.Ephemeral
-              }).catch(() => {});
-              return;
-            }
-          }
-
-          const enteredRaw = modalSubmit.fields.getTextInputValue('ign_value')?.trim();
-          const { cleaned, hadTag } = cleanScreenshotName(enteredRaw);
-          const normKey = normalizeName(cleaned);
-
-          if (!normKey) {
-            await modalSubmit.reply({ content: '❌ Invalid In-Game Name.', flags: MessageFlags.Ephemeral }).catch(() => {});
-            return;
-          }
-
-          const matchedRating = ratingsList.find(r => r.player_key === normKey);
-          const finalDisplay = matchedRating?.display_name || cleaned;
-
-          const isDuplicate = await checkAndAlertDuplicateIgn(supabase, discordClient, interaction.user.id, normKey, finalDisplay);
-          await saveDiscordPlayerMap({
-            discordUserId: interaction.user.id,
-            discordUsername: interaction.user.username,
-            displayName: finalDisplay,
-            playerKey: normKey
-          });
-          await supabase.from('discord_guild_members').update({ suggested_player_key: normKey, has_verified_map: true }).eq('discord_user_id', interaction.user.id);
-
-          await modalSubmit.deferUpdate().catch(() => {});
-          const tagNotice = hadTag ? `\n*(Note: Stripped \`#/+numbers\` from \`${enteredRaw}\` -> **\`${finalDisplay}\`**)*` : '';
-          const dupNote = isDuplicate ? `\n\n⚠️ *Note: Another Discord account is also linked to **${finalDisplay}**. An admin has been notified to verify.*` : '';
-          await interaction.editReply({
-            embeds: [
-              new EmbedBuilder()
-                .setTitle('✅ In-Game Name Updated!')
-                .setColor(0x2ECC71)
-                .setDescription(`Your Discord account (<@${interaction.user.id}>) is now linked to **${finalDisplay}**!${tagNotice}${dupNote}`)
-            ],
-            components: []
-          }).catch(() => {});
-          collector.stop();
-        } catch (modalTimeout) {}
+        await btnInt.update({
+          content: contentMsg,
+          embeds: [],
+          components: [],
+          allowedMentions: { roles: [LFG_ADMIN_ROLE], users: [discordId, ...dupHolders.map(u => u.discord_user_id)] }
+        }).catch(() => {});
+        collector.stop();
       }
     });
   }
