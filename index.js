@@ -448,6 +448,7 @@ async function saveDiscordPlayerMap({ discordUserId, discordUsername, displayNam
       .from('player_discord_map')
       .select('id, discord_user_id, player_key, display_name')
       .eq('discord_user_id', discordUserId)
+      .limit(1)
       .maybeSingle();
 
     const payload = { discord_user_id: discordUserId, player_key: normKey, updated_at: new Date().toISOString() };
@@ -457,7 +458,6 @@ async function saveDiscordPlayerMap({ discordUserId, discordUsername, displayNam
     if (existingUserRow) {
       await supabase.from('player_discord_map').update(payload).eq('id', existingUserRow.id);
     } else {
-      // Check if an unclaimed row exists for this player_key with no discord_user_id yet
       const { data: unclaimedRow } = await supabase
         .from('player_discord_map')
         .select('id')
@@ -493,7 +493,7 @@ async function resolveHostIgn(discordUserId, webHostId = null, webPlayerNames = 
     return { ign: null, isKnown: false };
   }
   if (webHostId) {
-    const { data: wMap } = await supabase.from('player_discord_map').select('player_key, display_name').eq('claimed_by', webHostId).maybeSingle();
+    const { data: wMap } = await supabase.from('player_discord_map').select('player_key, display_name').eq('claimed_by', webHostId).limit(1).maybeSingle();
     if (wMap?.player_key) {
       const { data: rRow } = await supabase.from('player_ratings').select('display_name').eq('player_key', wMap.player_key).eq('game_version', 'overall').maybeSingle();
       return { ign: rRow?.display_name || wMap.display_name || capitalize(wMap.player_key), isKnown: true };
@@ -515,6 +515,7 @@ async function promptUnknownHostIgn(lobby, hostUser, channel) {
     if (msg) setTimeout(() => msg.delete().catch(() => {}), 90000);
   } catch (err) {}
 }
+
 async function clearHostClaimAlert(lobbyId) {
   const key = String(lobbyId);
   const info = hostClaimAlertMessages.get(key);
@@ -1173,7 +1174,6 @@ async function updateLeagueInfoMessage() {
     }
   }, 1000);
 }
-
 // -------------------------------------------------------------
 // LOBBY UTILS
 // -------------------------------------------------------------
@@ -1879,6 +1879,23 @@ async function announceGame(gameId) {
       }
 
       await primaryChannel.send(messagePayload).catch(err => console.error('Error sending primary match result:', err));
+
+      // Send a 2nd message if a tournament game couldn't match its table due to a screenshot IGN mismatch
+      if (payload.game.tournament_num && !payload.tournamentDetails) {
+        const playerTags = [];
+        for (const row of payload.results) {
+          const mention = await resolveMentionForName(primaryChannel.guild, row.player_name);
+          playerTags.push(mention ? `${mention} (**${row.player_name}**)` : `**${row.player_name}**`);
+        }
+
+        await primaryChannel.send({
+          content:
+            `⚠️ 🛡️ <@&${TOURNAMENT_HOST_ROLE_ID}> | 👥 ${playerTags.join(' · ')}\n` +
+            `**Tournament Roster Name Mismatch Detected:** One or more In-Game Names on the screenshot did not match the registered tournament roster for **Tournament #${payload.game.tournament_num}**.\n` +
+            `This match is being manually verified by a Tournament Host and the player name(s) will be adjusted. *(Scores for this table will not show on the tournament page yet, but will appear as soon as verification is complete!)*`,
+          allowedMentions: { parse: ['users'], roles: [TOURNAMENT_HOST_ROLE_ID] }
+        }).catch(err => console.error('Error sending tournament mismatch alert:', err));
+      }
     }
 
     const isLeagueGame = payload.game.is_league === true || String(payload.game.is_league).toLowerCase() === 'true';
@@ -1926,6 +1943,7 @@ function scheduleAnnouncement(gameId) {
     try { await announceGame(gameId); } catch (err) {}
   }, GAME_ROWS_WAIT_MS);
 }
+
 // -------------------------------------------------------------
 // SP EVENT ANNOUNCEMENT HANDLER
 // -------------------------------------------------------------
@@ -2171,13 +2189,61 @@ async function buildRosterDisplay(lobby) {
       });
     }
 
-    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+    let cachedAllRatings = null;
+
     for (const uid of pIds) {
       if (!discordNamesMap[uid]) discordNamesMap[uid] = [];
       if (guild) {
         const member = guild.members.cache.get(uid) || await guild.members.fetch(uid).catch(() => null);
         if (member) {
           discordNamesMap[uid].push(member.nickname, member.displayName, member.user?.globalName, member.user?.username);
+
+          // On-the-fly backfill if a brand-new server member isn't in discord_guild_members yet
+          if (!dirMap[uid] && !member.user?.bot) {
+            const username = member.user.username;
+            const globalName = member.user.globalName || null;
+            const displayName = member.nickname || member.displayName || username;
+            const hasLeagueRole = member.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+            const isVerified = !!discordIgnMap[uid];
+
+            let suggestedKey = discordIgnMap[uid] || null;
+            let bestScore = isVerified ? 1 : 0;
+
+            if (!isVerified) {
+              if (!cachedAllRatings) {
+                const { data: rList } = await supabase.from('player_ratings').select('player_key, display_name').eq('game_version', 'overall');
+                cachedAllRatings = rList || [];
+              }
+              for (const rating of cachedAllRatings) {
+                const score = Math.max(
+                  similarity(displayName, rating.display_name),
+                  similarity(displayName, rating.player_key),
+                  similarity(username, rating.player_key)
+                );
+                if (score > bestScore) {
+                  bestScore = score;
+                  suggestedKey = rating.player_key;
+                }
+              }
+            }
+
+            const newDirEntry = {
+              discord_user_id: uid,
+              discord_username: username,
+              global_name: globalName,
+              display_name: displayName,
+              suggested_player_key: bestScore >= DB_MATCH_THRESHOLD ? suggestedKey : null,
+              similarity_score: bestScore >= DB_MATCH_THRESHOLD ? parseFloat(bestScore.toFixed(3)) : null,
+              has_verified_map: isVerified,
+              has_league_lfg_role: hasLeagueRole,
+              joined_at: member.joinedAt ? member.joinedAt.toISOString() : new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            };
+
+            await supabase.from('discord_guild_members').upsert(newDirEntry, { onConflict: 'discord_user_id' });
+            dirMap[uid] = newDirEntry;
+          }
         }
       }
     }
@@ -3332,7 +3398,14 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
 
     if (unlinkedPlayers.length > 0) {
       const lines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n');
-      await channel.send({ embeds: [new EmbedBuilder().setTitle('⚠️ Missed Strategy Points!').setDescription(`${lines}\n\nLink your Discord account on [dunestats.cc](https://dunestats.cc) now to start claiming your rewards and climb the ranks!`).setColor(0xe74c3c)] }).catch(() => {});
+      await channel.send({
+        embeds: [
+          new EmbedBuilder()
+            .setTitle('⚠️ Missed Strategy Points!')
+            .setDescription(`${lines}\n\nUse **\`/ign\`** right here in Discord (or link your account on [dunestats.cc](https://dunestats.cc)) to link your In-Game Name, start claiming your rewards, and climb the ranks!`)
+            .setColor(0xe74c3c)
+        ]
+      }).catch(() => {});
     }
   } finally {
     setTimeout(() => activeStartLocks.delete(lobbyRecord.id), 15000);
@@ -4061,6 +4134,61 @@ discordClient.on('messageCreate', async (message) => {
     }
   } catch (err) {}
 });
+discordClient.on('guildMemberAdd', async (member) => {
+  try {
+    if (member.user.bot) return;
+    const dId = member.id;
+    const username = member.user.username;
+    const globalName = member.user.globalName || null;
+    const displayName = member.nickname || member.displayName || username;
+    const hasLeagueRole = member.roles.cache.has(LEAGUE_NOTIFY_ROLE_ID);
+
+    const { data: existingMap } = await supabase
+      .from('player_discord_map')
+      .select('id, player_key')
+      .eq('discord_user_id', dId)
+      .limit(1)
+      .maybeSingle();
+
+    const isVerified = !!existingMap;
+    let suggestedKey = existingMap?.player_key || null;
+    let bestScore = isVerified ? 1 : 0;
+
+    if (!isVerified) {
+      const { data: allRatings } = await supabase
+        .from('player_ratings')
+        .select('player_key, display_name')
+        .eq('game_version', 'overall');
+
+      for (const rating of allRatings || []) {
+        const score = Math.max(
+          similarity(displayName, rating.display_name),
+          similarity(displayName, rating.player_key),
+          similarity(username, rating.player_key)
+        );
+        if (score > bestScore) {
+          bestScore = score;
+          suggestedKey = rating.player_key;
+        }
+      }
+    }
+
+    await supabase.from('discord_guild_members').upsert({
+      discord_user_id: dId,
+      discord_username: username,
+      global_name: globalName,
+      display_name: displayName,
+      suggested_player_key: bestScore >= DB_MATCH_THRESHOLD ? suggestedKey : null,
+      similarity_score: bestScore >= DB_MATCH_THRESHOLD ? parseFloat(bestScore.toFixed(3)) : null,
+      has_verified_map: isVerified,
+      has_league_lfg_role: hasLeagueRole,
+      joined_at: member.joinedAt ? member.joinedAt.toISOString() : new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    }, { onConflict: 'discord_user_id' });
+  } catch (err) {
+    console.error('Error in guildMemberAdd:', err);
+  }
+});
 
 discordClient.on('guildMemberUpdate', async (oldMember, newMember) => {
   try {
@@ -4276,6 +4404,20 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
 
 discordClient.once('clientReady', async () => {
   console.log('Logged in as', discordClient.user.tag);
+
+  // Register slash commands immediately on boot (uses discordClient.user.id if DISCORD_CLIENT_ID is not set)
+  const clientId = DISCORD_CLIENT_ID || discordClient.user.id;
+  if (clientId && DISCORD_GUILD_ID) {
+    try {
+      const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
+      const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
+      await rest.put(Routes.applicationGuildCommands(clientId, DISCORD_GUILD_ID), { body: commands });
+      console.log(`Successfully registered ${commands.length} slash commands internally.`);
+    } catch (error) {
+      console.error('Error registering slash commands:', error);
+    }
+  }
+
   startRealtimeListener();
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
@@ -4310,15 +4452,6 @@ discordClient.once('clientReady', async () => {
   setInterval(async () => { await checkAndExpireLobbies(); }, 5 * 60 * 1000);
   setInterval(async () => { await cleanExpiredQueueEntries(); }, 30 * 1000);
   setInterval(async () => { await catchUpMissedWebLobbies(); }, 60 * 1000);
-
-  if (DISCORD_CLIENT_ID && DISCORD_GUILD_ID) {
-    try {
-      const rest = new REST({ version: '10' }).setToken(DISCORD_BOT_TOKEN);
-      const commands = Array.from(slashCommands.values()).map(c => c.data.toJSON());
-      await rest.put(Routes.applicationGuildCommands(DISCORD_CLIENT_ID, DISCORD_GUILD_ID), { body: commands });
-      console.log('Successfully registered all commands internally.');
-    } catch (error) {}
-  }
 });
 
 discordClient.login(DISCORD_BOT_TOKEN);
