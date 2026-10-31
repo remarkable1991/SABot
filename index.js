@@ -90,6 +90,7 @@ const DB_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_THRESHOLD = 0.72;
 const GUILD_MATCH_GAP = 0.08;
 const TAG_COOLDOWN_MS = 45 * 60 * 1000; // 45 minutes
+const SP_BASE_COOLDOWN_MINS = 20; // 20 minutes cooldown for +50 SP Match Started reward
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
 
 // Control emojis on lobbies
@@ -516,6 +517,37 @@ async function promptUnknownHostIgn(lobby, hostUser, channel) {
   } catch (err) {}
 }
 
+// Builds a 4/4 countdown message that pings all seated players
+async function buildFullLobbyCountdownMessage(lobby, startTargetDate) {
+  const pIds = lobby.player_ids || [];
+  const wIds = lobby.web_player_ids || [];
+  const wNames = lobby.web_player_names || [];
+  const webMentionsMap = await getDiscordMentionsForWebPlayers(wIds);
+
+  const mentionSet = new Set(pIds.map(id => `<@${id}>`));
+  const unlinkedWebNames = [];
+
+  for (let i = 0; i < wNames.length; i++) {
+    const wId = wIds[i];
+    if (wId && webMentionsMap[wId]) {
+      mentionSet.add(webMentionsMap[wId].trim());
+    } else if (wNames[i]) {
+      unlinkedWebNames.push(`**${wNames[i]}** 🌐`);
+    }
+  }
+
+  const allPings = [...Array.from(mentionSet), ...unlinkedWebNames].join(' ');
+  const unixStart = Math.floor(startTargetDate.getTime() / 1000);
+  return `⏳ **Lobby full (4/4)!** ${allPings} — Match will automatically begin <t:${unixStart}:R>. Please make sure the lobby is created and started in-game now!`;
+}
+
+// Builds a clear message when a 4/4 lobby drops back to 3/4
+function buildRosterDropNotice(lobby, leaverDisplay, totalAfter = 3) {
+  const lobbyLabel = lobby.match_id || `sa${lobby.id}`;
+  const whoStr = leaverDisplay ? `**${leaverDisplay}**` : 'A player';
+  return `⚠️ **Roster drop (${totalAfter}/4):** ${whoStr} left Lobby \`${lobbyLabel}\`. The automated match countdown has been aborted — **the 4th slot is now open again for anyone to join!**`;
+}
+
 async function clearHostClaimAlert(lobbyId) {
   const key = String(lobbyId);
   const info = hostClaimAlertMessages.get(key);
@@ -533,8 +565,11 @@ async function clearHostClaimAlert(lobbyId) {
 async function clear3PlayerVote(lobbyId, reasonText = null) {
   const key = String(lobbyId);
   const vote = active3PlayerVotes.get(key);
-  if (!vote) return;
   active3PlayerVotes.delete(key);
+  try {
+    await supabase.from('lfg_three_player_votes').delete().eq('lobby_id', Number(lobbyId));
+  } catch (dbErr) {}
+  if (!vote) return;
   try {
     const ch = await discordClient.channels.fetch(vote.channelId).catch(() => null);
     if (ch) {
@@ -561,7 +596,7 @@ async function handlePostLeaveOrHostCheck(lobby, previousHostId = null) {
   if (totalCount === 0) {
     await clearHostClaimAlert(lobby.id);
     await clear3PlayerVote(lobby.id);
-    await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
+    await supabase.from('active_async_matches').update({ status: 'cancelled', league_status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
     const channel = await discordClient.channels.fetch(lobby.channel_id || LEAGUE_LFG_CHANNEL_ID).catch(() => null);
     if (channel && lobby.message_id) {
       const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
@@ -628,7 +663,8 @@ async function getLobbySeatedParticipants(lobby) {
       const dRow = (dirRows || []).find(r => r.discord_user_id === uid);
       const names = [mRow?.display_name, mRow?.player_key, mRow?.discord_username, dRow?.display_name, dRow?.global_name, dRow?.discord_username, dRow?.suggested_player_key].filter(Boolean).map(n => normalizeName(n));
       const labelName = mRow?.display_name || dRow?.display_name || dRow?.discord_username || 'Player';
-      participants.push({ key: `discord_${uid}`, discordId: uid, displayName: labelName, mention: `<@${uid}>`, normNames: new Set(names) });
+      const token = mRow?.player_key ? `player:${mRow.player_key}` : `player:discord:${uid}`;
+      participants.push({ key: `discord_${uid}`, token, discordId: uid, displayName: labelName, mention: `<@${uid}>`, normNames: new Set(names) });
     }
   }
 
@@ -641,9 +677,20 @@ async function getLobbySeatedParticipants(lobby) {
       if (m) dId = m[1];
     }
     if (dId && seenDiscordIds.has(dId)) continue;
-    participants.push({ key: dId ? `discord_${dId}` : `web_${normalizeName(rawName)}`, discordId: dId, displayName: rawName, mention: dId ? `<@${dId}>` : `**${rawName}** 🌐`, normNames: new Set([normalizeName(rawName)]) });
+    const normW = normalizeName(rawName);
+    participants.push({
+      key: dId ? `discord_${dId}` : `web_${normW}`,
+      token: `player:${normW}`,
+      discordId: dId,
+      displayName: rawName,
+      mention: dId ? `<@${dId}>` : `**${rawName}** 🌐`,
+      normNames: new Set([normW])
+    });
   }
-  for (const g of guests) participants.push({ key: `guest_${normalizeName(g)}`, discordId: null, displayName: g, mention: `**${g}**`, normNames: new Set([normalizeName(g)]) });
+  for (const g of guests) {
+    const normG = normalizeName(g);
+    participants.push({ key: `guest_${normG}`, token: `player:${normG}`, discordId: null, displayName: g, mention: `**${g}**`, normNames: new Set([normG]) });
+  }
   return participants;
 }
 
@@ -671,43 +718,84 @@ async function process3PlayerQuickChatEvent(lobby, senderName, messageCode) {
   if (participants.length !== 3) return;
   const channel = await discordClient.channels.fetch(lobby.channel_id || LEAGUE_LFG_CHANNEL_ID).catch(() => null);
   if (!channel) return;
+
   let vote = active3PlayerVotes.get(key);
   const matchedPart = matchSenderToParticipant(senderName, participants);
   const participantKey = matchedPart ? matchedPart.key : `raw_${normalizeName(senderName || 'Player')}`;
   const displaySender = matchedPart ? matchedPart.displayName : (senderName || 'Player');
 
+  // Read authoritative vote state from public.lfg_three_player_votes (populated by website or lfg_bot_vote_three RPC)
+  const { data: dbVoteRow } = await supabase
+    .from('lfg_three_player_votes')
+    .select('roster, approvals')
+    .eq('lobby_id', Number(lobby.id))
+    .maybeSingle();
+
+  const dbApprovals = Array.isArray(dbVoteRow?.approvals) ? dbVoteRow.approvals : [];
+
   if (messageCode === 'start_3p_ask') {
     if (!vote) {
       vote = { agreedKeys: new Set([participantKey]), agreedNames: [displaySender], promptMsgId: null, channelId: channel.id };
       active3PlayerVotes.set(key, vote);
-      const remainingMentions = participants.filter(p => !vote.agreedKeys.has(p.key)).map(p => p.mention).join(', ');
+      const remainingMentions = participants
+        .filter(p => !vote.agreedKeys.has(p.key) && !dbApprovals.includes(p.token))
+        .map(p => p.mention)
+        .join(', ');
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`agree_3p_btn_${lobby.id}`).setLabel('Agree to 3-Player Start').setStyle(ButtonStyle.Success).setEmoji('✅'),
         new ButtonBuilder().setCustomId(`cancel_3p_btn_${lobby.id}`).setLabel('Wait for 4th Player').setStyle(ButtonStyle.Danger).setEmoji('❌')
       );
+      const currentCount = Math.max(1, dbApprovals.length);
       const promptMsg = await channel.send({
-        content: `🗳️ **3-Player Match Start Requested!**\n**${displaySender}** wants to start League Lobby \`${lobby.match_id || `sa${lobby.id}`}\` with **3 players** (**1/3** agreed).\n\nWaiting on: ${remainingMentions || 'remaining players'}\n*(Click **Agree to 3-Player Start** below or on the website — all 3 players must agree!)*`,
+        content: `🗳️ **3-Player Match Start Requested!**\n**${displaySender}** wants to start League Lobby \`${lobby.match_id || `sa${lobby.id}`}\` with **3 players** (**${currentCount}/3** agreed).\n\nWaiting on: ${remainingMentions || 'remaining players'}\n*(Click **Agree to 3-Player Start** below or on the website — all 3 players must agree!)*`,
         components: [row]
       }).catch(() => null);
       if (promptMsg) vote.promptMsgId = promptMsg.id;
     }
     return;
   }
+
   if (messageCode === 'agree_3p') {
-    if (!vote) { vote = { agreedKeys: new Set(), agreedNames: [], promptMsgId: null, channelId: channel.id }; active3PlayerVotes.set(key, vote); }
-    if (vote.agreedKeys.has(participantKey)) return;
+    if (!vote) {
+      vote = { agreedKeys: new Set(), agreedNames: [], promptMsgId: null, channelId: channel.id };
+      active3PlayerVotes.set(key, vote);
+    }
+    if (vote.agreedKeys.has(participantKey) && dbApprovals.length < 3) return;
     vote.agreedKeys.add(participantKey);
-    vote.agreedNames.push(displaySender);
-    const agreedCount = vote.agreedKeys.size;
+    if (!vote.agreedNames.includes(displaySender)) vote.agreedNames.push(displaySender);
+
+    const agreedCount = Math.max(vote.agreedKeys.size, dbApprovals.length);
+
     if (agreedCount < 3) {
-      const remainingMentions = participants.filter(p => !vote.agreedKeys.has(p.key)).map(p => p.mention).join(', ');
+      const remainingMentions = participants
+        .filter(p => !vote.agreedKeys.has(p.key) && !dbApprovals.includes(p.token))
+        .map(p => p.mention)
+        .join(', ');
       await channel.send({ content: `✅ **${displaySender}** agreed to start with 3 players! (**${agreedCount}/3** agreed — waiting on ${remainingMentions || 'remaining player'})` }).catch(() => {});
       if (vote.promptMsgId) {
         const promptMsg = await channel.messages.fetch(vote.promptMsgId).catch(() => null);
-        if (promptMsg) await promptMsg.edit({ content: `🗳️ **3-Player Match Start Vote (${agreedCount}/3 Agreed)**\nAgreed: **${vote.agreedNames.join(', ')}**\nWaiting on: ${remainingMentions || 'remaining player'}` }).catch(() => {});
+        if (promptMsg) {
+          await promptMsg.edit({
+            content: `🗳️ **3-Player Match Start Vote (${agreedCount}/3 Agreed)**\nAgreed: **${vote.agreedNames.join(', ')}**\nWaiting on: ${remainingMentions || 'remaining player'}`
+          }).catch(() => {});
+        }
       }
     } else {
-      await clear3PlayerVote(lobby.id);
+      if (vote && vote.promptMsgId) {
+        const promptMsg = await channel.messages.fetch(vote.promptMsgId).catch(() => null);
+        if (promptMsg) await promptMsg.delete().catch(() => {});
+      }
+      active3PlayerVotes.delete(key);
+
+      await supabase
+        .from('active_async_matches')
+        .update({ status: 'started', league_status: 'in_progress', auto_start_at: null })
+        .eq('id', lobby.id);
+      lobby.status = 'started';
+      lobby.league_status = 'in_progress';
+      lobby.auto_start_at = null;
+      updateQueueMessage();
+
       const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
       await channel.send({ content: `🎉 **All 3 players agreed (3/3)!** Match \`${lobby.match_id || `sa${lobby.id}`}\` is now **3/3** and officially started — please start your game in-game within **15 minutes** (<t:${Math.floor(startTargetDate.getTime() / 1000)}:R>)!` }).catch(() => {});
       await executeLobbyStartSequence(lobby, channel);
@@ -842,9 +930,15 @@ async function resolveQueuePlayerIdentity(discordUserId, member) {
 
 async function getOldestOpenLeagueLobby() {
   try {
-    const { data: openLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').eq('is_league', true).order('created_at', { ascending: true });
+    const { data: openLobbies } = await supabase
+      .from('active_async_matches')
+      .select('*')
+      .eq('status', 'searching')
+      .eq('is_league', true)
+      .order('created_at', { ascending: true });
     if (!openLobbies || openLobbies.length === 0) return null;
     for (const lobby of openLobbies) {
+      if (lobby.league_status && lobby.league_status !== 'open') continue;
       const totalCount = (lobby.player_ids?.length || 0) + (lobby.web_player_names?.length || 0) + (lobby.guest_players?.length || 0);
       if (totalCount < 4) return lobby;
     }
@@ -854,9 +948,15 @@ async function getOldestOpenLeagueLobby() {
 
 async function tryAutoSeatIntoOpenLeagueLobby(discordUserId, displayName, userId = null) {
   try {
-    const { data: openLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').eq('is_league', true).order('created_at', { ascending: true });
+    const { data: openLobbies } = await supabase
+      .from('active_async_matches')
+      .select('*')
+      .eq('status', 'searching')
+      .eq('is_league', true)
+      .order('created_at', { ascending: true });
     if (!openLobbies || openLobbies.length === 0) return null;
     for (const lobby of openLobbies) {
+      if (lobby.league_status && lobby.league_status !== 'open') continue;
       const pIds = [...(lobby.player_ids || [])];
       const wNames = [...(lobby.web_player_names || [])];
       const wIds = [...(lobby.web_player_ids || [])];
@@ -879,7 +979,8 @@ async function tryAutoSeatIntoOpenLeagueLobby(discordUserId, displayName, userId
       if (newTotal === 4 && active3PlayerVotes.has(String(lobby.id))) await clear3PlayerVote(lobby.id);
 
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-      await syncLobbyEmbed({ ...lobby, ...updatePayload });
+      const updatedLobby = { ...lobby, ...updatePayload };
+      await syncLobbyEmbed(updatedLobby);
       updateQueueMessage();
 
       const targetChId = lobby.channel_id || LEAGUE_LFG_CHANNEL_ID;
@@ -890,9 +991,12 @@ async function tryAutoSeatIntoOpenLeagueLobby(discordUserId, displayName, userId
         const notifyPings = (lobby.notify_user_ids || []).map(id => `<@${id}>`).join(' ');
         const extraPings = [hostMention, notifyPings].filter(Boolean).join(' ');
         await leagueChannel.send({ content: `⚔️ ${whoSeated} clicked **Play** and was **automatically seated** into open League Lobby \`${lobby.match_id || `sa${lobby.id}`}\`! (${newTotal}/4) ${extraPings}`.trim() }).catch(() => {});
-        if (startTargetDate) await leagueChannel.send({ content: `⏳ **Lobby full (4/4)!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
+        if (startTargetDate) {
+          const fullMsg = await buildFullLobbyCountdownMessage(updatedLobby, startTargetDate);
+          await leagueChannel.send({ content: fullMsg }).catch(() => {});
+        }
       }
-      return lobby;
+      return updatedLobby;
     }
   } catch (err) {}
   return null;
@@ -985,40 +1089,81 @@ async function syncActiveLeaguePlayersRole() {
     const role = guild.roles.cache.get(ACTIVE_LEAGUE_ROLE_ID) || await guild.roles.fetch(ACTIVE_LEAGUE_ROLE_ID).catch(() => null);
     if (!role) return 0;
 
+    const currentSeasonId = await getCurrentSeasonId();
     const threeWeeksAgoIso = new Date(Date.now() - 21 * 24 * 60 * 60 * 1000).toISOString();
-    const { data: recentDeltas } = await supabase.from('league_match_rating_deltas').select('player_key').gte('created_at', threeWeeksAgoIso);
-    const { data: recentLeagueGames } = await supabase.from('games').select('id').eq('is_league', true).gte('created_at', threeWeeksAgoIso);
 
-    const activeKeysSet = new Set((recentDeltas || []).map(d => normalizeName(d.player_key)).filter(Boolean));
+    const [
+      { data: recentDeltas },
+      { data: recentLeagueGames },
+      { data: seasonRatings }
+    ] = await Promise.all([
+      supabase.from('league_match_rating_deltas').select('player_key').gte('created_at', threeWeeksAgoIso),
+      supabase.from('games').select('id').eq('is_league', true).gte('created_at', threeWeeksAgoIso),
+      supabase.from('player_league_ratings').select('player_key, games_played').eq('season', currentSeasonId).gt('games_played', 0)
+    ]);
+
+    const activeNormKeys = new Set();
+    for (const d of recentDeltas || []) {
+      const nk = normalizeName(d.player_key);
+      if (nk) activeNormKeys.add(nk);
+    }
+    for (const s of seasonRatings || []) {
+      const nk = normalizeName(s.player_key);
+      if (nk) activeNormKeys.add(nk);
+    }
+
     if (recentLeagueGames && recentLeagueGames.length > 0) {
       const gameIds = recentLeagueGames.map(g => g.id);
       const { data: recentResults } = await supabase.from('game_results').select('player_name').in('game_id', gameIds);
       for (const r of recentResults || []) {
         const nk = normalizeName(r.player_name);
-        if (nk) activeKeysSet.add(nk);
+        if (nk) activeNormKeys.add(nk);
       }
     }
 
-    const activeKeys = Array.from(activeKeysSet);
     const eligibleDiscordIds = new Set();
-    if (activeKeys.length > 0) {
-      const [{ data: mappedRows }, { data: dirRows }] = await Promise.all([
-        supabase.from('player_discord_map').select('discord_user_id, player_key').in('player_key', activeKeys),
-        supabase.from('discord_guild_members').select('discord_user_id, suggested_player_key').in('suggested_player_key', activeKeys)
+    if (activeNormKeys.size > 0) {
+      const [{ data: allMappedRows }, { data: allDirRows }] = await Promise.all([
+        supabase.from('player_discord_map').select('discord_user_id, player_key, display_name'),
+        supabase.from('discord_guild_members').select('discord_user_id, suggested_player_key, display_name, discord_username')
       ]);
-      for (const m of mappedRows || []) if (m.discord_user_id) eligibleDiscordIds.add(m.discord_user_id);
-      for (const d of dirRows || []) if (d.discord_user_id) eligibleDiscordIds.add(d.discord_user_id);
+
+      for (const m of allMappedRows || []) {
+        if (!m.discord_user_id) continue;
+        if (activeNormKeys.has(normalizeName(m.player_key)) || activeNormKeys.has(normalizeName(m.display_name))) {
+          eligibleDiscordIds.add(m.discord_user_id);
+        }
+      }
+
+      for (const d of allDirRows || []) {
+        if (!d.discord_user_id) continue;
+        if (
+          activeNormKeys.has(normalizeName(d.suggested_player_key)) ||
+          activeNormKeys.has(normalizeName(d.display_name)) ||
+          activeNormKeys.has(normalizeName(d.discord_username))
+        ) {
+          eligibleDiscordIds.add(d.discord_user_id);
+        }
+      }
     }
 
     for (const discordId of eligibleDiscordIds) {
       const member = guild.members.cache.get(discordId) || await guild.members.fetch(discordId).catch(() => null);
-      if (member && !member.roles.cache.has(ACTIVE_LEAGUE_ROLE_ID)) await member.roles.add(ACTIVE_LEAGUE_ROLE_ID).catch(() => {});
+      if (member && !member.roles.cache.has(ACTIVE_LEAGUE_ROLE_ID)) {
+        await member.roles.add(ACTIVE_LEAGUE_ROLE_ID).catch(() => {});
+      }
     }
+
     for (const [memberId, member] of role.members) {
-      if (!eligibleDiscordIds.has(memberId)) await member.roles.remove(ACTIVE_LEAGUE_ROLE_ID).catch(() => {});
+      if (!eligibleDiscordIds.has(memberId)) {
+        await member.roles.remove(ACTIVE_LEAGUE_ROLE_ID).catch(() => {});
+      }
     }
     return eligibleDiscordIds.size;
-  } catch (err) { return 0; }
+  } catch (err) {
+    console.error('Error syncing active league role:', err);
+    return 0;
+  }
 }
 
 async function updateLeagueInfoMessage() {
@@ -1146,8 +1291,7 @@ async function updateLeagueInfoMessage() {
         top3Text += `\n\n🔗 **[View Full Ranking on dunestats.cc](https://dunestats.cc/leaderboard)**`;
       }
 
-      const role = guild.roles.cache.get(ACTIVE_LEAGUE_ROLE_ID) || await guild.roles.fetch(ACTIVE_LEAGUE_ROLE_ID).catch(() => null);
-      const activeRoleCount = role ? role.members.size : 0;
+      const activeRoleCount = await syncActiveLeaguePlayersRole();
 
       const statsLines = [
         `👥 **Active Players on Discord (Last 3 Weeks):** **${activeRoleCount}**`,
@@ -1331,7 +1475,8 @@ async function createQueueLobby(hostId, players, mode = 'live', isAutoPop = fals
       
       const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
       await supabase.from('active_async_matches').update({ auto_start_at: startTargetDate.toISOString() }).eq('id', numericLobbyId);
-      await leagueChannel.send({ content: `⏳ **Lobby full!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
+      const fullMsg = await buildFullLobbyCountdownMessage({ ...insertedMatch, player_ids: players }, startTargetDate);
+      await leagueChannel.send({ content: fullMsg }).catch(() => {});
     }
 
     return targetMessage;
@@ -1448,12 +1593,14 @@ async function resolveAndAddPlayerToLobby(lobby, rawInput, adderUser, guild) {
   }
 
   await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-  await syncLobbyEmbed({ ...lobby, ...updatePayload });
+  const updatedLobby = { ...lobby, ...updatePayload };
+  await syncLobbyEmbed(updatedLobby);
   updateQueueMessage();
 
   const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
   if (channel && hitFull && startTargetDate) {
-    await channel.send({ content: `⏳ **Lobby full!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
+    const fullMsg = await buildFullLobbyCountdownMessage(updatedLobby, startTargetDate);
+    await channel.send({ content: fullMsg }).catch(() => {});
   }
   return { success: true, message: `✅ Added player to the lobby! (${newTotal}/4)` };
 }
@@ -1489,12 +1636,15 @@ async function runKickFlow(lobby, user, channel, lobbyMessage = null) {
     else if (pickedTarget.type === 'guest') newGuests.splice(pickedTarget.index, 1);
 
     const cleanWIds = newWIds.map(id => (id && String(id).trim() !== '') ? id : null);
+    const totalAfter = newPIds.length + newWNames.length + newGuests.length;
     const updatedFields = { player_ids: newPIds, web_player_names: newWNames, web_player_ids: cleanWIds, guest_players: newGuests, status: 'searching', auto_start_at: null };
 
     await supabase.from('active_async_matches').update(updatedFields).eq('id', lobby.id);
     let kickedName = pickedTarget.type === 'discord' ? `<@${pickedTarget.id}>` : pickedTarget.name;
-    let kickNotice = `🥾 <@${user.id}> removed **${kickedName}** from the lobby.`;
-    if (lobby.auto_start_at) kickNotice += `\n⚠️ **Roster drop verified.** Match countdown aborted.`;
+    let kickNotice = `🥾 <@${user.id}> removed **${kickedName}** from the lobby (${totalAfter}/4).`;
+    if (lobby.auto_start_at) {
+      kickNotice += `\n` + buildRosterDropNotice(lobby, kickedName, totalAfter);
+    }
     await channel.send({ content: kickNotice }).catch(() => {});
 
     if (pickedTarget.type === 'discord' && lobbyMessage) {
@@ -2189,7 +2339,7 @@ async function buildRosterDisplay(lobby) {
       });
     }
 
-const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
+    const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => null);
     let cachedAllRatings = null;
 
     for (const uid of pIds) {
@@ -2400,11 +2550,13 @@ const guild = await discordClient.guilds.fetch(DISCORD_GUILD_ID).catch(() => nul
 
 async function syncLobbyEmbed(lobby) {
   if (lobby.status !== 'searching') return;
+  if (lobby.is_league && lobby.league_status && lobby.league_status !== 'open') return;
   if (!lobby.channel_id || !lobby.message_id) return;
   const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
   if (!channel) return;
   const msg = await channel.messages.fetch(lobby.message_id).catch(() => null);
   if (!msg || !msg.embeds || !msg.embeds[0]) return;
+  if (msg.embeds[0].title && msg.embeds[0].title.includes('Started!')) return;
 
   const { display, count } = await buildRosterDisplay(lobby);
 
@@ -2717,7 +2869,7 @@ async function executeLobbyPing(lobby, channel) {
 async function handleWebQuickChat(chatRow) {
   const { lobby_id, sender_name, message_code } = chatRow;
   const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobby_id).single();
-  if (!lobby || !lobby.channel_id || lobby.status !== 'searching') return;
+  if (!lobby || !lobby.channel_id) return;
   const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
   if (!channel) return;
 
@@ -2725,6 +2877,8 @@ async function handleWebQuickChat(chatRow) {
     await process3PlayerQuickChatEvent(lobby, sender_name, message_code);
     return;
   }
+
+  if (lobby.status !== 'searching') return;
 
   const hostPing = normalizeDiscordId(lobby.host_id) ? `<@${lobby.host_id}> ` : '';
 
@@ -2800,6 +2954,32 @@ function startRealtimeListener() {
       if (eventType === 'INSERT' && newRecord.status === 'pending_creation') await handleWebLobbyCreation(newRecord);
       
       if (eventType === 'UPDATE' && oldRecord) {
+        const wasStarted = oldRecord.status === 'started' || oldRecord.league_status === 'in_progress';
+        const nowStarted = newRecord.status === 'started' || newRecord.league_status === 'in_progress';
+
+        // 1. Prevent a started/in_progress lobby from ever being reverted back to 'searching'
+        if (wasStarted && newRecord.status === 'searching') {
+          await supabase
+            .from('active_async_matches')
+            .update({ status: 'started', league_status: 'in_progress', auto_start_at: null })
+            .eq('id', newRecord.id);
+          updateQueueMessage();
+          return;
+        }
+
+        // 2. If it just transitioned to started OR league_status === 'in_progress', run start sequence
+        if (nowStarted && !wasStarted) {
+          await executeLobbyStartSequence(newRecord);
+          if (newRecord.is_league) updateQueueMessage();
+          return;
+        }
+
+        // Ignore further searching/roster updates once started
+        if (nowStarted || newRecord.status !== 'searching') {
+          if (newRecord.is_league || oldRecord.is_league) updateQueueMessage();
+          return;
+        }
+
         const rosterChanged =
           JSON.stringify(oldRecord.web_player_names) !== JSON.stringify(newRecord.web_player_names) ||
           JSON.stringify(oldRecord.player_ids) !== JSON.stringify(newRecord.player_ids) ||
@@ -2818,12 +2998,26 @@ function startRealtimeListener() {
               await supabase.from('active_async_matches').update({ auto_start_at: startTargetDate.toISOString() }).eq('id', newRecord.id);
               const ch = await discordClient.channels.fetch(newRecord.channel_id || LEAGUE_LFG_CHANNEL_ID).catch(() => null);
               if (ch) {
-                await ch.send({ content: `⏳ **Lobby full (4/4)!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
+                const fullMsg = await buildFullLobbyCountdownMessage(newRecord, startTargetDate);
+                await ch.send({ content: fullMsg }).catch(() => {});
               }
             }
           }
 
           if (newTotal < oldTotal) {
+            // If a 4/4 lobby dropped on the website while auto_start_at was set, announce who left & abort countdown
+            const removedWebName = (oldRecord.web_player_names || []).find(n => !(newRecord.web_player_names || []).includes(n));
+            const removedGuest = (oldRecord.guest_players || []).find(g => !(newRecord.guest_players || []).includes(g));
+            if (oldTotal === 4 && newTotal < 4 && (oldRecord.auto_start_at || newRecord.auto_start_at) && (removedWebName || removedGuest)) {
+              await supabase.from('active_async_matches').update({ auto_start_at: null }).eq('id', newRecord.id);
+              newRecord.auto_start_at = null;
+              const ch = await discordClient.channels.fetch(newRecord.channel_id || LEAGUE_LFG_CHANNEL_ID).catch(() => null);
+              if (ch) {
+                const leaverLabel = removedWebName ? `${removedWebName} 🌐` : removedGuest;
+                await ch.send({ content: buildRosterDropNotice(newRecord, leaverLabel, newTotal) }).catch(() => {});
+              }
+            }
+
             const handled = await handlePostLeaveOrHostCheck(newRecord, oldRecord.host_id);
             if (handled) return;
           }
@@ -2843,11 +3037,6 @@ function startRealtimeListener() {
           if (newRecord.is_league || oldRecord.is_league) {
             updateQueueMessage();
           }
-        }
-        
-        if (newRecord.status === 'started' && oldRecord.status !== 'started') {
-          await executeLobbyStartSequence(newRecord);
-          if (newRecord.is_league) updateQueueMessage();
         }
       }
     })
@@ -3297,7 +3486,16 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
 
   try {
     await clearHostClaimAlert(lobbyRecord.id);
-    await clear3PlayerVote(lobbyRecord.id);
+    const voteKey = String(lobbyRecord.id);
+    if (active3PlayerVotes.has(voteKey)) {
+      const vote = active3PlayerVotes.get(voteKey);
+      active3PlayerVotes.delete(voteKey);
+      if (vote?.promptMsgId) {
+        const ch = await discordClient.channels.fetch(vote.channelId).catch(() => null);
+        const pMsg = ch ? await ch.messages.fetch(vote.promptMsgId).catch(() => null) : null;
+        if (pMsg) await pMsg.delete().catch(() => {});
+      }
+    }
 
     let channel = targetChannel || await discordClient.channels.fetch(lobbyRecord.channel_id).catch(() => null);
     if (!channel) return;
@@ -3309,10 +3507,14 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
       return;
     }
 
-    await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', lobbyRecord.id);
+    await supabase
+      .from('active_async_matches')
+      .update({ status: 'started', league_status: 'in_progress', auto_start_at: null })
+      .eq('id', lobbyRecord.id);
     if (lobbyRecord.is_league) updateQueueMessage();
 
     const { display, count } = await buildRosterDisplay(lobbyRecord);
+    const maxSeats = count === 3 ? 3 : 4;
     const isLeague = lobbyRecord.is_league === true || String(lobbyRecord.is_league).toLowerCase() === 'true';
     const activePreset = isLeague ? await getActivePreset() : null;
     const formatLine = buildFormatSummaryLine(channel.guild, lobbyRecord.board_type, lobbyRecord.expansions);
@@ -3338,7 +3540,7 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
       .setColor(0x2ecc71)
       .setFooter(null) 
       .setFields(
-        { name: `👥 Final Roster (${count}/4)\n\u200B`, value: display, inline: false }
+        { name: `👥 Final Roster (${count}/${maxSeats})\n\u200B`, value: display, inline: false }
       );
 
     const playerTags = (lobbyRecord.player_ids || []).map(id => `<@${id}>`).join(', ');
@@ -3346,17 +3548,18 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
       ? `\n🔑 Lobby Password: \`${lobbyRecord.lobby_password}\` *(Tap to copy)*`
       : '';
     
-    const linkLine = isLeague
-      ? `\n🔗 **Submit Results:** https://dunestats.cc/LFG/${lobbyRecord.id}`
-      : `\n🔗 **View Lobby:** https://dunestats.cc/LFG/${lobbyRecord.id}`;
+    const submitUrl = `https://dunestats.cc/LFG/${lobbyRecord.id}`;
+    const linkLine = isLeague ? `\n📸 **Submit Results When Finished:** ${submitUrl}` : '';
     const contentStr = `🚀 **The match has officially begun! Good luck, commanders!**\nPlayers: ${playerTags}${pwLine}${linkLine}`;
     
     await targetMsg.edit({ content: contentStr, embeds: [embed], components: [] }).catch(() => {});
+    await targetMsg.reactions.removeAll().catch(() => {});
 
     const now = new Date();
     const startOfToday = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate())).toISOString();
     const startOfThisWeek = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()) - (now.getUTCDay() * 24 * 60 * 60 * 1000)).toISOString();
     const unlinkedPlayers = [];
+    const cooldownPlayers = [];
 
     for (const playerId of (lobbyRecord.player_ids || [])) {
       const profile = await getPlayerProfileFromDiscord(playerId);
@@ -3365,14 +3568,17 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
         continue;
       }
       
-      const { data: hourlyMatchEvents } = await supabase.from('sp_events')
-        .select('id')
+      // 20-minute anti-spam cooldown for the +50 SP Match Started base reward
+      const { data: recentMatchEvents } = await supabase.from('sp_events')
+        .select('id, created_at')
         .eq('player_key', profile.playerKey)
         .eq('action_type', 'match_start_base')
-        .gte('created_at', new Date(now.getTime() - 60 * 60 * 1000).toISOString());
+        .gte('created_at', new Date(now.getTime() - SP_BASE_COOLDOWN_MINS * 60 * 1000).toISOString());
       
-      if (!hourlyMatchEvents || hourlyMatchEvents.length === 0) {
+      if (!recentMatchEvents || recentMatchEvents.length === 0) {
         await awardSP(profile.playerKey, profile.userId, 'match_start_base', SP_REWARDS_CONFIG.MATCH_START_BASE.amount, { discord_user_id: playerId, match_id: lobbyRecord.id });
+      } else {
+        cooldownPlayers.push(playerId);
       }
 
       if (isLive) {
@@ -3396,7 +3602,27 @@ async function executeLobbyStartSequence(lobbyRecord, targetChannel = null) {
       }
     }
 
-    if (unlinkedPlayers.length > 0) {
+    if (cooldownPlayers.length > 0) {
+      const cdMentions = cooldownPlayers.map(id => `<@${id}>`).join(', ');
+      await channel.send({
+        content: `⏳ **SP Cooldown Notice:** ${cdMentions} did not receive the **+${SP_REWARDS_CONFIG.MATCH_START_BASE.amount} SP** Match Started reward because they already received one less than **${SP_BASE_COOLDOWN_MINS} minutes** ago.`
+      }).catch(() => {});
+    }
+
+    if (isLeague) {
+      if (unlinkedPlayers.length > 0) {
+        const unlinkedTags = unlinkedPlayers.map(p => `<@${p.id}>`).join(', ');
+        await channel.send({
+          content:
+            `ℹ️ **Unlinked Player Notice (${unlinkedTags}):** Your In-Game Name is not linked to your Discord yet, but **it will be linked automatically once this League match is submitted** (or you can link it manually anytime with \`/ign\`).\n` +
+            `📸 **Submit Match Results After Finishing:** ${submitUrl}`
+        }).catch(() => {});
+      } else {
+        await channel.send({
+          content: `📸 **When your League game finishes, submit the final scoreboard screenshot here:** ${submitUrl}`
+        }).catch(() => {});
+      }
+    } else if (unlinkedPlayers.length > 0) {
       const lines = unlinkedPlayers.map(p => `• <@${p.id}> could have gotten **+${p.points} Strategy Points**!`).join('\n');
       await channel.send({
         embeds: [
@@ -3510,7 +3736,7 @@ async function checkAndExpireLobbies() {
     for (const lobby of expiredLobbies) {
       await clearHostClaimAlert(lobby.id);
       await clear3PlayerVote(lobby.id);
-      await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
+      await supabase.from('active_async_matches').update({ status: 'cancelled', league_status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
       if (lobby.channel_id && lobby.message_id) {
         const channel = await discordClient.channels.fetch(lobby.channel_id).catch(() => null);
         const msg = channel ? await channel.messages.fetch(lobby.message_id).catch(() => null) : null;
@@ -3834,29 +4060,45 @@ discordClient.on('interactionCreate', async (interaction) => {
       }
 
       if (customId.startsWith('agree_3p_btn_')) {
-        const lobbyId = customId.replace('agree_3p_btn_', '');
-        const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobbyId).maybeSingle();
-        if (!lobby || lobby.status !== 'searching') {
-          await interaction.reply({ content: '❌ This lobby is no longer active.', flags: MessageFlags.Ephemeral }).catch(() => {});
+        const lobbyId = Number(customId.replace('agree_3p_btn_', ''));
+        const { data: rpcRes, error: rpcErr } = await supabase.rpc('lfg_bot_vote_three', {
+          p_lobby_id: lobbyId,
+          p_discord_user_id: interaction.user.id,
+          p_agree: true
+        });
+
+        if (rpcErr || !rpcRes || rpcRes.ok === false) {
+          const errMsg = rpcRes?.error || rpcErr?.message || 'Only seated players in an active 3-player lobby can vote.';
+          await interaction.reply({ content: `❌ ${errMsg}`, flags: MessageFlags.Ephemeral }).catch(() => {});
           return autoDeleteEphemeral(interaction, 60000);
         }
-        if (!(lobby.player_ids || []).includes(interaction.user.id)) {
-          await interaction.reply({ content: '❌ Only seated players in this lobby can vote on a 3-player start.', flags: MessageFlags.Ephemeral }).catch(() => {});
-          return autoDeleteEphemeral(interaction, 60000);
-        }
-        const identity = await resolveQueuePlayerIdentity(interaction.user.id, interaction.member);
+
         await interaction.deferUpdate().catch(() => {});
-        await supabase.from('lobby_quick_chats').insert({ lobby_id: lobby.id, sender_name: identity.displayName, message_code: 'agree_3p' });
+
+        if (rpcRes.started) {
+          const { data: freshLobby } = await supabase.from('active_async_matches').select('*').eq('id', lobbyId).maybeSingle();
+          if (freshLobby) {
+            await executeLobbyStartSequence(freshLobby, interaction.channel);
+            updateQueueMessage();
+          }
+        }
         return;
       }
 
       if (customId.startsWith('cancel_3p_btn_')) {
-        const lobbyId = customId.replace('cancel_3p_btn_', '');
+        const lobbyId = Number(customId.replace('cancel_3p_btn_', ''));
         const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('id', lobbyId).maybeSingle();
         if (!lobby || !(lobby.player_ids || []).includes(interaction.user.id)) {
           await interaction.reply({ content: '❌ Only seated players in this lobby can decline the 3-player start.', flags: MessageFlags.Ephemeral }).catch(() => {});
           return autoDeleteEphemeral(interaction, 60000);
         }
+
+        await supabase.rpc('lfg_bot_vote_three', {
+          p_lobby_id: lobbyId,
+          p_discord_user_id: interaction.user.id,
+          p_agree: false
+        }).catch(() => {});
+
         const identity = await resolveQueuePlayerIdentity(interaction.user.id, interaction.member);
         await interaction.deferUpdate().catch(() => {});
         await clear3PlayerVote(lobbyId, `❌ **${identity.displayName}** declined the 3-player start. Waiting for a 4th player!`);
@@ -3955,6 +4197,7 @@ discordClient.on('interactionCreate', async (interaction) => {
 
         const { data: openLeagueLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').eq('is_league', true);
         for (const lobby of openLeagueLobbies || []) {
+          if (lobby.league_status && lobby.league_status !== 'open') continue;
           const pIds = lobby.player_ids || [];
           if (pIds.includes(interaction.user.id)) {
             const newPIds = pIds.filter(id => id !== interaction.user.id);
@@ -3973,7 +4216,9 @@ discordClient.on('interactionCreate', async (interaction) => {
               }
               if (totalAfter > 0) {
                 let leaveNotice = `🚪 <@${interaction.user.id}> left League Lobby \`${lobby.match_id || `sa${lobby.id}`}\` (${totalAfter}/4).`;
-                if (lobby.auto_start_at && totalAfter < 4) leaveNotice += `\n⚠️ **Roster drop verified.** Automated match countdown aborted.`;
+                if (lobby.auto_start_at && totalAfter < 4) {
+                  leaveNotice = buildRosterDropNotice(lobby, `<@${interaction.user.id}>`, totalAfter);
+                }
                 await lobbyCh.send({ content: leaveNotice }).catch(() => {});
               }
             }
@@ -4134,6 +4379,7 @@ discordClient.on('messageCreate', async (message) => {
     }
   } catch (err) {}
 });
+
 discordClient.on('guildMemberAdd', async (member) => {
   try {
     if (member.user.bot) return;
@@ -4238,7 +4484,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
     await handleTournamentCheckinReaction(message, user, emojiName);
 
     const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).maybeSingle();
-    if (!lobby || lobby.status !== 'searching') return;
+    if (!lobby || lobby.status !== 'searching' || (lobby.is_league && lobby.league_status && lobby.league_status !== 'open')) return;
 
     const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
     const isJoinEmoji = !LOBBY_CONTROL_EMOJIS.has(emojiName) && !LOBBY_CONTROL_EMOJIS.has(emojiStr);
@@ -4302,10 +4548,26 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
           return;
         }
         if (totalCount === 3) {
-          const member = message.guild?.members?.cache?.get(user.id) || await message.guild?.members?.fetch(user.id).catch(() => null);
-          const identity = await resolveQueuePlayerIdentity(user.id, member);
-          if (!active3PlayerVotes.has(String(lobby.id))) await supabase.from('lobby_quick_chats').insert({ lobby_id: lobby.id, sender_name: identity.displayName, message_code: 'start_3p_ask' });
-          await supabase.from('lobby_quick_chats').insert({ lobby_id: lobby.id, sender_name: identity.displayName, message_code: 'agree_3p' });
+          const { data: rpcRes, error: rpcErr } = await supabase.rpc('lfg_bot_vote_three', {
+            p_lobby_id: Number(lobby.id),
+            p_discord_user_id: user.id,
+            p_agree: true
+          });
+
+          if (rpcErr || !rpcRes || rpcRes.ok === false) {
+            const errMsg = rpcRes?.error || rpcErr?.message || 'Only seated players can vote on a 3-player start.';
+            const warnMsg = await message.channel.send({ content: `⚠️ <@${user.id}>: ${errMsg}` }).catch(() => null);
+            if (warnMsg) setTimeout(() => warnMsg.delete().catch(() => {}), 10000);
+            return;
+          }
+
+          if (rpcRes.started) {
+            const { data: freshLobby } = await supabase.from('active_async_matches').select('*').eq('id', lobby.id).maybeSingle();
+            if (freshLobby) {
+              await executeLobbyStartSequence(freshLobby, message.channel);
+              updateQueueMessage();
+            }
+          }
           return;
         }
         return await executeLobbyStartSequence(lobby, message.channel);
@@ -4318,7 +4580,7 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
       if (!perms.canCancel) { await reaction.users.remove(user.id).catch(() => {}); return; }
       await clearHostClaimAlert(lobby.id);
       await clear3PlayerVote(lobby.id);
-      await supabase.from('active_async_matches').update({ status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
+      await supabase.from('active_async_matches').update({ status: 'cancelled', league_status: 'cancelled', auto_start_at: null }).eq('id', lobby.id);
       if (isLeague) updateQueueMessage();
       await message.edit({ content: `🚫 **Lobby cancelled by ${user.username}**`, embeds: [EmbedBuilder.from(message.embeds[0]).setTitle('❌ Lobby Cancelled').setColor(0xff0000).setDescription(`This lobby was cancelled by ${user.username}`).setFooter(null)], components: [] }).catch(() => {});
       return;
@@ -4332,13 +4594,16 @@ discordClient.on('messageReactionAdd', async (reaction, user) => {
 
     if (shouldUpdate) {
       let updatePayload = { player_ids: players, notify_user_ids: notifications };
+      const updatedLobby = { ...lobby, ...updatePayload };
       if (players.length + (lobby.guest_players?.length || 0) + (lobby.web_player_names?.length || 0) === 4 && !lobby.auto_start_at) {
         const startTargetDate = new Date(Date.now() + 15 * 60 * 1000);
         updatePayload.auto_start_at = startTargetDate.toISOString();
-        await message.channel.send({ content: `⏳ **Lobby full (4/4)!** Match will automatically begin <t:${Math.floor(startTargetDate.getTime() / 1000)}:R>. Set up your in-game rooms now!` }).catch(() => {});
+        updatedLobby.auto_start_at = updatePayload.auto_start_at;
+        const fullMsg = await buildFullLobbyCountdownMessage(updatedLobby, startTargetDate);
+        await message.channel.send({ content: fullMsg }).catch(() => {});
       }
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
-      await syncLobbyEmbed({ ...lobby, ...updatePayload });
+      await syncLobbyEmbed(updatedLobby);
       if (isLeague) updateQueueMessage();
     }
   } catch (err) {
@@ -4360,7 +4625,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
     await handleTournamentVotingReaction(message, user, emojiName, false);
 
     const { data: lobby } = await supabase.from('active_async_matches').select('*').eq('message_id', message.id).maybeSingle();
-    if (!lobby || lobby.status !== 'searching') return;
+    if (!lobby || lobby.status !== 'searching' || (lobby.is_league && lobby.league_status && lobby.league_status !== 'open')) return;
 
     const isLeague = lobby.is_league === true || String(lobby.is_league).toLowerCase() === 'true';
     const isJoinEmoji = !LOBBY_CONTROL_EMOJIS.has(emojiName) && !LOBBY_CONTROL_EMOJIS.has(emojiStr);
@@ -4384,8 +4649,7 @@ discordClient.on('messageReactionRemove', async (reaction, user) => {
       if (totalAfter < 4 && lobby.auto_start_at) {
         updatePayload.auto_start_at = null;
         if (totalAfter > 0) {
-          const matchCodeLabel = lobby.match_id ? `\`${lobby.match_id}\`` : '';
-          await message.channel.send({ content: `⚠️ **Roster drop verified.** Automated match countdown for lobby ${matchCodeLabel} aborted.` }).catch(() => {});
+          await message.channel.send({ content: buildRosterDropNotice(lobby, `<@${user.id}>`, totalAfter) }).catch(() => {});
         }
       }
       await supabase.from('active_async_matches').update(updatePayload).eq('id', lobby.id);
@@ -4443,7 +4707,9 @@ discordClient.once('clientReady', async () => {
     try {
       const { data: expiredLobbies } = await supabase.from('active_async_matches').select('*').eq('status', 'searching').not('auto_start_at', 'is', null).lte('auto_start_at', new Date().toISOString());
       if (expiredLobbies && expiredLobbies.length > 0) {
-        for (const targetLobby of expiredLobbies) await supabase.from('active_async_matches').update({ status: 'started', auto_start_at: null }).eq('id', targetLobby.id);
+        for (const targetLobby of expiredLobbies) {
+          await supabase.from('active_async_matches').update({ status: 'started', league_status: 'in_progress', auto_start_at: null }).eq('id', targetLobby.id);
+        }
       }
     } catch (cronErr) {}
   }, 30 * 1000);
