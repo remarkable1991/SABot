@@ -1,6 +1,5 @@
 const { SlashCommandBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 
-const LFG_ADMIN_ROLE = '1557469534133162045';
 const LEAGUE_LFG_CHANNEL_ID = '1557473551227818024';
 
 module.exports = {
@@ -14,13 +13,6 @@ module.exports = {
     ),
 
   async execute(interaction, { supabase, discordClient, createQueueLobby, updateQueueMessage, resolveHostIgn, promptUnknownHostIgn, pendingLeagueNotes }) {
-    if (!interaction.member.roles.cache.has(LFG_ADMIN_ROLE) && !interaction.member.permissions.has('Administrator')) {
-      return interaction.reply({
-        content: '❌ Only LFG Admins can host official League matches during the testing phase.',
-        flags: MessageFlags.Ephemeral
-      });
-    }
-
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     // Require linked IGN before hosting a League match
