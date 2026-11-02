@@ -1305,29 +1305,116 @@ async function updateLeagueInfoMessage() {
         top3Text += `\n\n🔗 **[View Full Ranking on dunestats.cc](https://dunestats.cc/leaderboard)**`;
       }
 
-      // Build "Currently Active Games (Not Yet Reported)" section
-      const unreportedMatches = (activeStartedMatches || []).filter(
-        m => m.league_status !== 'completed' && m.league_status !== 'cancelled' && !m.game_id
-      );
+// Build "Currently Active Games (Not Yet Reported)" section
+      const fourHoursAgoMs = Date.now() - 4 * 60 * 60 * 1000;
+      const candidateMatches = (activeStartedMatches || []).filter(m => {
+        if (m.league_status === 'completed' || m.league_status === 'cancelled' || m.game_id) return false;
+        const stampMs = new Date(m.updated_at || m.created_at).getTime();
+        return !isNaN(stampMs) && stampMs >= fourHoursAgoMs;
+      });
+
+      // Cross-check recent submitted League games so reported matches auto-complete even if web didn't set game_id
+      let recentSubmittedRosters = [];
+      if (candidateMatches.length > 0) {
+        const oldestLobbyIso = candidateMatches[candidateMatches.length - 1].created_at;
+        const { data: recentSubmittedGames } = await supabase
+          .from('games')
+          .select('id, created_at')
+          .eq('is_league', true)
+          .gte('created_at', oldestLobbyIso);
+
+        if (recentSubmittedGames && recentSubmittedGames.length > 0) {
+          const gIds = recentSubmittedGames.map(g => g.id);
+          const { data: gResults } = await supabase
+            .from('game_results')
+            .select('game_id, player_name')
+            .in('game_id', gIds);
+
+          recentSubmittedRosters = recentSubmittedGames.map(g => ({
+            gameId: g.id,
+            createdAtMs: new Date(g.created_at).getTime(),
+            normPlayers: new Set(
+              (gResults || [])
+                .filter(r => r.game_id === g.id)
+                .map(r => normalizeName(r.player_name))
+                .filter(Boolean)
+            )
+          }));
+        }
+      }
+
+      // Track players already seen in a newer active match so older unclosed lobbies with the same players don't stack
+      const seenActivePlayerIds = new Set();
+      const unreportedMatches = [];
+
+      for (const m of candidateMatches) {
+        const participants = await getLobbySeatedParticipants(m);
+        const lobbyCreatedMs = new Date(m.created_at).getTime();
+
+        // 1. Check if >= 3 of these players already submitted a game after this lobby was created
+        const matchedSubmittedGame = recentSubmittedRosters.find(g => {
+          if (g.createdAtMs < lobbyCreatedMs) return false;
+          let overlap = 0;
+          for (const p of participants) {
+            const pNorms = Array.from(p.normNames || []);
+            if (pNorms.some(n => g.normPlayers.has(n))) overlap++;
+          }
+          return overlap >= 3;
+        });
+
+        if (matchedSubmittedGame) {
+          // Auto-mark as completed in DB & update its LFG embed so it never shows as unreported again
+          await supabase
+            .from('active_async_matches')
+            .update({ league_status: 'completed', status: 'completed' })
+            .eq('id', m.id);
+          markLobbyCompletedEmbed(m).catch(() => {});
+          continue;
+        }
+
+        // 2. Check if >= 2 players in this lobby are already seated in a NEWER started lobby
+        const pDiscordIds = (m.player_ids || []).filter(Boolean);
+        const overlapWithNewerLobby = pDiscordIds.filter(id => seenActivePlayerIds.has(id)).length;
+        if (overlapWithNewerLobby >= 2) {
+          continue;
+        }
+
+        for (const id of pDiscordIds) seenActivePlayerIds.add(id);
+        unreportedMatches.push({ lobby: m, participants });
+      }
 
       let activeGamesText = '*No active unreported League games in progress right now.*';
       if (unreportedMatches.length > 0) {
         const activeBlocks = [];
-        for (const m of unreportedMatches.slice(0, 5)) {
-          const participants = await getLobbySeatedParticipants(m);
-          const playerLabels = participants.map(p => p.mention ? `${p.mention} (**${p.displayName}**)` : `**${p.displayName}**`).join(' · ');
+        let currentLen = 0;
+        let omittedCount = 0;
+
+        for (const { lobby: m, participants } of unreportedMatches) {
+          const playerLabels = participants.map(p => p.mention || `**${p.displayName}**`).join(' · ');
           const matchCode = m.match_id || `sa${m.id}`;
           const webLobbyUrl = `https://dunestats.cc/LFG/${m.id}`;
           const jumpLink = (m.channel_id && m.message_id)
-            ? ` · [💬 Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${m.channel_id}/${m.message_id})`
+            ? ` · [💬](https://discord.com/channels/${DISCORD_GUILD_ID}/${m.channel_id}/${m.message_id})`
             : '';
           const stampIso = m.updated_at || m.created_at;
           const startUnix = stampIso ? Math.floor(new Date(stampIso).getTime() / 1000) : null;
-          const timeStr = startUnix ? `Started <t:${startUnix}:t> (<t:${startUnix}:R>)` : 'In Progress';
+          const timeStr = startUnix ? `<t:${startUnix}:R>` : 'In Progress';
 
-          activeBlocks.push(`• **[${matchCode}](${webLobbyUrl})**${jumpLink} — ${timeStr}\n  👥 ${playerLabels || 'Players seated'}`);
+          const block = `• **[${matchCode}](${webLobbyUrl})**${jumpLink} (${timeStr}) — ${playerLabels || 'Players seated'}`;
+
+          // Guarantee we NEVER exceed Discord's 1024-char field value limit
+          if (currentLen + block.length + 45 > 1000) {
+            omittedCount++;
+          } else {
+            activeBlocks.push(block);
+            currentLen += block.length + 2;
+          }
         }
-        activeGamesText = activeBlocks.join('\n\n');
+
+        if (omittedCount > 0) {
+          activeBlocks.push(`*...and ${omittedCount} more active match(es).*`);
+        }
+        activeGamesText = activeBlocks.join('\n');
       }
 
       const activeRoleCount = await syncActiveLeaguePlayersRole();
