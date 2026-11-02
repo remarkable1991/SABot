@@ -19,7 +19,7 @@ module.exports = {
 
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
-const embed = new EmbedBuilder()
+    const embed = new EmbedBuilder()
       .setTitle('🏆 Dune: Imperium Digital — Ranked League (Season 1)')
       .setDescription(
         `🎲 **Current Active Format:**\n• Loading...\n\n` +
@@ -28,6 +28,7 @@ const embed = new EmbedBuilder()
       .setColor(0xF1C40F)
       .addFields(
         { name: '🏅 Current Top 3 Standings', value: '*Loading standings...*', inline: false },
+        { name: '⚔️ Currently Active Games (Not Yet Reported)', value: '*Checking active matches...*', inline: false },
         { name: '📊 League Activity & Season Info', value: '*Loading stats...*', inline: false }
       )
       .setTimestamp();
