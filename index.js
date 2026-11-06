@@ -3699,7 +3699,12 @@ function startRealtimeListener() {
 // -------------------------------------------------------------
 // 🏆 TOURNAMENT CONFIRMATION & CONFLICT HELPER
 // -------------------------------------------------------------
+const activeConfirmLocks = new Set();
+
 async function finalizeTournamentConfirmation(scheduleId) {
+  if (!scheduleId || activeConfirmLocks.has(scheduleId)) return false;
+  activeConfirmLocks.add(scheduleId);
+
   try {
     const { data: fresh } = await supabase.from('tournament_match_schedules').select('*').eq('id', scheduleId).single();
     if (!fresh || fresh.status === 'played') return false;
@@ -3718,26 +3723,54 @@ async function finalizeTournamentConfirmation(scheduleId) {
       }
     }
 
-    const finalWinSlot = freshSlots.find(s => freshScores[s] >= 4) || fresh.confirmed_slot;
+    // Find all slots with 4/4 votes; if multiple, pick the earliest timestamp
+    const unanimousSlots = (rawSlots || []).filter(s => (freshScores[s.label] || 0) >= 4);
+    let matchedSlot = null;
+    if (unanimousSlots.length > 0) {
+      unanimousSlots.sort((a, b) => {
+        const ma = String(a.time_text || '').match(/<t:(\d+)/);
+        const mb = String(b.time_text || '').match(/<t:(\d+)/);
+        const ta = ma ? parseInt(ma[1], 10) : Number.MAX_SAFE_INTEGER;
+        const tb = mb ? parseInt(mb[1], 10) : Number.MAX_SAFE_INTEGER;
+        return ta - tb;
+      });
+      matchedSlot = unanimousSlots[0];
+    }
+
+    const finalWinSlot = matchedSlot ? matchedSlot.label : fresh.confirmed_slot;
     if (!finalWinSlot) return false;
+    if (!matchedSlot) {
+      matchedSlot = (rawSlots || []).find(s => s.label === finalWinSlot) || null;
+    }
 
-    const matchedSlot = (rawSlots || []).find(s => s.label === finalWinSlot);
-    let confirmedTimestamp = fresh.confirmed_timestamp || null;
-    let confirmedDate = confirmedTimestamp ? new Date(confirmedTimestamp) : null;
-    const confirmedTimeText = fresh.confirmed_time_text || (matchedSlot ? matchedSlot.time_text : 'Agreed Time');
+    // Always prioritize the winning slot's own time_text over any stale confirmed_time_text!
+    const confirmedTimeText = matchedSlot?.time_text || fresh.confirmed_time_text || 'Agreed Time';
 
-    if (!confirmedTimestamp) {
-      const matchDiscord = String(confirmedTimeText).match(/<t:(\d+)/);
-      if (matchDiscord) {
-        confirmedDate = new Date(parseInt(matchDiscord[1], 10) * 1000);
+    let confirmedDate = null;
+    let confirmedTimestamp = null;
+    const matchDiscord = String(confirmedTimeText).match(/<t:(\d+)/);
+    if (matchDiscord) {
+      confirmedDate = new Date(parseInt(matchDiscord[1], 10) * 1000);
+      confirmedTimestamp = confirmedDate.toISOString();
+    } else if (fresh.confirmed_timestamp && !matchedSlot) {
+      confirmedDate = new Date(fresh.confirmed_timestamp);
+      confirmedTimestamp = confirmedDate.toISOString();
+    } else {
+      const parsed = Date.parse(confirmedTimeText);
+      if (!isNaN(parsed)) {
+        confirmedDate = new Date(parsed);
         confirmedTimestamp = confirmedDate.toISOString();
-      } else {
-        const parsed = Date.parse(confirmedTimeText);
-        if (!isNaN(parsed)) {
-          confirmedDate = new Date(parsed);
-          confirmedTimestamp = confirmedDate.toISOString();
-        }
       }
+    }
+
+    // Guard against duplicate confirmation announcements if already locked into this exact slot & time_text
+    if (
+      fresh.status === 'confirmed' &&
+      fresh.confirmed_slot === finalWinSlot &&
+      fresh.confirmed_time_text === confirmedTimeText &&
+      fresh.confirmed_timestamp === confirmedTimestamp
+    ) {
+      return false;
     }
 
     await supabase.from('tournament_match_schedules').update({
@@ -3758,7 +3791,7 @@ async function finalizeTournamentConfirmation(scheduleId) {
     const confirmEmbed = new EmbedBuilder()
       .setTitle(`📅 Match Time Confirmed: ${matchTitle}`)
       .setColor(0x2ECC71)
-      .setDescription(`All 4 players agreed! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`)
+      .setDescription(`All 4 players agreed on **${finalWinSlot}**! Match locked in for **${confirmedTimeText}**.\n\n🔗 **[Jump to Voting Post](https://discord.com/channels/${DISCORD_GUILD_ID}/${fresh.thread_id}/${fresh.message_id})** · **[Table Details & Map](${webUrl})**\n\nPlease let your opponents know on time if you need to reschedule.`)
       .setTimestamp();
     
     const components = calUrl ? [new ActionRowBuilder().addComponents(new ButtonBuilder().setLabel('Add to Google Calendar').setStyle(ButtonStyle.Link).setURL(calUrl).setEmoji('📅'))] : [];
@@ -3774,6 +3807,8 @@ async function finalizeTournamentConfirmation(scheduleId) {
   } catch (err) {
     console.error('Error in finalizeTournamentConfirmation:', err);
     return false;
+  } finally {
+    setTimeout(() => activeConfirmLocks.delete(scheduleId), 15000);
   }
 }
 
@@ -4778,17 +4813,38 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   const slotScores = {};
   for (const slot of availableSlotLabels) slotScores[slot] = 0;
   for (const uid of votedUserIds) for (const slot of currentVotes[uid]) if (slotScores[slot] !== undefined) slotScores[slot]++;
-  const winningSlot = availableSlotLabels.find(slot => slotScores[slot] >= 4);
+
+  // Pick the earliest unanimous 4/4 slot
+  const unanimousSlots = (rawSlots || []).filter(s => (slotScores[s.label] || 0) >= 4);
+  if (unanimousSlots.length > 1) {
+    unanimousSlots.sort((a, b) => {
+      const ma = String(a.time_text || '').match(/<t:(\d+)/);
+      const mb = String(b.time_text || '').match(/<t:(\d+)/);
+      return (ma ? parseInt(ma[1], 10) : Number.MAX_SAFE_INTEGER) - (mb ? parseInt(mb[1], 10) : Number.MAX_SAFE_INTEGER);
+    });
+  }
+  const winningSlot = unanimousSlots.length > 0 ? unanimousSlots[0].label : null;
 
   const previousStatus = schedule.status;
+  const previousConfirmedSlot = schedule.confirmed_slot;
   const newStatus = winningSlot ? 'confirmed' : (votesCount >= 4 ? 'conflict' : 'pending_votes');
-  await supabase.from('tournament_match_schedules').update({
+
+  const updatePayload = {
     mode: 'live',
     votes: currentVotes,
     votes_count: votesCount,
     status: newStatus,
     updated_at: new Date().toISOString()
-  }).eq('id', schedule.id);
+  };
+
+  // If no slot has 4/4 anymore, clear stale confirmation fields so old times never stick!
+  if (!winningSlot) {
+    updatePayload.confirmed_slot = null;
+    updatePayload.confirmed_time_text = null;
+    updatePayload.confirmed_timestamp = null;
+  }
+
+  await supabase.from('tournament_match_schedules').update(updatePayload).eq('id', schedule.id);
 
   const debounceKey = `schedule_${schedule.id}`;
   if (scheduleDebounceTimers.has(debounceKey)) {
@@ -4796,7 +4852,8 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
     scheduleDebounceTimers.delete(debounceKey);
   }
 
-  if (newStatus === 'confirmed') {
+  // Trigger confirmation if newly confirmed OR if the winning 4/4 slot changed (e.g. from 🇬 to 🇭)
+  if (newStatus === 'confirmed' && (previousStatus !== 'confirmed' || previousConfirmedSlot !== winningSlot)) {
     scheduleDebounceTimers.set(debounceKey, setTimeout(async () => {
       scheduleDebounceTimers.delete(debounceKey);
       await finalizeTournamentConfirmation(schedule.id);
