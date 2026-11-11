@@ -1,6 +1,8 @@
 const { SlashCommandBuilder, EmbedBuilder, ChannelType, MessageFlags, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 const TOURNAMENT_HOST_ROLE_ID = '1229360017581539421';
+const LIVE_SETTINGS_CHANNEL_ID = '1534192105533083648';
+const ASYNC_SETTINGS_CHANNEL_ID = '1084215554841264169';
 
 function parseRoundAndTable(threadTitle, fileName, defaultRoundNum) {
   const cleanTitle = threadTitle.trim();
@@ -8,7 +10,7 @@ function parseRoundAndTable(threadTitle, fileName, defaultRoundNum) {
   const lowerFile = fileName.toLowerCase();
 
   const isFinals = lowerTitle.includes('semi') || lowerTitle.includes('grand') || lowerTitle.includes('final') ||
-                  lowerFile.includes('semi') || lowerFile.includes('grand') || lowerFile.includes('final') || lowerFile.includes('playoff');
+                   lowerFile.includes('semi') || lowerFile.includes('grand') || lowerFile.includes('final') || lowerFile.includes('playoff');
 
   if (isFinals) {
     const roundType = 'Finals';
@@ -98,6 +100,16 @@ module.exports = {
         return await interaction.editReply({ content: '❌ The CSV file appears to be empty or contains only headers.' });
       }
 
+      // Fetch tournament format artwork & play_mode from public.tournaments
+      const { data: tournamentInfo } = await supabase
+        .from('tournaments')
+        .select('tournament_num, name, format_image_url, play_mode, start_date')
+        .eq('tournament_num', defaultTournamentNum)
+        .maybeSingle();
+
+      const formatImageUrl = tournamentInfo?.format_image_url || null;
+      const dbPlayMode = String(tournamentInfo?.play_mode || '').trim().toLowerCase();
+
       await interaction.editReply({ content: `⚙️ Parsing CSV file and launching private threads for Tournament #${defaultTournamentNum}...` });
 
       const parentChannel = interaction.channel;
@@ -112,10 +124,15 @@ module.exports = {
         const rawPings = columns[1];
         const slots = [columns[2], columns[3], columns[4]].filter(s => s && s !== 'No Backup Slot Secured' && s !== '');
 
-        // If time slots exist in the row OR filename includes 'live', treat as a live scheduled match
-        const isLiveMatch = isLiveFile || slots.length > 0;
+        // If time slots exist in the row OR filename includes 'live' OR DB play_mode is 'live', treat as live
+        const isLiveMatch = isLiveFile || slots.length > 0 || dbPlayMode === 'live';
         const rowMode = isLiveMatch ? 'live' : 'async';
         const rowStatus = isLiveMatch ? 'pending_votes' : 'published';
+
+        const settingsChannelId = isLiveMatch ? LIVE_SETTINGS_CHANNEL_ID : ASYNC_SETTINGS_CHANNEL_ID;
+        const settingsLine = formatImageUrl
+          ? `⚙️ **Game Settings:** <#${settingsChannelId}> · **[View Settings Image](${formatImageUrl})**`
+          : `⚙️ **Game Settings:** <#${settingsChannelId}>`;
 
         const { roundType, tableIdentifier, isFinals } = parseRoundAndTable(rawThreadTitle, fileName, defaultRoundNum);
         const matchCode = extractMatchCode(defaultTournamentNum, roundType, tableIdentifier);
@@ -167,6 +184,10 @@ module.exports = {
           .setColor(0xC9A24B)
           .setTimestamp();
 
+        if (formatImageUrl) {
+          rulesEmbed.setImage(formatImageUrl);
+        }
+
         const suggestedSlotsPayload = [];
 
         if (slots.length > 0) {
@@ -194,8 +215,8 @@ module.exports = {
               inline: false
             },
             {
-              name: '🎮 Table Setup',
-              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.',
+              name: '🎮 Table Setup & Settings',
+              value: `Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.\n${settingsLine}`,
               inline: false
             },
             {
@@ -205,7 +226,7 @@ module.exports = {
             }
           );
 
-          const slotText = suggestedSlotsPayload.map(s => `${s.label}${s.time_text}`).join('\n');
+          const slotText = suggestedSlotsPayload.map(s => `${s.label} ${s.time_text}`).join('\n');
           const nonVoterTags = playerDiscordIds.length > 0
             ? playerDiscordIds.map(id => `<@${id}>`).join(', ')
             : 'All Players';
@@ -225,8 +246,8 @@ module.exports = {
               inline: false
             },
             {
-              name: '🎮 Table Setup',
-              value: 'Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.',
+              name: '🎮 Table Setup & Settings',
+              value: `Any player can host this table. Coordinate who hosts, create the match in-game, and share the password directly in this thread.\n${settingsLine}`,
               inline: false
             },
             {
