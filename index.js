@@ -4863,6 +4863,45 @@ async function handleTournamentVotingReaction(message, user, emojiName, isAdd) {
   }
 }
 
+//⬆️ ABOVE THIS STAYS: the end of handleTournamentVotingReaction(...) ⬆️
+
+const tournamentFormatCache = new Map();
+
+async function getTournamentFormatInfo(tournamentNum) {
+  const tNum = Number(tournamentNum);
+  if (!tNum) return { formatImageUrl: null, name: null, playMode: null };
+  const cached = tournamentFormatCache.get(tNum);
+  if (cached && (Date.now() - cached.fetchedAt < 10 * 60 * 1000)) {
+    return cached;
+  }
+  try {
+    const { data } = await supabase
+      .from('tournaments')
+      .select('tournament_num, name, format_image_url, play_mode, start_date')
+      .eq('tournament_num', tNum)
+      .maybeSingle();
+    const info = {
+      formatImageUrl: data?.format_image_url || null,
+      name: data?.name || null,
+      playMode: data?.play_mode || null,
+      fetchedAt: Date.now()
+    };
+    tournamentFormatCache.set(tNum, info);
+    return info;
+  } catch (e) {
+    return { formatImageUrl: null, name: null, playMode: null };
+  }
+}
+
+function buildTournamentSettingsLine(isLive, formatImageUrl) {
+  const chId = isLive ? LIVE_SETTINGS_CHANNEL_ID : ASYNC_SETTINGS_CHANNEL_ID;
+  const label = isLive ? 'Tournament game settings' : 'Async Tournament Settings';
+  if (formatImageUrl) {
+    return `⚙️ **${label}:** <#${chId}> · **[View Settings Image](${formatImageUrl})**`;
+  }
+  return `⚙️ **${label}:** <#${chId}>`;
+}
+
 async function checkAndSendMatchReminders() {
   try {
     const now = new Date();
@@ -4878,14 +4917,41 @@ async function checkAndSendMatchReminders() {
 
         const sent = match.reminders_sent || [];
         let alertStage = null, alertTitle = '', alertDesc = '';
+        const tInfo = await getTournamentFormatInfo(match.tournament_num);
+        const liveSettingsLine = buildTournamentSettingsLine(true, tInfo.formatImageUrl);
 
-        if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) { alertStage = '36h'; alertTitle = '⏳ 36-Hour Match Reminder'; alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`; }
-        else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) { alertStage = '1h'; alertTitle = '⏰ 1-Hour Match Reminder'; alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\nPlease start getting ready and say anything in this chat to let everyone know you will be there.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>`; }
-        else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) { alertStage = '5m'; alertTitle = '🚨 5-Minute Final Call!'; alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n⚙️ Tournament game settings: <#${LIVE_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`; }
+        if (diffMinutes <= 36 * 60 && diffMinutes >= 35 * 60 && !sent.includes('36h')) {
+          alertStage = '36h';
+          alertTitle = '⏳ 36-Hour Match Reminder';
+          alertDesc = `Your tournament game is scheduled for **${match.confirmed_time_text}** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>).\n\nIf anyone needs to reschedule, please let opponents know in this thread ASAP!`;
+        } else if (diffMinutes <= 60 && diffMinutes > 5 && !sent.includes('1h')) {
+          alertStage = '1h';
+          alertTitle = '⏰ 1-Hour Match Reminder';
+          alertDesc = `Your game starts in **1 hour** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\nPlease start getting ready and say anything in this chat to let everyone know you will be there.\n\n${liveSettingsLine}`;
+        } else if (diffMinutes <= 5 && diffMinutes >= 0 && !sent.includes('5m')) {
+          alertStage = '5m';
+          alertTitle = '🚨 5-Minute Final Call!';
+          alertDesc = `Match is starting **NOW** (<t:${Math.floor(matchTime.getTime() / 1000)}:R>)!\n\n**Table Rule:** Anyone can host this table. Please create the room in-game, verify the settings, and share the password directly in this thread.\n\n${liveSettingsLine}\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`;
+        }
 
         if (alertStage) {
           const thread = await discordClient.channels.fetch(match.thread_id).catch(() => null);
-          if (thread) await thread.send({ content: `👥 ${(match.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`, embeds: [new EmbedBuilder().setTitle(alertTitle).setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12)).setDescription(alertDesc).setTimestamp()] }).catch(() => {});
+          if (thread) {
+            const reminderEmbed = new EmbedBuilder()
+              .setTitle(alertTitle)
+              .setColor(alertStage === '5m' ? 0xE74C3C : (alertStage === '1h' ? 0xE67E22 : 0xF39C12))
+              .setDescription(alertDesc)
+              .setTimestamp();
+
+            if ((alertStage === '1h' || alertStage === '5m') && tInfo.formatImageUrl) {
+              reminderEmbed.setImage(tInfo.formatImageUrl);
+            }
+
+            await thread.send({
+              content: `👥 ${(match.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`,
+              embeds: [reminderEmbed]
+            }).catch(() => {});
+          }
           await supabase.from('tournament_match_schedules').update({ reminders_sent: [...sent, alertStage], updated_at: new Date().toISOString() }).eq('id', match.id);
         }
       }
@@ -4980,9 +5046,21 @@ async function checkAndSendMatchReminders() {
         if ((now.getTime() - new Date(lastAsyncStamp).getTime()) / (1000 * 60 * 60) >= 24) {
           const thread = await discordClient.channels.fetch(asyncMatch.thread_id).catch(() => null);
           if (thread) {
+            const tInfo = await getTournamentFormatInfo(asyncMatch.tournament_num);
+            const asyncSettingsLine = buildTournamentSettingsLine(false, tInfo.formatImageUrl);
+            const asyncEmbed = new EmbedBuilder()
+              .setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`)
+              .setColor(0x3498DB)
+              .setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n${asyncSettingsLine}\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
+              .setTimestamp();
+
+            if (tInfo.formatImageUrl) {
+              asyncEmbed.setImage(tInfo.formatImageUrl);
+            }
+
             await thread.send({
               content: `👥 ${(asyncMatch.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`,
-              embeds: [new EmbedBuilder().setTitle(`🎲 Async Match Check-in: [${asyncMatch.match_code}] ${asyncMatch.round_type} ${asyncMatch.table_identifier}`).setColor(0x3498DB).setDescription(`Has your async match started in-game?\n\nOnce all 4 players are seated and the game begins, please click **Mark Game Started** below or use \`/confirm\` so the tournament clock and timers activate.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()],
+              embeds: [asyncEmbed],
               components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`async_start_${asyncMatch.id}`).setLabel('🚀 Mark Game Started').setStyle(ButtonStyle.Success))]
             }).catch(() => {});
             await supabase.from('tournament_match_schedules').update({ updated_at: now.toISOString() }).eq('id', asyncMatch.id);
@@ -4994,6 +5072,8 @@ async function checkAndSendMatchReminders() {
     console.error('Error in checkAndSendMatchReminders:', err);
   }
 }
+
+//⬇️ BELOW THIS STAYS: // 🎮 INTERACTION HANDLERS (SLASH COMMANDS, BUTTONS, MODALS) ⬇️
 // -------------------------------------------------------------
 // 🎮 INTERACTION HANDLERS (SLASH COMMANDS, BUTTONS, MODALS)
 // -------------------------------------------------------------
@@ -5355,7 +5435,7 @@ discordClient.on('interactionCreate', async (interaction) => {
         return await interaction.reply({ content: '🔕 **SP Notifications Disabled.** You will no longer be pinged for SP gains.\n*(If you want them back later, you can ask an admin to re-enable them in the database).*', flags: MessageFlags.Ephemeral }).catch(() => {});
       }
 
-      if (customId.startsWith('async_start_')) {
+if (customId.startsWith('async_start_')) {
         const matchId = customId.replace('async_start_', '');
         const { data: schedule } = await supabase.from('tournament_match_schedules').select('*').eq('id', matchId).single();
         if (!schedule) return await interaction.reply({ content: '❌ Match schedule not found.', flags: MessageFlags.Ephemeral }).catch(() => {});
@@ -5364,7 +5444,23 @@ discordClient.on('interactionCreate', async (interaction) => {
         }
         await supabase.from('tournament_match_schedules').update({ status: 'ongoing', confirmed_timestamp: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', schedule.id);
         await interaction.update({ components: [] }).catch(() => {});
-        await interaction.channel.send({ content: `👥 ${(schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`, embeds: [new EmbedBuilder().setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`).setColor(0x2ECC71).setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n⚙️ Async Tournament Settings: <#${ASYNC_SETTINGS_CHANNEL_ID}>\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`).setTimestamp()] }).catch(() => {});
+
+        const tInfo = await getTournamentFormatInfo(schedule.tournament_num);
+        const asyncSettingsLine = buildTournamentSettingsLine(false, tInfo.formatImageUrl);
+        const startedEmbed = new EmbedBuilder()
+          .setTitle(`🚀 Async Match Started: [${schedule.match_code}] ${schedule.round_type} ${schedule.table_identifier}`)
+          .setColor(0x2ECC71)
+          .setDescription(`<@${interaction.user.id}> marked this game as **Ongoing**! Turn timers are active.\n\n${asyncSettingsLine}\n\n📸 **Reporting Results**\nOnce the game concludes, upload your final screenshot to:\n🔗 [dunestats.cc/tournament](https://dunestats.cc/tournament)`)
+          .setTimestamp();
+
+        if (tInfo.formatImageUrl) {
+          startedEmbed.setImage(tInfo.formatImageUrl);
+        }
+
+        await interaction.channel.send({
+          content: `👥 ${(schedule.player_discord_ids || []).map(id => `<@${id}>`).join(' ')}`,
+          embeds: [startedEmbed]
+        }).catch(() => {});
       }
     }
   } catch (err) {
