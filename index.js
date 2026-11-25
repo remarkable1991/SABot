@@ -2364,11 +2364,12 @@ async function announceYoutubeVod(gameId) {
   try {
     const { data: game } = await supabase
       .from('games')
-      .select('id, public_match_id, youtube_url, tournament_num, is_league')
+      .select('id, public_match_id, youtube_url, youtube_vod_discord_message_id, tournament_num, is_league')
       .eq('id', gameId)
       .maybeSingle();
 
-    if (!game || !game.youtube_url) return;
+    if (!game || !game.youtube_url || !String(game.youtube_url).trim()) return;
+    if (game.youtube_vod_discord_message_id) return;
 
     const { data: results } = await supabase
       .from('game_results')
@@ -2406,10 +2407,20 @@ async function announceYoutubeVod(gameId) {
       `📺 ${game.youtube_url}`
     ].join('\n');
 
-    await vodChannel.send({
+    const sentVodMsg = await vodChannel.send({
       content,
       allowedMentions: { parse: ['users'], roles: [YOUTUBE_VOD_ROLE_ID] }
-    }).catch((err) => console.error('Failed to send VOD announcement:', err));
+    }).catch((err) => {
+      console.error('Failed to send VOD announcement:', err);
+      return null;
+    });
+
+    if (sentVodMsg?.id) {
+      await supabase
+        .from('games')
+        .update({ youtube_vod_discord_message_id: sentVodMsg.id })
+        .eq('id', gameId);
+    }
   } catch (err) {
     console.error('Error in announceYoutubeVod:', err);
   } finally {
@@ -2664,41 +2675,93 @@ function buildScanResultEmbed(game, results) {
   return embed;
 }
 
+const activeScanLocks = new Set();
+
 async function announceOrUpdateScanResult(gameId) {
-  const { data: game, error: gameError } = await supabase
-    .from('games')
-    .select('id, public_match_id, ai_scan_status, ai_scan_discord_message_id')
-    .eq('id', gameId)
-    .single();
+  if (!gameId || activeScanLocks.has(gameId)) return;
+  activeScanLocks.add(gameId);
 
-  if (gameError || !game) { console.error('Failed to fetch game for scan announcement', gameId, gameError); return; }
-  if (!game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
+  try {
+    const { data: game, error: gameError } = await supabase
+      .from('games')
+      .select('id, public_match_id, ai_scan_status, ai_scan_discord_message_id')
+      .eq('id', gameId)
+      .single();
 
-  const { data: results, error: resultsError } = await supabase
-    .from('game_results')
-    .select('*')
-    .eq('game_id', gameId)
-    .order('player_slot', { ascending: true });
+    if (gameError || !game) { console.error('Failed to fetch game for scan announcement', gameId, gameError); return; }
+    if (!game.ai_scan_status || game.ai_scan_status === AI_SCAN_IGNORED_STATUS) return;
 
-  if (resultsError || !results || !results.length) { console.error('Failed to fetch results for scan announcement', gameId, resultsError); return; }
+    const { data: results, error: resultsError } = await supabase
+      .from('game_results')
+      .select('*')
+      .eq('game_id', gameId)
+      .order('player_slot', { ascending: true });
 
-  const channel = await discordClient.channels.fetch(SCAN_RESULTS_CHANNEL_ID).catch(() => null);
-  if (!channel) { console.error('Could not find scan results channel', SCAN_RESULTS_CHANNEL_ID); return; }
+    if (resultsError || !results || !results.length) { console.error('Failed to fetch results for scan announcement', gameId, resultsError); return; }
 
-  const embed = buildScanResultEmbed(game, results);
+    const channel = await discordClient.channels.fetch(SCAN_RESULTS_CHANNEL_ID).catch(() => null);
+    if (!channel) { console.error('Could not find scan results channel', SCAN_RESULTS_CHANNEL_ID); return; }
 
-  if (game.ai_scan_discord_message_id) {
-    const existingMsg = await channel.messages.fetch(game.ai_scan_discord_message_id).catch(() => null);
-    if (existingMsg) {
-      await existingMsg.edit({ embeds: [embed] }).catch((err) => console.error('Failed to edit scan result message for game', gameId, err));
-      return;
+    const embed = buildScanResultEmbed(game, results);
+
+    if (game.ai_scan_discord_message_id) {
+      const existingMsg = await channel.messages.fetch(game.ai_scan_discord_message_id).catch(() => null);
+      if (existingMsg) {
+        await existingMsg.edit({ embeds: [embed] }).catch((err) => console.error('Failed to edit scan result message for game', gameId, err));
+        return;
+      }
     }
-  }
 
-  const sentMessage = await channel.send({ embeds: [embed] });
-  await supabase.from('games').update({ ai_scan_discord_message_id: sentMessage.id }).eq('id', gameId);
+    const sentMessage = await channel.send({ embeds: [embed] }).catch((err) => {
+      console.error('Failed to send scan result message for game', gameId, err);
+      return null;
+    });
+
+    if (sentMessage?.id) {
+      await supabase.from('games').update({ ai_scan_discord_message_id: sentMessage.id }).eq('id', gameId);
+    }
+  } finally {
+    setTimeout(() => activeScanLocks.delete(gameId), 5000);
+  }
 }
 
+async function catchUpMissedScansAndVods() {
+  try {
+    // 1. Catch up missed AI scan screenshots from the last 7 days (avoids spamming 200+ old historical games)
+    const sevenDaysAgoIso = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const { data: unannouncedScans } = await supabase
+      .from('games')
+      .select('id')
+      .is('ai_scan_discord_message_id', null)
+      .not('ai_scan_status', 'is', null)
+      .neq('ai_scan_status', AI_SCAN_IGNORED_STATUS)
+      .gte('created_at', sevenDaysAgoIso)
+      .order('created_at', { ascending: true })
+      .limit(10);
+
+    for (const g of unannouncedScans || []) {
+      await announceOrUpdateScanResult(g.id);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+
+    // 2. Catch up any unannounced YouTube VODs (even if attached to an older match)
+    const { data: unannouncedVods } = await supabase
+      .from('games')
+      .select('id')
+      .not('youtube_url', 'is', null)
+      .neq('youtube_url', '')
+      .is('youtube_vod_discord_message_id', null)
+      .order('created_at', { ascending: true })
+      .limit(10);
+
+    for (const v of unannouncedVods || []) {
+      await announceYoutubeVod(v.id);
+      await new Promise(resolve => setTimeout(resolve, 1500));
+    }
+  } catch (err) {
+    console.error('Error in catchUpMissedScansAndVods:', err);
+  }
+}
 function scheduleScanRefresh(gameId) {
   if (!gameId || pendingScanRefresh.has(gameId)) return;
   pendingScanRefresh.add(gameId);
@@ -3869,8 +3932,15 @@ async function sendTournamentConflictAlert(scheduleRecord) {
   }
 }
 
+let globalDbChannel = null;
+let globalDbReconnectTimer = null;
+let globalDbRetryCount = 0;
+
 function startGlobalDatabaseListener() {
-  supabase.channel('global_db_sync')
+  if (globalDbReconnectTimer) { clearTimeout(globalDbReconnectTimer); globalDbReconnectTimer = null; }
+  if (globalDbChannel) { supabase.removeChannel(globalDbChannel); globalDbChannel = null; }
+
+  globalDbChannel = supabase.channel('global_db_sync')
     .on('postgres_changes', { event: '*', schema: 'public' }, async (payload) => {
         const { table, eventType, new: newRecord, old: oldRecord } = payload;
         
@@ -3996,7 +4066,26 @@ function startGlobalDatabaseListener() {
         }
       }
     )
-    .subscribe((status) => { if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') supabase.realtime.setAuth(SUPABASE_SECRET_KEY); });
+    .subscribe((status, err) => {
+      if (status === 'SUBSCRIBED') {
+        globalDbRetryCount = 0;
+        catchUpMissedScansAndVods();
+        return;
+      }
+      if (status === 'TIMED_OUT' || status === 'CHANNEL_ERROR' || status === 'CLOSED') {
+        console.warn(`[Realtime] global_db_sync ${status}, reconnecting...`, err || '');
+        supabase.realtime.setAuth(SUPABASE_SECRET_KEY);
+        if (globalDbRetryCount >= REALTIME_MAX_RETRIES) globalDbRetryCount = 0;
+        globalDbRetryCount += 1;
+        const delay = Math.min(REALTIME_RETRY_DELAY_MS * globalDbRetryCount, 30000);
+        if (!globalDbReconnectTimer) {
+          globalDbReconnectTimer = setTimeout(() => {
+            globalDbReconnectTimer = null;
+            startGlobalDatabaseListener();
+          }, delay);
+        }
+      }
+    });
 }
 
 async function syncSingleUserRole(discordUsername, roleId, shouldHaveRole) {
@@ -5905,8 +5994,7 @@ discordClient.once('clientReady', async () => {
       console.error('Error registering slash commands:', error);
     }
   }
-
-  startRealtimeListener();
+startRealtimeListener();
   startGlobalDatabaseListener();
   await runInitialDatabaseSync();
   await syncGuildDirectory();
@@ -5934,10 +6022,7 @@ discordClient.once('clientReady', async () => {
     if (unannouncedSp && unannouncedSp.length > 0) unannouncedSp.forEach((e, index) => setTimeout(() => announceSpEvent(e.id), index * 2500 + 2000));
   } catch (err) {}
 
-  try {
-    const { data: unannouncedScans } = await supabase.from('games').select('id').is('ai_scan_discord_message_id', null).not('ai_scan_status', 'is', null).neq('ai_scan_status', AI_SCAN_IGNORED_STATUS).order('created_at', { ascending: false }).limit(15);
-    if (unannouncedScans && unannouncedScans.length > 0) unannouncedScans.forEach((g, index) => setTimeout(() => announceOrUpdateScanResult(g.id), index * 2500 + 5000));
-  } catch (err) {}
+  await catchUpMissedScansAndVods();
 
   setInterval(async () => { await executeGlobalSpAuditSweep(); await syncActiveLeaguePlayersRole(); await updateLeagueInfoMessage(); }, 24 * 60 * 60 * 1000);
   setInterval(async () => {
@@ -5953,6 +6038,7 @@ discordClient.once('clientReady', async () => {
   }, 30 * 1000);
   setInterval(async () => { await checkAndSendMatchReminders(); }, 60 * 1000);
   setInterval(async () => { await checkAndEscalateUnreportedLeagueMatches(); }, 2 * 60 * 1000);
+  setInterval(async () => { await catchUpMissedScansAndVods(); }, 2 * 60 * 1000);
   setInterval(async () => { await checkAndExpireCheckins(); }, 5 * 60 * 1000);
   setInterval(async () => { await checkAndExpireLobbies(); }, 5 * 60 * 1000);
   setInterval(async () => { await cleanExpiredQueueEntries(); }, 30 * 1000);
